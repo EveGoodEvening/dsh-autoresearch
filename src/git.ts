@@ -228,6 +228,19 @@ export async function reconcileRejectedHead(ctx: GitContext, executable: string,
   if (accepted !== expectedAcceptedCommit || branch !== expectedAcceptedCommit || head !== expectedAcceptedCommit) throw new GitBoundaryError('rejected-reconcile-identity', 'Accepted ref, branch, and HEAD are not the rejection target')
   await invoke(['read-tree', '--reset', '-u', expectedAcceptedCommit]); await invoke(['clean', '-ffdx']); await verifyExactWorktree(ctx, executable, worktree, expectedAcceptedCommit, options)
 }
+export async function restoreAcceptedWorktree(ctx: GitContext, executable: string, worktree: string, identity: RunGitIdentity, expectedAcceptedCommit: string, options: Omit<GitCommandOptions, 'cwd'>): Promise<void> {
+  requireSha(expectedAcceptedCommit, 'expected accepted commit')
+  await rejectExecutableGitConfig(ctx, executable, worktree, options)
+  const invoke = (args: readonly string[]) => runGit(ctx, executable, args, { ...options, cwd: worktree })
+  const branchRef = `refs/heads/${identity.branch}`
+  const accepted = await readOptionalRef(ctx, executable, identity.acceptedRef, worktree, options)
+  const branch = await readOptionalRef(ctx, executable, branchRef, worktree, options)
+  const head = (await invoke(['rev-parse', '--verify', 'HEAD^{commit}'])).stdout.trim()
+  if (accepted !== expectedAcceptedCommit || branch !== expectedAcceptedCommit || head !== expectedAcceptedCommit) throw new GitBoundaryError('restore-accepted-identity', 'Accepted ref, branch, and HEAD are not the durable restoration target')
+  await invoke(['read-tree', '--reset', '-u', expectedAcceptedCommit])
+  await invoke(['clean', '-ffdx'])
+  await verifyExactWorktree(ctx, executable, worktree, expectedAcceptedCommit, options)
+}
 
 export async function inspectRunGitState(ctx: GitContext, executable: string, discovery: RepositoryDiscovery, identity: RunGitIdentity, options: Omit<GitCommandOptions, 'cwd'>): Promise<RunGitInspection> {
   const acceptedCommit = await readOptionalRef(ctx, executable, identity.acceptedRef, discovery.repository, options)

@@ -5,7 +5,7 @@ import { DatabaseSync, type SQLOutputValue } from 'node:sqlite'
 import { StateLayout } from './state-layout.js'
 import type { ExperimentDurableState, RunDurableState } from './types.js'
 
-export const TRACKER_SCHEMA_VERSION = 3
+export const TRACKER_SCHEMA_VERSION = 4
 export const TRACKER_BUSY_TIMEOUT_MS = 5_000
 const TRACKER_RETRY_WAIT = new Int32Array(new SharedArrayBuffer(4))
 
@@ -148,6 +148,17 @@ export class DurableTracker {
       this.insertTransition(record.runId, record.experimentId, 'experiment', null, 'baseline-pending', { intent: { kind: 'create-experiment' } }, at)
     })
   }
+  recordCandidateCommit(experimentId: string, candidateCommit: string, updatedAt = new Date().toISOString()): void {
+    if (!/^[0-9a-f]{40}$/u.test(candidateCommit)) throw new TrackerTransitionError('candidate commit must be a full lowercase SHA')
+    this.transaction(() => {
+      const experiment = this.requireExperiment(experimentId)
+      if (experiment['kind'] !== 'candidate' || experiment['state'] !== 'baseline-pending') throw new TrackerTransitionError('candidate commit outcome requires a pending candidate experiment')
+      if (experiment['candidate_commit'] === candidateCommit) return
+      if (experiment['candidate_commit'] !== null) throw new TrackerTransitionError('candidate commit conflicts with durable lineage')
+      this.database.prepare('UPDATE experiments SET candidate_commit = ?, updated_at = ? WHERE experiment_id = ?').run(candidateCommit, updatedAt, experimentId)
+    })
+  }
+
   createAttemptIntent(record: AttemptRecord, intent: unknown): void {
     const at = record.createdAt ?? new Date().toISOString()
     this.transaction(() => { const experiment = this.requireExperiment(record.experimentId); if (experiment['state'] !== 'running') throw new TrackerTransitionError('attempt spawn intent requires a running experiment'); if (experiment['run_id'] !== record.runId) throw new TrackerTransitionError('attempt ownership must match experiment run'); this.database.prepare(`INSERT INTO attempts (attempt_id, run_id, experiment_id, ordinal, provider_attempt_id, spawn_intent_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(record.attemptId, record.runId, record.experimentId, record.ordinal, record.providerAttemptId ?? null, canonicalJson(intent), at, at) })
@@ -181,6 +192,18 @@ export class DurableTracker {
       return this.insertTransition(runId, null, 'run', state, state, { blockedCode: blocked.code, outcome }, at)
     })
   }
+  checkpointExperiment(experimentId: string, facts: ExperimentTransitionFacts, at = new Date().toISOString()): number {
+    return this.transaction(() => {
+      const experiment = this.requireExperiment(experimentId)
+      const state = String(experiment['state']) as ExperimentDurableState
+      if (EXPERIMENT_TERMINAL[state]) throw new TrackerTransitionError('same-state checkpoints require a nonterminal experiment')
+      if (facts.metric !== undefined && !Number.isFinite(facts.metric)) throw new TrackerTransitionError('experiment checkpoint metric must be finite')
+      const runId = String(experiment['run_id'])
+      this.validateAndInsertArtifacts(runId, experimentId, facts.artifacts ?? [])
+      this.database.prepare('UPDATE experiments SET metric = COALESCE(?, metric), decision = COALESCE(?, decision), failure_code = COALESCE(?, failure_code), failure_message = COALESCE(?, failure_message), updated_at = ? WHERE experiment_id = ?').run(facts.metric ?? null, facts.decision ?? null, facts.failureCode ?? null, facts.failureMessage ?? null, at, experimentId)
+      return this.insertTransition(runId, experimentId, 'experiment', state, state, facts, at)
+    })
+  }
 
 
   recordAttemptOutcome(attemptId: string, checkpoint: AttemptOutcomeCheckpoint, updatedAt = new Date().toISOString()): number {
@@ -203,13 +226,16 @@ export class DurableTracker {
     return this.transaction(() => {
       const run = this.requireRun(runId); const from = String(run['state']) as RunDurableState; validateTransition('run', from, to)
       if (RUN_TERMINAL[to]) {
-        if (!this.isRunQuiescent(runId)) throw new TrackerTransitionError('terminal run transition requires durable whole-process-tree quiescence for every attempt')
-        if (this.database.prepare(`SELECT 1 FROM experiments WHERE run_id = ? AND state IN ('baseline-pending','running') LIMIT 1`).get(runId)) throw new TrackerTransitionError('terminal run transition requires every experiment to be terminal')
+        const quiescent = this.isRunQuiescent(runId)
+        const unresolved = this.database.prepare(`SELECT 1 FROM experiments WHERE run_id = ? AND state IN ('baseline-pending','running') LIMIT 1`).get(runId)
+        if (!quiescent && (to !== 'blocked' || unresolved)) throw new TrackerTransitionError('terminal run transition requires durable whole-process-tree quiescence for every attempt')
+        if (unresolved) throw new TrackerTransitionError('terminal run transition requires every experiment to be terminal')
       }
       this.validateAndInsertArtifacts(runId, null, facts.artifacts ?? [])
+      const terminalQuiescent = RUN_TERMINAL[to] ? Number(this.isRunQuiescent(runId)) : null
       this.database.prepare(`UPDATE runs SET state = ?, updated_at = ?, terminal_reason = ?, blocked_code = ?, terminal_at = ?, terminal_quiescent = ?,
         best_metric = COALESCE(?, best_metric), best_commit = COALESCE(?, best_commit), best_experiment_id = COALESCE(?, best_experiment_id) WHERE run_id = ?`).run(
-        to, at, facts.terminalReason ?? null, facts.blockedCode ?? null, RUN_TERMINAL[to] ? at : null, RUN_TERMINAL[to] ? 1 : null,
+        to, at, facts.terminalReason ?? null, facts.blockedCode ?? null, RUN_TERMINAL[to] ? at : null, terminalQuiescent,
         facts.best?.metric ?? null, facts.best?.commit ?? null, facts.best?.experimentId ?? null, runId)
       return this.insertTransition(runId, null, 'run', from, to, facts, at)
     })
@@ -333,6 +359,7 @@ const MIGRATIONS: Record<number, (database: DatabaseSync) => void> = {
   `) },
   2(database) { database.exec(`ALTER TABLE runs ADD COLUMN terminal_quiescent INTEGER CHECK(terminal_quiescent IN (0,1)); CREATE TRIGGER runs_immutable_identity BEFORE UPDATE OF repository_id, repository, git_common_dir, caller_cwd, start_commit, run_tag, branch, worktree, policy_json, policy_sha256, provenance_json, provenance_sha256 ON runs BEGIN SELECT RAISE(ABORT, 'immutable run identity/policy/provenance'); END; CREATE TRIGGER experiments_immutable_lineage BEFORE UPDATE OF run_id, ordinal, kind, parent_commit, candidate_commit, command, args_json, cwd ON experiments BEGIN SELECT RAISE(ABORT, 'immutable experiment lineage/evaluator'); END; CREATE TRIGGER attempts_immutable_intent BEFORE UPDATE OF run_id, experiment_id, ordinal, spawn_intent_json ON attempts BEGIN SELECT RAISE(ABORT, 'immutable attempt identity/intent'); END;`) },
   3(_database) { /* Version 3 tightens repository-level transactional invariants without destructive table rebuilds. */ },
+  4(database) { database.exec(`DROP TRIGGER experiments_immutable_lineage; CREATE TRIGGER experiments_immutable_lineage BEFORE UPDATE OF run_id, ordinal, kind, parent_commit, candidate_commit, command, args_json, cwd ON experiments WHEN OLD.run_id != NEW.run_id OR OLD.ordinal != NEW.ordinal OR OLD.kind != NEW.kind OR OLD.parent_commit != NEW.parent_commit OR OLD.command != NEW.command OR OLD.args_json != NEW.args_json OR OLD.cwd IS NOT NEW.cwd OR OLD.candidate_commit IS NOT NULL OR NEW.candidate_commit IS NULL OR length(NEW.candidate_commit) != 40 BEGIN SELECT RAISE(ABORT, 'immutable experiment lineage/evaluator'); END;`) },
 }
 
 function validateTransition(scope: 'run', from: RunDurableState, to: RunDurableState): void
