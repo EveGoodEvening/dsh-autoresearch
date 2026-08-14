@@ -145,7 +145,7 @@ describe('durable SQLite tracker', () => {
     const tracker = DurableTracker.open(fixturePath()); tracker.createRun(initial())
     expect(() => tracker.createExperiment({ experimentId: 'orphan', runId: 'missing', ordinal: 0, kind: 'baseline', parentCommit: SHA, command: 'node', args: [] })).toThrow()
     createRunningExperiment(tracker)
-    tracker.transitionExperiment('exp-0', 'accepted', { metric: 1, decision: 'baseline' })
+    tracker.transitionExperiment('exp-0', 'accepted', { metric: 1, decision: 'accept' })
     tracker.transitionRun('run-1', 'ready', { best: { metric: 1, commit: SHA, experimentId: 'exp-0' } })
     expect(tracker.listTransitions('run-1').map((row) => row['sequence'])).toEqual([1, 2, 3, 4, 5, 6])
     expect(() => tracker.transitionRun('run-1', 'baseline-running')).toThrowError(TrackerTransitionError)
@@ -207,6 +207,18 @@ describe('durable SQLite tracker', () => {
     expect(() => tracker.transitionExperiment('exp-0', 'rejected', { metric: 1, decision: 'reject', failureCode: 'exit', failureMessage: 'bad' })).toThrowError(/failure/)
     expect(() => tracker.transitionExperiment('exp-0', 'crashed', { exitCode: 1 })).toThrowError(/failure code/)
     expect(() => tracker.transitionExperiment('exp-0', 'timed-out', { timedOut: false, failureCode: 'timeout', failureMessage: 'late' })).toThrowError(/timedOut=true/)
+    tracker.close()
+  })
+
+  it.each([
+    ['accepted', 'reject'],
+    ['rejected', 'accept'],
+    ['accepted', 'arbitrary'],
+    ['rejected', 'arbitrary'],
+  ] as const)('%s rejects mismatched decision %s', (state, decision) => {
+    const tracker = DurableTracker.open(fixturePath()); tracker.createRun(initial()); createRunningExperiment(tracker)
+    expect(() => tracker.transitionExperiment('exp-0', state, { metric: 1, decision: decision as 'accept' | 'reject' })).toThrowError(/requires a finite metric and decision/)
+    expect(tracker.database.prepare('SELECT state FROM experiments WHERE experiment_id = ?').get('exp-0')).toEqual({ state: 'running' })
     tracker.close()
   })
 

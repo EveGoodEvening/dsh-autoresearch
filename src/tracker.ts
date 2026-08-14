@@ -53,6 +53,9 @@ export interface TransitionFacts {
   intent?: unknown; outcome?: unknown; terminalReason?: string; blockedCode?: string; quiescent?: boolean
   best?: { metric: number; commit: string; experimentId: string }; artifacts?: readonly ArtifactRecord[]
 }
+export interface ExperimentTransitionFacts extends TransitionFacts {
+  metric?: number; decision?: 'accept' | 'reject'; exitCode?: number | null; signal?: string | null; timedOut?: boolean; failureCode?: string; failureMessage?: string
+}
 export interface AttemptOutcome {
   providerAttemptId?: string; providerPid?: number; providerIdentity?: string; spawnedAt?: string; exitedAt?: string
   exitCode?: number | null; signal?: string | null; timedOut?: boolean; processTreeQuiescent?: boolean; failureCode?: string; failureMessage?: string
@@ -163,7 +166,7 @@ export class DurableTracker {
       return this.insertTransition(runId, null, 'run', from, to, facts, at)
     })
   }
-  transitionExperiment(experimentId: string, to: ExperimentDurableState, facts: TransitionFacts & { metric?: number; decision?: string; exitCode?: number | null; signal?: string | null; timedOut?: boolean; failureCode?: string; failureMessage?: string } = {}, at = new Date().toISOString()): number {
+  transitionExperiment(experimentId: string, to: ExperimentDurableState, facts: ExperimentTransitionFacts = {}, at = new Date().toISOString()): number {
     return this.transaction(() => {
       const experiment = this.requireExperiment(experimentId); const from = String(experiment['state']) as ExperimentDurableState; validateTransition('experiment', from, to); validateExperimentFacts(to, facts)
       const runId = String(experiment['run_id']); this.validateAndInsertArtifacts(runId, experimentId, facts.artifacts ?? [])
@@ -172,7 +175,7 @@ export class DurableTracker {
       return this.insertTransition(runId, experimentId, 'experiment', from, to, facts, at)
     })
   }
-  commitTerminalExperiment(experimentId: string, to: Exclude<ExperimentDurableState, 'baseline-pending' | 'running'>, facts: TransitionFacts & { metric?: number; decision?: string; exitCode?: number | null; signal?: string | null; timedOut?: boolean; failureCode?: string; failureMessage?: string }, at = new Date().toISOString()): number { return this.transitionExperiment(experimentId, to, facts, at) }
+  commitTerminalExperiment(experimentId: string, to: Exclude<ExperimentDurableState, 'baseline-pending' | 'running'>, facts: ExperimentTransitionFacts, at = new Date().toISOString()): number { return this.transitionExperiment(experimentId, to, facts, at) }
 
   getRun(runId: string): Record<string, SQLOutputValue> | undefined { return this.database.prepare('SELECT * FROM runs WHERE run_id = ?').get(runId) }
   listTransitions(runId: string): Record<string, SQLOutputValue>[] { return this.database.prepare('SELECT * FROM transitions WHERE run_id = ? ORDER BY sequence').all(runId) }
@@ -269,11 +272,11 @@ const MIGRATIONS: Record<number, (database: DatabaseSync) => void> = {
 function validateTransition(scope: 'run', from: RunDurableState, to: RunDurableState): void
 function validateTransition(scope: 'experiment', from: ExperimentDurableState, to: ExperimentDurableState): void
 function validateTransition(scope: 'run' | 'experiment', from: RunDurableState | ExperimentDurableState, to: RunDurableState | ExperimentDurableState): void { const allowed = scope === 'run' ? RUN_TRANSITIONS[from as RunDurableState] : EXPERIMENT_TRANSITIONS[from as ExperimentDurableState]; if (!allowed?.includes(to as never)) throw new TrackerTransitionError(`invalid ${scope} transition ${from} -> ${to}`) }
-function validateExperimentFacts(state: ExperimentDurableState, facts: { metric?: number; decision?: string; exitCode?: number | null; signal?: string | null; timedOut?: boolean; failureCode?: string; failureMessage?: string }): void {
+function validateExperimentFacts(state: ExperimentDurableState, facts: ExperimentTransitionFacts): void {
   if (facts.metric !== undefined && !Number.isFinite(facts.metric)) throw new TrackerTransitionError('metric must be finite')
   const terminalFields = facts.metric !== undefined || facts.decision !== undefined || facts.exitCode !== undefined || facts.signal !== undefined || facts.timedOut !== undefined || facts.failureCode !== undefined || facts.failureMessage !== undefined
   if (!EXPERIMENT_TERMINAL[state]) { if (terminalFields) throw new TrackerTransitionError('nonterminal experiment transition cannot carry terminal outcome facts'); return }
-  if (state === 'accepted' || state === 'rejected') { if (facts.metric === undefined || !facts.decision) throw new TrackerTransitionError(`${state} requires a finite metric and decision`); if (hasOwn(facts, 'exitCode') || hasOwn(facts, 'signal') || hasOwn(facts, 'timedOut') || hasOwn(facts, 'failureCode') || hasOwn(facts, 'failureMessage')) throw new TrackerTransitionError(`${state} cannot carry failure facts`); return }
+  if (state === 'accepted' || state === 'rejected') { const requiredDecision = state === 'accepted' ? 'accept' : 'reject'; if (facts.metric === undefined || facts.decision !== requiredDecision) throw new TrackerTransitionError(`${state} requires a finite metric and decision '${requiredDecision}'`); if (hasOwn(facts, 'exitCode') || hasOwn(facts, 'signal') || hasOwn(facts, 'timedOut') || hasOwn(facts, 'failureCode') || hasOwn(facts, 'failureMessage')) throw new TrackerTransitionError(`${state} cannot carry failure facts`); return }
   if (facts.metric !== undefined || facts.decision !== undefined) throw new TrackerTransitionError(`${state} cannot carry decision metric facts`)
   if (!facts.failureCode || !facts.failureMessage) throw new TrackerTransitionError(`${state} requires failure code and message`)
   if (state === 'timed-out' && facts.timedOut !== true) throw new TrackerTransitionError('timed-out requires timedOut=true')
