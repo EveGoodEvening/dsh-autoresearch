@@ -5,7 +5,7 @@
 - `[x]` means verified in the current worktree or completed research/planning evidence.
 - `[ ]` means not present or not verified in the current worktree.
 - Archived implementation activity was historical evidence only until the authoritative snapshot was recovered. Chunk 01 is now closed by implementation commit `3ca85a17c03d15488269b3dbc339e3ec135d98c3`, tracker-accounting commit `4095697a6b7256937f535d739ca09678b47e333d`, review-fix commit `6524bdf`, and a clean independent correctness/accounting/security re-review after `6524bdf` with zero findings.
-- **Current dependency-ready chunk: `04-create-durable-tracker`.** Chunk 02 is closed by implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4`, tracker-accounting commit `fa4bf06ef24b590a81f883037b940f18d97c5cfc`, review-fix commit `7671499`, focused clean-generated-state verification, and clean independent package/accounting re-reviews. Chunk 03 is closed by implementation commits `9b18630` and `e22d99a`, tracker-accounting commit `99babc5dc3432be7c078fd6e792c97164ebfb19b`, review-fix commit `5e990acb1df3bcf8b7e2612c91f38443d364d2db`, passing post-fix frozen-install/typecheck/3-file-54-test/build/pack gates, and a clean independent correctness/security/accounting re-review.
+- **Current dependency-ready chunk: `05-build-host-git-and-evaluator-boundaries`.** Chunk 02 is closed by implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4`, tracker-accounting commit `fa4bf06ef24b590a81f883037b940f18d97c5cfc`, review-fix commit `7671499`, focused clean-generated-state verification, and clean independent package/accounting re-reviews. Chunk 03 is closed by implementation commits `9b18630` and `e22d99a`, tracker-accounting commit `99babc5dc3432be7c078fd6e792c97164ebfb19b`, review-fix commit `5e990acb1df3bcf8b7e2612c91f38443d364d2db`, passing post-fix frozen-install/typecheck/3-file-54-test/build/pack gates, and a clean independent correctness/security/accounting re-review. Chunk 04 is closed by implementation commit `cfc2e45366961c10b97b6fab63ffea9abfb3b5dd`, tracker-accounting commit `a1fca4c61fbf241b716a8e423a12788d16e3c71d`, review-fix commits `c9ba821923cd233c8c3112a7b3cdd2b8d311ec36`, `5ada9cd`, and `e7fb2e6`, passing final typecheck/4-file-79-test/build gates, completed correctness/security/concurrency/accounting reviews, a frozen tracker API, and a clean final re-review.
 
 ## Established research and planning state
 
@@ -287,7 +287,7 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 - [x] Complete an independent correctness, security, and accounting re-review after `5e990acb1df3bcf8b7e2612c91f38443d364d2db`; the re-review returned clean with zero findings.
 - [x] Close Chunk 03 only after its implementation, tracker-accounting, review-fix, post-fix verification, and clean re-review evidence is recorded.
 
-# Chunk 04 — `04-create-durable-tracker`
+# Chunk 04 — `04-create-durable-tracker` (CLOSED)
 
 ## SQLite schema and repositories
 
@@ -338,24 +338,31 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 - [x] Test TSV rebuild from SQLite.
 - [x] Test recovery succeeds with TSV absent/corrupted.
 
-- [x] Record focused Chunk 04 verification: `pnpm run typecheck` passed; Vitest passed 4 files / 61 tests; `pnpm run build` passed.
+- [x] Record final Chunk 04 verification after all review fixes, superseding the earlier 4-file / 61-test and 4-file / 70-test evidence: `pnpm run typecheck` passed; Vitest passed 4 files / 79 tests; `pnpm run build` passed.
 
 ## Chunk 04 review gate
 
-- [ ] Review transaction boundaries for no awaits/external side effects.
-- [ ] Review constraints/indexes against recovery queries.
-- [ ] Review source-of-truth rule: SQLite authoritative, TSV derived.
-- [ ] Review schema captures every required provenance/exit/artifact fact.
+- [x] Review transaction boundaries for no awaits/external side effects.
+- [x] Review constraints/indexes against recovery queries.
+- [x] Review source-of-truth rule: SQLite authoritative, TSV derived.
+- [x] Review schema captures every required provenance/exit/artifact fact.
 
 ## Chunk 04 implementation commit gate
 
-- [ ] Confirm tracker API is frozen enough for Git/evaluator lanes.
+- [x] Confirm tracker API is frozen enough for Git/evaluator lanes.
 - [x] Commit tracker and focused tests as `cfc2e45366961c10b97b6fab63ffea9abfb3b5dd` (`feat(tracker): add durable autoresearch state`).
 
 ## Chunk 04 tracker-accounting gate
 
 - [x] Record Chunk 04 implementation commit full SHA after it exists: `cfc2e45366961c10b97b6fab63ffea9abfb3b5dd`.
 - [x] Commit the checklist update separately from the Chunk 04 implementation commit as tracker-accounting commit `a1fca4c61fbf241b716a8e423a12788d16e3c71d`.
+
+## Chunk 04 review closure
+
+- [x] Record review-fix commits `c9ba821923cd233c8c3112a7b3cdd2b8d311ec36`, `5ada9cd`, and `e7fb2e6`.
+- [x] Complete correctness, security, concurrency, and accounting reviews after the review fixes.
+- [x] Complete a final independent re-review after `e7fb2e6`; the re-review returned clean with zero findings.
+- [x] Close Chunk 04 only after its implementation, tracker-accounting, review-fix, final verification, tracker API freeze, completed reviews, and clean final re-review evidence is recorded.
 
 # Chunk 05 — `05-build-host-git-and-evaluator-boundaries`
 
