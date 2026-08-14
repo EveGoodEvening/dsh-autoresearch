@@ -42,6 +42,25 @@ describe('exclusive autoresearch controller contract', () => {
     expect(resolveExecutable).toHaveBeenCalledTimes(1)
   })
 
+  it('promptly aborts cancellation while pre-tracker executable discovery is held open', async () => {
+    let entered!: () => void
+    const discoveryEntered = new Promise<void>(resolve => { entered = resolve })
+    const create = vi.fn()
+    const resolveExecutable = vi.fn((_command: string, _env: unknown, signal?: AbortSignal) => new Promise<string>((_resolve, reject) => {
+      entered()
+      signal?.addEventListener('abort', () => reject(signal.reason), { once: true })
+    }))
+    const ctx = { subprocess: { resolveExecutable }, agents: { create } } as unknown as Context
+    const controller = new AutoresearchRunController(ctx, { config: resolveConfig(), input, parent: parent(), signal: new AbortController().signal })
+    const running = controller.run()
+    await discoveryEntered
+    controller.cancel('operator stop')
+    await expect(running).rejects.toThrow('operator stop')
+    await expect(controller.ready).rejects.toThrow('operator stop')
+    await controller.dispose()
+    expect(create).not.toHaveBeenCalled()
+  })
+
   it('makes cancellation idempotent before initialization and never allocates a child', async () => {
     const resolveExecutable = vi.fn(async () => '/usr/bin/git')
     const create = vi.fn()
@@ -215,6 +234,27 @@ describe('controller real Git/SQLite outcomes', () => {
   ] as const)('short-circuits a %s baseline target with artifacts, no child, and zero candidate budget', async (direction, metric, target, status) => {
     const f = controllerFixture([{ stdout: `{"score":${metric}}\n` }])
     try { const { result, tracker } = await runControllerCase(f, { metric_direction: direction, target, max_experiments: 1 }); expect(result).toMatchObject({ status, best: { metric }, counts: { experimentsStarted: 0, experimentsCompleted: 0, attempts: 1 } }); expect(f.creates).toHaveLength(0); expect(tracker.database.prepare('SELECT COUNT(*) AS n FROM artifacts').get()?.['n']).toBe(2); tracker.close() } finally { rmSync(f.root, { recursive: true, force: true }) }
+  })
+
+  it('prepares a durable job binding, checkpoints cancellation before abort work, and allocates no worktree or child', async () => {
+    const f = controllerFixture([])
+    const close = vi.spyOn(DurableTracker.prototype, 'close')
+    try {
+      const controller = new AutoresearchRunController(f.ctx, { config: resolveConfig({ stateRoot: '.autoresearch-test', cleanupWorktreesOnSuccess: false, retainWorktrees: true, exportTsv: false }), input: { ...input, repository: f.root, evaluation: { command: 'fake-evaluator', args: [] } }, parent: f.parent, signal: new AbortController().signal })
+      const prepared = await controller.prepare('autoresearch-7')
+      const tracker = DurableTracker.open(prepared.tracker)
+      expect(tracker.database.prepare("SELECT outcome_json FROM transitions WHERE run_id = ? AND outcome_json IS NOT NULL ORDER BY sequence DESC LIMIT 1").get(prepared.runId)?.['outcome_json']).toContain('autoresearch-7')
+      controller.cancel('held initialization stop')
+      expect(tracker.database.prepare("SELECT intent_json FROM transitions WHERE run_id = ? AND intent_json IS NOT NULL ORDER BY sequence DESC LIMIT 1").get(prepared.runId)?.['intent_json']).toContain('held initialization stop')
+      expect(f.creates).toHaveLength(0)
+      expect(f.subprocess.specs.some(spec => spec.argv.includes('worktree'))).toBe(false)
+      tracker.close()
+      await controller.dispose()
+      expect(close).toHaveBeenCalled()
+    } finally {
+      close.mockRestore()
+      rmSync(f.root, { recursive: true, force: true })
+    }
   })
 
   it.each([

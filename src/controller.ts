@@ -37,6 +37,7 @@ export class AutoresearchRunController {
   private rejectReady!: (reason: unknown) => void
   private readonly aborter = new AbortController()
   private runPromise?: Promise<AutoresearchRunResult>
+  private preparePromise?: Promise<Runtime>
   private cancelReason = 'cancelled'
   private jobId?: string
   private readySettled = false
@@ -56,7 +57,14 @@ export class AutoresearchRunController {
     if (options.signal.aborted) abort()
   }
 
-  setJobId(jobId: string): void { if (this.runPromise) throw new Error('job id must be assigned before controller execution'); if (this.jobId !== undefined) throw new Error('job id is already assigned'); this.jobId = normalizedReason(jobId) }
+  setJobId(jobId: string): void { if (this.preparePromise || this.runPromise) throw new Error('job id must be assigned before controller preparation'); if (this.jobId !== undefined) throw new Error('job id is already assigned'); this.jobId = normalizedReason(jobId) }
+  prepare(jobId?: string): Promise<AutoresearchRunReady> {
+    if (jobId !== undefined) {
+      if (this.jobId === undefined) this.jobId = normalizedReason(jobId)
+      else if (this.jobId !== normalizedReason(jobId)) throw new Error('job id is already assigned')
+    }
+    return this.prepareRuntime().then(runtime => ({ runId: runtime.runId, tracker: runtime.tracker.path, branch: runtime.identity.branch, worktree: runtime.identity.worktree }))
+  }
   run(): Promise<AutoresearchRunResult> { return this.runPromise ??= this.execute() }
 
   cancel(reason = 'cancelled'): void {
@@ -65,19 +73,34 @@ export class AutoresearchRunController {
       this.cancelReason = normalizedReason(reason)
     }
     this.persistCancellationIntent()
-    if (this.runtime && !this.aborter.signal.aborted) this.aborter.abort(new Error(this.cancelReason))
+    if (!this.aborter.signal.aborted) this.aborter.abort(new Error(this.cancelReason))
   }
-  async dispose(): Promise<void> { this.cancel('controller disposed'); if (this.runPromise) await this.runPromise.catch(() => undefined); else if (!this.readySettled) { this.readySettled = true; this.rejectReady(new Error('controller disposed before start')) } }
+  async dispose(): Promise<void> {
+    this.cancel('controller disposed')
+    if (this.runPromise) await this.runPromise.catch(() => undefined)
+    else if (this.preparePromise) {
+      await this.preparePromise.catch(() => undefined)
+      this.runtime?.tracker.close()
+      this.runtime = undefined
+      if (!this.readySettled) { this.readySettled = true; this.rejectReady(new Error('controller disposed before start')) }
+    } else if (!this.readySettled) { this.readySettled = true; this.rejectReady(new Error('controller disposed before start')) }
+  }
+
+  private prepareRuntime(): Promise<Runtime> {
+    return this.preparePromise ??= this.initialize().then(runtime => {
+      this.runtime = runtime
+      if (this.cancellationRequested) {
+        this.persistCancellationIntent()
+        if (!this.aborter.signal.aborted) this.aborter.abort(new Error(this.cancelReason))
+      }
+      return runtime
+    })
+  }
 
   private async execute(): Promise<AutoresearchRunResult> {
     let runtime: Runtime | undefined
     try {
-      runtime = await this.initialize()
-      this.runtime = runtime
-      if (this.cancellationRequested) {
-        this.persistCancellationIntent()
-        this.aborter.abort(new Error(this.cancelReason))
-      }
+      runtime = await this.prepareRuntime()
       // Readiness is published by drive() only after durable branch/worktree allocation.
       return await this.drive(runtime)
     } catch (error) {
@@ -86,7 +109,7 @@ export class AutoresearchRunController {
       throw error
     } finally {
       runtime?.tracker.close()
-      this.runtime = undefined
+      if (this.runtime === runtime) this.runtime = undefined
     }
   }
 
@@ -117,6 +140,8 @@ export class AutoresearchRunController {
       if (!existing) tracker.createRun({ runId, repositoryId: discovery.repositoryId, repository: discovery.repository, gitCommonDir: discovery.gitCommonDir, callerCwd: discovery.callerCwd, startCommit: discovery.startCommit, runTag, branch: identity.branch, worktree: identity.worktree, agentId: String(this.options.parent.id), sessionId: String(this.options.parent.session.header.id), policy: identityPolicy, policySha256, provenance, provenanceSha256 })
       if (this.jobId !== undefined) tracker.checkpointRun(runId, { outcome: { kind: 'background-job-registered', jobId: this.jobId } })
       const runtime = { runId, policy: identityPolicy, discovery, identity, tracker, gitExecutable, policySha256, provenanceSha256, gitOptions }
+      this.runtime = runtime
+      if (this.cancellationRequested) this.persistCancellationIntent()
       tracker = undefined
       return runtime
     } catch (error) {

@@ -6,15 +6,18 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 const state = vi.hoisted(() => ({
   controllers: [] as Array<{
     ready: Promise<{ runId: string; tracker: string; branch: string; worktree: string }>
+    prepare: ReturnType<typeof vi.fn>
     setJobId: ReturnType<typeof vi.fn>
     run: ReturnType<typeof vi.fn>
     cancel: ReturnType<typeof vi.fn>
     dispose: ReturnType<typeof vi.fn>
     constructorSignal: AbortSignal
+    parent: unknown
   }>,
   releaseTool: vi.fn(),
   releasePrompt: vi.fn(),
   startError: undefined as Error | undefined,
+  throwAfterRun: false,
   runResult: {
     status: 'budget-limited', runId: 'run-1', tracker: '/tracker.sqlite',
     counts: { experimentsStarted: 0, experimentsCompleted: 0, attempts: 1 },
@@ -25,12 +28,14 @@ const state = vi.hoisted(() => ({
 vi.mock('../src/controller.js', () => ({
   AutoresearchRunController: class {
     readonly ready = Promise.resolve({ runId: 'run-1', tracker: '/tracker.sqlite', branch: 'autoresearch/run-1', worktree: '/worktree' })
+    readonly prepare = vi.fn(async (_jobId: string) => ({ runId: 'run-1', tracker: '/tracker.sqlite', branch: 'autoresearch/run-1', worktree: '/worktree' }))
     readonly setJobId = vi.fn()
     readonly cancel = vi.fn()
     readonly dispose = vi.fn(async () => undefined)
     readonly run = vi.fn(async () => state.runResult)
     readonly constructorSignal: AbortSignal
-    constructor(_ctx: unknown, options: { signal: AbortSignal }) { this.constructorSignal = options.signal; state.controllers.push(this) }
+    readonly parent: unknown
+    constructor(_ctx: unknown, options: { signal: AbortSignal; parent: unknown }) { this.constructorSignal = options.signal; this.parent = options.parent; state.controllers.push(this) }
   },
 }))
 
@@ -63,7 +68,7 @@ function harness(): Harness {
     subprocess: {},
     systemPrompt: { section(section: Harness['prompt']) { prompt = section; return state.releasePrompt } },
     tools: { register(definition: ToolDefinition) { tool = definition; return state.releaseTool } },
-    jobs: { start(spec: JobStart) { if (state.startError) throw state.startError; thisJob = spec; thisHooks = spec.run(); return 'autoresearch-1' } },
+    jobs: { start(spec: JobStart) { if (state.startError) throw state.startError; thisJob = spec; thisHooks = spec.run(); if (state.throwAfterRun) throw new Error('registry failed after run'); return 'autoresearch-1' } },
     effect(factory: () => () => Promise<void>) { cleanup = factory(); return cleanup },
   }
   apply(ctx as unknown as Context, {})
@@ -83,6 +88,7 @@ beforeEach(() => {
   state.releaseTool.mockClear()
   state.releasePrompt.mockClear()
   state.startError = undefined
+  state.throwAfterRun = false
 })
 
 describe('autoresearch input object validation', () => {
@@ -111,12 +117,13 @@ describe('autoresearch production wiring', () => {
     expect(test.job).toBeUndefined()
   })
 
-  it('starts an owner-bound background job, assigns its id before running, and waits for readiness', async () => {
+  it('durably binds the owner job before releasing controller execution and preserves agent identity', async () => {
     const test = harness()
     const result = await test.tool.execute(input, execution())
     expect(test.job).toMatchObject({ kind: 'autoresearch', owner: parent })
-    expect(state.controllers[0]?.setJobId).toHaveBeenCalledWith('autoresearch-1')
-    expect(state.controllers[0]?.setJobId.mock.invocationCallOrder[0]).toBeLessThan(state.controllers[0]?.run.mock.invocationCallOrder[0] ?? 0)
+    expect(state.controllers[0]?.parent).toBe(parent)
+    expect(state.controllers[0]?.prepare).toHaveBeenCalledWith('autoresearch-1')
+    expect(state.controllers[0]?.prepare.mock.invocationCallOrder[0]).toBeLessThan(state.controllers[0]?.run.mock.invocationCallOrder[0] ?? 0)
     expect(result).toEqual({ kind: 'background', jobId: 'autoresearch-1', runId: 'run-1', tracker: '/tracker.sqlite', branch: 'autoresearch/run-1', worktree: '/worktree' })
     await expect(test.hooks?.done).resolves.toMatchObject({ status: 'completed', detail: 'budget-limited' })
   })
@@ -153,6 +160,17 @@ describe('autoresearch production wiring', () => {
       evidence: [{ code: 'startup-failed', message: 'registry unavailable', artifacts: [] }],
     })
     expect(state.controllers).toHaveLength(0)
+  })
+
+  it('settles partial registration without executing a controller when start throws after run()', async () => {
+    state.throwAfterRun = true
+    const test = harness()
+    await expect(test.tool.execute(input, execution())).resolves.toMatchObject({ kind: 'background-start-failed', jobId: 'unregistered', status: 'failed' })
+    expect(state.controllers).toHaveLength(1)
+    expect(state.controllers[0]?.prepare).not.toHaveBeenCalled()
+    expect(state.controllers[0]?.run).not.toHaveBeenCalled()
+    expect(state.controllers[0]?.dispose).toHaveBeenCalledOnce()
+    await expect(test.hooks?.done).resolves.toMatchObject({ status: 'killed' })
   })
 
   it('uses synchronous idempotent cancellation and maps settled cancellation to killed', async () => {

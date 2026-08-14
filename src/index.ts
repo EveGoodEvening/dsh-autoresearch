@@ -17,11 +17,7 @@ import {
   type BackgroundStartFailedToolResult,
 } from './types.js'
 
-export { Config, DEFAULT_CONFIG, normalizeRunPolicy } from './config.js'
-export { boundText, renderExperimentResult, renderRunResult, renderToolResult } from './render.js'
-export { AUTORESEARCH_TOOL_OUTPUT_SCHEMA, AUTORESEARCH_TOOL_PARAMETERS, decodeExperimentResult, decodeRunResult, isTargetReached } from './types.js'
-export type * from './types.js'
-export type { Config as AutoresearchConfig, ResolvedConfig as AutoresearchResolvedConfig } from './config.js'
+export { Config }
 
 declare module '@deepseek-ai/dsh-jobs' {
   interface JobKindMap {
@@ -121,6 +117,7 @@ export function apply(ctx: Context, config: AutoresearchConfig = {}): void {
       let controller: AutoresearchRunController | undefined
       let hooks: { cancel(value?: string): void; done: Promise<JobOutcome> } | undefined
       let jobId = ''
+      let registered = false
       let cancelled = false
       let cancellationApplied = false
       let cancelReason = 'autoresearch job killed'
@@ -137,7 +134,7 @@ export function apply(ctx: Context, config: AutoresearchConfig = {}): void {
             const done = (async (): Promise<JobOutcome> => {
               try {
                 await gate.promise
-                controller!.setJobId(jobId)
+                if (!registered) throw new Error(cancelReason)
                 if (cancelled) controller!.cancel(cancelReason)
                 const running = controller!.run()
                 try {
@@ -148,8 +145,8 @@ export function apply(ctx: Context, config: AutoresearchConfig = {}): void {
                 }
                 return jobOutcome(await running, resolved.maxResultChars)
               } catch (error) {
-                readiness.resolve(startupFailure(jobId, error, cancelled))
-                const failure = startupFailure(jobId, error, cancelled)
+                readiness.resolve(startupFailure(jobId || 'unregistered', error, cancelled))
+                const failure = startupFailure(jobId || 'unregistered', error, cancelled)
                 return { status: cancelled ? 'killed' : 'failed', detail: reason(error), output: JSON.stringify(failure) }
               } finally {
                 if (controller) {
@@ -174,6 +171,9 @@ export function apply(ctx: Context, config: AutoresearchConfig = {}): void {
           },
         })
         jobId = String(id)
+        if (!controller) throw new Error('job registry did not start the autoresearch controller')
+        await controller.prepare(jobId)
+        registered = true
         gate.resolve()
         return await readiness.promise as never
       } catch (error) {
