@@ -24,14 +24,14 @@
 
 ## Recovery prerequisites
 
-- [ ] Confirm the orchestrator created and recorded all 12 durable direct refs under `refs/recovery/autoresearch/*` before the planning-only commit; do not treat this pre-planning prerequisite as Chunk 01 implementation work.
-- [ ] Confirm every recorded recovery ref resolved to its exact authoritative object id and object type `blob` before the planning-only commit.
-- [ ] Confirm the orchestrator set repository-local `git config gc.auto 0` as defense in depth, not as the snapshot-protection mechanism.
-- [ ] At Chunk 01 start, resolve every recorded recovery ref and re-confirm exact ref-to-hash identity plus object type `blob` before materialization or other implementation Git operations.
-- [ ] Re-confirm `git config --get gc.auto` is `0` as defense in depth.
-- [ ] Confirm no implementation source path already exists with conflicting content.
-- [ ] Confirm only planning artifacts are present before materialization.
-- [x] Confirm the planning-only commit contains `PLAN.md` and `CHECKLIST.md` and no recovered implementation path.
+- [x] Confirm the orchestrator created and recorded all 12 durable direct refs under `refs/recovery/autoresearch/*` before the planning-only commit; verified post hoc against the refs protected before planning commit `e7e896d8bebc51d4f2f9139d645c686d5a60bf2b`, without treating this prerequisite as Chunk 01 implementation work.
+- [x] Confirm every recorded recovery ref resolved to its exact authoritative object id and object type `blob` before the planning-only commit; independently reverified after recovery.
+- [x] Confirm the orchestrator set repository-local `git config gc.auto 0` as defense in depth, not as the snapshot-protection mechanism.
+- [x] At Chunk 01 start, resolve every recorded recovery ref and re-confirm exact ref-to-hash identity plus object type `blob` before materialization or other implementation Git operations.
+- [x] Re-confirm `git config --get gc.auto` is `0` as defense in depth.
+- [x] Confirm no implementation source path already exists with conflicting content.
+- [x] Confirm only planning artifacts are present before materialization.
+- [x] Confirm planning-only commit `e7e896d8bebc51d4f2f9139d645c686d5a60bf2b` contains `PLAN.md` and `CHECKLIST.md` and no recovered implementation path.
 - [ ] If `git fsck --full` reports `missing tree 4b825dc642cb6eb9a060e54bf8d69288fbee4904` for this unborn repository, record it as the benign empty-tree warning rather than a missing recovery blob.
 - [x] Create `src/` and `tests/` directories only as required for recovered files.
 
@@ -49,9 +49,9 @@
 - [x] Materialize `AGENTS.md` from `732a04d9d2f809031da3e8c2f6fce4a0fe2dca0d`.
 - [x] Materialize `vitest.config.ts` from `f8f64617446fcf5790b200c5c0d22d9b59b7ac35`.
 - [x] Materialize `src/index.ts` from `3bb484965e3e80df22c644bd48478cdc3a6cc739`.
-- [ ] Do not reconstruct any source file from archived transcript payloads.
-- [ ] Do not apply the aborted test annotation cleanup.
-- [ ] Do not fix the Schemastery link, formatting, code, tests, docs, or metadata in the recovery snapshot.
+- [x] Do not reconstruct any source file from archived transcript payloads; independent review confirmed all 12 paths are byte-identical to their protected recovery blobs.
+- [x] Do not apply the aborted test annotation cleanup; independent review confirmed it is absent.
+- [x] Do not fix the Schemastery link, formatting, code, tests, docs, or metadata in the recovery snapshot; independent review confirmed the recovered snapshot remained unchanged.
 
 ## Recovery verification gate
 
@@ -74,14 +74,14 @@
 - [x] Run the recovered five-test suite (four unit tests plus one integration test) once when the recovered install succeeds. `pnpm run test` passed 2 files / 5 tests.
 - [x] Run the recovered build once when the recovered install succeeds. `pnpm run build` passed.
 - [x] Run the recovered pack once when the recovered install succeeds. `pnpm pack` produced `dsh-autoresearch-0.1.0.tgz`.
-- [ ] Preserve every attempted recovery command/output for the post-implementation tracker-accounting commit; do not add provenance files to the exact 12-path recovery commit.
+- [x] Preserve every attempted recovery command/output for the post-implementation tracker-accounting commit; command/output provenance was recorded in `CHECKLIST.md`, and no provenance file entered recovery commit `3ca85a17c03d15488269b3dbc339e3ec135d98c3`.
 
 ## Recovery review gate
 
-- [ ] Review the staged recovery diff for exact path set and no content edits.
-- [ ] Confirm no generated files, dependency repairs, formatting, or planning-driven redesign entered the recovery snapshot.
-- [ ] Confirm the known runtime Schemastery link defect remains unchanged for Chunk 02.
-- [ ] Confirm the aborted test typing/style edit is absent.
+- [x] Review the staged recovery diff for exact path set and no content edits; independent reviews confirmed commit `3ca85a17c03d15488269b3dbc339e3ec135d98c3` contains exactly the 12 authoritative blobs.
+- [x] Confirm no generated files, dependency repairs, formatting, or planning-driven redesign entered the recovery snapshot.
+- [x] Confirm the known runtime Schemastery link defect remains unchanged for Chunk 02.
+- [x] Confirm the aborted test typing/style edit is absent.
 
 ## Recovery implementation commit gate
 
@@ -92,7 +92,7 @@
 
 - [x] Record the recovery implementation commit full SHA and command/output provenance in `CHECKLIST.md`: `3ca85a17c03d15488269b3dbc339e3ec135d98c3`; frozen install/build, typecheck, 2-file/5-test suite, standalone build, and pack all succeeded; pack produced `dsh-autoresearch-0.1.0.tgz`.
 - [x] Confirm the recovery implementation commit contains exactly the 12 authoritative blobs and no Chunk 02 or accounting work.
-- [ ] Commit that checklist/provenance update as a separate tracker-accounting commit.
+- [x] Commit that checklist/provenance update as separate tracker-accounting commit `4095697a6b7256937f535d739ca09678b47e333d` (`docs: record recovered snapshot verification`).
 
 # Chunk 02 — `02-fix-publishability-and-package-contract`
 

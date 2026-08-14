@@ -65,18 +65,18 @@ Create only these 12 recovered paths from Git objects, preserving bytes exactly:
 
 | Path | Durable recovery ref | Blob |
 |---|---|---|
-| `.gitignore` | `refs/recovery/autoresearch/01-gitignore` | `e17975f37c2e5871018ed4cee7b190d022e11b87` |
-| `pnpm-lock.yaml` | `refs/recovery/autoresearch/02-pnpm-lock` | `8555ed23387507503686e931818284961aaebc00` |
-| `README.md` | `refs/recovery/autoresearch/03-readme` | `878fed41726089151600c4205a9f4a3571fd9c4a` |
-| `tests/autoresearch.spec.ts` | `refs/recovery/autoresearch/04-autoresearch-spec` | `a8c6214ecd99f0c2fe9ada08fcf00588040c5c07` |
-| `cordis.patch.yml` | `refs/recovery/autoresearch/05-cordis-patch` | `2983549a5f076b657f7793e65fe6baa1bd9a92ce` |
-| `tsconfig.json` | `refs/recovery/autoresearch/06-tsconfig` | `4a73dda7e2035dc42ece6532a3fb4a005dce3f90` |
-| `package.json` | `refs/recovery/autoresearch/07-package` | `cbf644cfc0fcc38dc904e716d576d2feee8c4602` |
-| `tests/workflow.integration.spec.ts` | `refs/recovery/autoresearch/08-workflow-integration-spec` | `cf39877043d803411ded03061defc7cd6a73a929` |
-| `LICENSE` | `refs/recovery/autoresearch/09-license` | `114b31ff345b2b547a4cc070163e86a34d6f86fb` |
-| `AGENTS.md` | `refs/recovery/autoresearch/10-agents` | `732a04d9d2f809031da3e8c2f6fce4a0fe2dca0d` |
-| `vitest.config.ts` | `refs/recovery/autoresearch/11-vitest-config` | `f8f64617446fcf5790b200c5c0d22d9b59b7ac35` |
-| `src/index.ts` | `refs/recovery/autoresearch/12-src-index` | `3bb484965e3e80df22c644bd48478cdc3a6cc739` |
+| `.gitignore` | `refs/recovery/autoresearch/gitignore` | `e17975f37c2e5871018ed4cee7b190d022e11b87` |
+| `pnpm-lock.yaml` | `refs/recovery/autoresearch/pnpm-lock` | `8555ed23387507503686e931818284961aaebc00` |
+| `README.md` | `refs/recovery/autoresearch/readme` | `878fed41726089151600c4205a9f4a3571fd9c4a` |
+| `tests/autoresearch.spec.ts` | `refs/recovery/autoresearch/unit-tests` | `a8c6214ecd99f0c2fe9ada08fcf00588040c5c07` |
+| `cordis.patch.yml` | `refs/recovery/autoresearch/patch` | `2983549a5f076b657f7793e65fe6baa1bd9a92ce` |
+| `tsconfig.json` | `refs/recovery/autoresearch/tsconfig` | `4a73dda7e2035dc42ece6532a3fb4a005dce3f90` |
+| `package.json` | `refs/recovery/autoresearch/package` | `cbf644cfc0fcc38dc904e716d576d2feee8c4602` |
+| `tests/workflow.integration.spec.ts` | `refs/recovery/autoresearch/integration-tests` | `cf39877043d803411ded03061defc7cd6a73a929` |
+| `LICENSE` | `refs/recovery/autoresearch/license` | `114b31ff345b2b547a4cc070163e86a34d6f86fb` |
+| `AGENTS.md` | `refs/recovery/autoresearch/agents` | `732a04d9d2f809031da3e8c2f6fce4a0fe2dca0d` |
+| `vitest.config.ts` | `refs/recovery/autoresearch/vitest` | `f8f64617446fcf5790b200c5c0d22d9b59b7ac35` |
+| `src/index.ts` | `refs/recovery/autoresearch/source` | `3bb484965e3e80df22c644bd48478cdc3a6cc739` |
 
 Before the planning-only commit, the orchestrator must create and record one durable direct ref under `refs/recovery/autoresearch/*` for each authoritative object, verify each ref resolves to the exact expected object id, verify each resolved object type is `blob`, and set repository-local `git config gc.auto 0` as additional defense in depth. These durable refs, not `gc.auto`, protect the snapshot from pruning. At Chunk 01 start, resolve the recorded refs again and verify exact ref-to-hash identity plus blob type before any materialization. Materialize each file from the verified ref/object, create only necessary directories, verify every path with `git hash-object`, stage exactly the 12 recovered paths, and commit a provenance-only recovery snapshot separate from the already-committed planning artifacts. Do not use `git checkout`: there is no authoritative source tree/commit. Do not format, repair dependencies, or include the aborted test cleanup.
 
