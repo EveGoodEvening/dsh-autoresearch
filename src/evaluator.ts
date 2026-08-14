@@ -17,6 +17,18 @@ export interface EvaluatorProvenanceInput {
   readonly policy?: unknown
 }
 
+export interface EvaluatorWorktreeIdentity {
+  readonly canonical: string
+  readonly dev: number
+  readonly ino: number
+}
+
+export interface EvaluatorBoundaryIdentity {
+  readonly worktree: EvaluatorWorktreeIdentity
+  readonly normalizedEvaluation: EvaluatorArgv
+  readonly normalizedPolicySha256: string
+}
+
 export interface FrozenEvaluatorProvenance {
   readonly parserVersion: typeof EVALUATOR_PARSER_VERSION
   readonly evaluatorFileHashes: Readonly<Record<string, string>>
@@ -58,6 +70,7 @@ export interface EvaluatorPersistence {
 export interface EvaluatorRunOptions {
   readonly subprocess: { spawn(spec: SubprocessSpawnSpec): SubprocessHandle }
   readonly worktree: string
+  readonly boundary: EvaluatorBoundaryIdentity
   readonly evaluation: EvaluatorArgv
   readonly metricName: string
   readonly metricDirection: 'minimize' | 'maximize'
@@ -76,6 +89,13 @@ export interface EvaluatorRunOptions {
   readonly now?: () => Date
 }
 
+export function captureEvaluatorWorktreeIdentity(worktree: string): EvaluatorWorktreeIdentity {
+  const canonical = canonicalWorktree(worktree)
+  const stat = statSync(canonical)
+  if (!stat.isDirectory()) throw new TypeError('evaluator worktree must be a directory')
+  return Object.freeze({ canonical, dev: stat.dev, ino: stat.ino })
+}
+
 export function freezeEvaluatorProvenance(worktree: string, input: EvaluatorProvenanceInput): FrozenEvaluatorProvenance {
   const root = canonicalWorktree(worktree)
   const fileHashes: Record<string, string> = Object.create(null) as Record<string, string>
@@ -90,7 +110,7 @@ export function freezeEvaluatorProvenance(worktree: string, input: EvaluatorProv
     metricName: input.metricName,
     metricDirection: input.metricDirection,
     parserVersion: EVALUATOR_PARSER_VERSION,
-    policy: input.policy ?? null,
+    policySha256: sha256(canonicalJson(input.policy ?? null)),
   }
   const canonical = canonicalJson(value)
   return { parserVersion: EVALUATOR_PARSER_VERSION, evaluatorFileHashes: fileHashes, canonical, sha256: sha256(canonical) }
@@ -129,10 +149,12 @@ export async function runEvaluator(options: EvaluatorRunOptions): Promise<Evalua
   validatePositive(options.maxStdoutBytes, 'maxStdoutBytes')
   validatePositive(options.maxStderrBytes, 'maxStderrBytes')
   const now = options.now ?? (() => new Date())
-  const root = canonicalWorktree(options.worktree)
+  const env = explicitEnvironment(options.environment ?? {})
+  const secrets = Object.values(env)
+  const root = assertBoundaryIdentity(options.worktree, options.boundary)
+  assertNormalizedEvaluation(options.evaluation, options.boundary.normalizedEvaluation)
   const cwdIdentity = capturePathIdentity(root, options.evaluation.cwd ?? '.', 'evaluator cwd', true)
   const cwd = cwdIdentity.canonical
-  const env = explicitEnvironment(options.environment ?? {})
   const persistedEnv = hashedEnvironment(env)
   const provenance = freezeEvaluatorProvenance(root, {
     evaluation: options.evaluation,
@@ -141,27 +163,32 @@ export async function runEvaluator(options: EvaluatorRunOptions): Promise<Evalua
     environment: env,
     metricName: options.metricName,
     metricDirection: options.metricDirection,
-    policy: options.policy,
+    policy: { normalizedPolicySha256: options.boundary.normalizedPolicySha256, policy: options.policy ?? null },
   })
   const argv = Object.freeze([options.evaluation.command, ...options.evaluation.args])
-  options.persistence.persistSpawnIntent({ argv, cwd, env: persistedEnv, provenanceSha256: provenance.sha256 })
+  persistSafely(() => options.persistence.persistSpawnIntent({ argv, cwd, env: persistedEnv, provenanceSha256: provenance.sha256 }), secrets)
   const controller = new AbortController()
   let cause: 'timeout' | 'cancelled' | undefined
   const cancel = (): void => { if (cause === undefined) cause = 'cancelled'; controller.abort() }
-  if (options.signal?.aborted) {
+  const callerSignal = options.signal
+  callerSignal?.addEventListener('abort', cancel, { once: true })
+  if (callerSignal?.aborted) cancel()
+  if (controller.signal.aborted) {
+    callerSignal?.removeEventListener('abort', cancel)
     const facts: EvaluatorAttemptFacts = {
       exitedAt: now().toISOString(), exitCode: null, signal: null, timedOut: false, cancelled: true, processTreeQuiescent: true,
     }
     const artifacts = persistArtifacts(options.artifactDirectory, options.artifactPrefix, undefined, undefined, Object.values(env))
-    options.persistence.persistAttemptOutcome(facts, artifacts)
+    persistSafely(() => options.persistence.persistAttemptOutcome(facts, artifacts), secrets)
     return { kind: 'failed', code: 'cancelled', message: 'evaluator cancelled', provenanceSha256: provenance.sha256, exit: facts, artifacts }
   }
-  options.signal?.addEventListener('abort', cancel, { once: true })
   const timeout = setTimeout(() => { if (cause === undefined) cause = 'timeout'; controller.abort() }, options.timeoutMs)
   let handle: SubprocessHandle | undefined
   let outcome: SubprocessOutcome = { exitCode: null, signal: null }
   let spawnedAt: string | undefined
   let spawnFailure: unknown
+  let terminationRequested = false
+  let terminateOnAbort: (() => void) | undefined
   try {
     assertPathIdentity(root, cwdIdentity, 'evaluator cwd')
     handle = options.subprocess.spawn({
@@ -173,19 +200,25 @@ export async function runEvaluator(options: EvaluatorRunOptions): Promise<Evalua
       },
     })
     assertPathIdentity(root, cwdIdentity, 'evaluator cwd')
+    terminateOnAbort = (): void => {
+      if (!terminationRequested) { terminationRequested = true; handle?.terminate() }
+    }
+    controller.signal.addEventListener('abort', terminateOnAbort, { once: true })
+    if (controller.signal.aborted) terminateOnAbort()
     spawnedAt = now().toISOString()
-    options.persistence.persistSpawnObserved({ providerPid: handle.pid, spawnedAt })
+    persistSafely(() => options.persistence.persistSpawnObserved({ providerPid: handle!.pid, spawnedAt: spawnedAt! }), secrets)
     try { outcome = await handle.done } catch (error) { spawnFailure = error }
   } catch (error) {
     spawnFailure = error
   } finally {
     clearTimeout(timeout)
-    options.signal?.removeEventListener('abort', cancel)
+    callerSignal?.removeEventListener('abort', cancel)
+    if (terminateOnAbort !== undefined) controller.signal.removeEventListener('abort', terminateOnAbort)
   }
 
   let quiescent = handle === undefined
   if (handle !== undefined) {
-    if (cause !== undefined || spawnFailure !== undefined) handle.terminate()
+    if ((cause !== undefined || spawnFailure !== undefined) && !terminationRequested) { terminationRequested = true; handle.terminate() }
     quiescent = await handle.waitForExit()
   }
   const stdoutRead = handle?.collected.stdout?.readFrom(0)
@@ -197,7 +230,7 @@ export async function runEvaluator(options: EvaluatorRunOptions): Promise<Evalua
     timedOut: cause === 'timeout', cancelled: cause === 'cancelled', processTreeQuiescent: quiescent,
     ...(spawnFailure === undefined ? {} : { failureCode: 'spawn', failureMessage: safeErrorMessage(spawnFailure, Object.values(env)) }),
   }
-  options.persistence.persistAttemptOutcome(facts, artifacts)
+  persistSafely(() => options.persistence.persistAttemptOutcome(facts, artifacts), secrets)
   const base = { provenanceSha256: provenance.sha256, exit: facts, artifacts } as const
   if (spawnFailure !== undefined) return { kind: 'failed', code: 'spawn', message: safeErrorMessage(spawnFailure, Object.values(env)), ...base }
   if (cause === 'cancelled') return { kind: 'failed', code: 'cancelled', message: 'evaluator cancelled', ...base }
@@ -210,6 +243,26 @@ export async function runEvaluator(options: EvaluatorRunOptions): Promise<Evalua
   catch (error) { return { kind: 'failed', code: 'metric-protocol', message: safeErrorMessage(error, Object.values(env)), ...base } }
 }
 
+
+function assertBoundaryIdentity(worktree: string, boundary: EvaluatorBoundaryIdentity): string {
+  if (!/^[0-9a-f]{64}$/u.test(boundary.normalizedPolicySha256)) throw new TypeError('normalizedPolicySha256 must be a lowercase SHA-256')
+  const requested = resolve(worktree)
+  if (requested !== boundary.worktree.canonical) throw new TypeError('evaluator worktree does not match the controller-supplied canonical worktree')
+  const canonical = canonicalWorktree(requested)
+  const stat = statSync(canonical)
+  if (canonical !== boundary.worktree.canonical || stat.dev !== boundary.worktree.dev || stat.ino !== boundary.worktree.ino) {
+    throw new TypeError('evaluator worktree identity changed before evaluation')
+  }
+  return canonical
+}
+
+function assertNormalizedEvaluation(requested: EvaluatorArgv, normalized: EvaluatorArgv): void {
+  if (canonicalJson(requested) !== canonicalJson(normalized)) throw new TypeError('evaluator argv/cwd does not match the frozen normalized policy')
+}
+
+function persistSafely(action: () => void, secrets: readonly string[]): void {
+  try { action() } catch (error) { throw new Error(safeErrorMessage(error, secrets)) }
+}
 
 interface PathIdentity { readonly canonical: string; readonly dev: number; readonly ino: number }
 

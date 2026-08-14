@@ -1,10 +1,10 @@
 import { spawn } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { SubprocessHandle, SubprocessOutcome, SubprocessOutputRead, SubprocessOutputReader, SubprocessSpawnSpec } from '@deepseek-ai/dsh-subprocess'
-import { freezeEvaluatorProvenance, parseFinalLineMetric, runEvaluator } from '../src/evaluator.ts'
+import { captureEvaluatorWorktreeIdentity, freezeEvaluatorProvenance, parseFinalLineMetric, runEvaluator } from '../src/evaluator.ts'
 import type { EvaluatorPersistence } from '../src/evaluator.ts'
 
 interface FakeOptions {
@@ -142,19 +142,28 @@ function persistence(): EvaluatorPersistence & {
 
 function options(runtime = fakeRuntime(), overrides: Record<string, unknown> = {}) {
   const paths = fixture()
+  const evaluation = (overrides.evaluation ?? { command: 'node', args: ['evaluate.mjs'], cwd: 'bench' }) as { command: string; args: string[]; cwd?: string }
+  const boundary = overrides.boundary ?? {
+    worktree: captureEvaluatorWorktreeIdentity(paths.root),
+    normalizedEvaluation: evaluation,
+    normalizedPolicySha256: 'a'.repeat(64),
+  }
   return {
     runtime,
     paths,
     value: {
       subprocess: runtime.runtime,
       worktree: paths.root,
-      evaluation: { command: 'node', args: ['evaluate.mjs'], cwd: 'bench' },
+      boundary,
+      evaluation,
       metricName: 'score', metricDirection: 'minimize' as const,
       timeoutMs: 1_000, terminationGraceMs: 25, maxStdoutBytes: 128, maxStderrBytes: 64,
       artifactDirectory: paths.artifacts, artifactPrefix: 'attempt-1', environment: { LANG: 'C' },
       evaluatorFiles: ['bench/evaluate.mjs'], dataset: { version: 'v1', name: 'fixture' }, policy: { tie: 'reject' },
       persistence: persistence(),
       ...overrides,
+      boundary,
+      evaluation,
     },
   }
 }
@@ -260,6 +269,29 @@ describe('host-owned evaluator execution', () => {
     expect(setup.value.persistence.outcome?.[0]).toMatchObject({ cancelled: true, exitCode: null, signal: null })
   })
 
+  it('atomically observes cancellation that races listener registration without spawning', async () => {
+    const controller = new AbortController()
+    const racingSignal = {
+      get aborted() { return controller.signal.aborted },
+      addEventListener(type: string, listener: EventListenerOrEventListenerObject, options?: boolean | AddEventListenerOptions) {
+        controller.abort()
+        controller.signal.addEventListener(type, listener, options)
+      },
+      removeEventListener(type: string, listener: EventListenerOrEventListenerObject, options?: boolean | EventListenerOptions) {
+        controller.signal.removeEventListener(type, listener, options)
+      },
+    } as AbortSignal
+    const runtime = fakeRuntime()
+    const setup = options(runtime, { signal: racingSignal })
+
+    const result = await runEvaluator(setup.value)
+
+    expect(result).toMatchObject({ kind: 'failed', code: 'cancelled', exit: { cancelled: true, processTreeQuiescent: true } })
+    expect(result.exit).not.toHaveProperty('providerPid')
+    expect(runtime.spec).toBeUndefined()
+    expect(setup.value.persistence.events).toEqual(['intent', 'outcome'])
+  })
+
   it.each(['timeout', 'repeated-cancellation'] as const)('kills a real evaluator descendant tree before persisting %s', async mode => {
     const paths = fixture()
     const childPidPath = join(paths.root, 'child.pid')
@@ -273,9 +305,11 @@ describe('host-owned evaluator execution', () => {
     ].join(';')
     const controller = new AbortController()
     const durable = persistence()
+    const evaluation = { command: process.execPath, args: ['-e', script], cwd: 'bench' }
     const pending = runEvaluator({
       subprocess: new LocalSubprocess(), worktree: paths.root,
-      evaluation: { command: process.execPath, args: ['-e', script], cwd: 'bench' },
+      boundary: { worktree: captureEvaluatorWorktreeIdentity(paths.root), normalizedEvaluation: evaluation, normalizedPolicySha256: 'b'.repeat(64) },
+      evaluation,
       metricName: 'score', metricDirection: 'minimize', timeoutMs: mode === 'timeout' ? 150 : 5_000,
       terminationGraceMs: 30, maxStdoutBytes: 128, maxStderrBytes: 64,
       artifactDirectory: paths.artifacts, artifactPrefix: mode, persistence: durable,
@@ -368,6 +402,118 @@ describe('host-owned evaluator execution', () => {
     expect(result).toMatchObject({ kind: 'failed', code: 'spawn', exit: { processTreeQuiescent: true } })
     expect(setup.runtime.terminated).toBe(1)
   })
+
+  it('binds cwd and argv to the frozen normalized policy and immutable controller worktree identity', async () => {
+    const mismatchedPolicy = options(fakeRuntime(), { evaluation: { command: 'node', args: ['evaluate.mjs'], cwd: 'bench' } })
+    mismatchedPolicy.value.boundary = { ...mismatchedPolicy.value.boundary, normalizedEvaluation: { command: 'node', args: ['other.mjs'], cwd: 'bench' } }
+    await expect(runEvaluator(mismatchedPolicy.value)).rejects.toThrow(/frozen normalized policy/)
+    expect(mismatchedPolicy.runtime.spec).toBeUndefined()
+
+    const replaced = options()
+    const displaced = `${replaced.paths.root}-displaced`
+    roots.push(displaced)
+    renameSync(replaced.paths.root, displaced)
+    mkdirSync(replaced.paths.root)
+    mkdirSync(join(replaced.paths.root, 'bench'))
+    writeFileSync(join(replaced.paths.root, 'bench', 'evaluate.mjs'), 'replacement\n')
+    await expect(runEvaluator(replaced.value)).rejects.toThrow(/worktree identity changed/)
+    expect(replaced.runtime.spec).toBeUndefined()
+
+    const alias = options()
+    const link = `${alias.paths.root}-alias`; roots.push(link)
+    symlinkSync(alias.paths.root, link, 'dir')
+    alias.value.worktree = link
+    await expect(runEvaluator(alias.value)).rejects.toThrow(/controller-supplied canonical worktree/)
+    expect(alias.runtime.spec).toBeUndefined()
+  })
+
+  it('binds provenance to the normalized policy hash and hashes canonical file bytes independent of input ordering', async () => {
+    const setup = options()
+    writeFileSync(join(setup.paths.root, 'bench', 'second.mjs'), 'second\n')
+    const input = { evaluation: setup.value.evaluation, evaluatorFiles: ['bench/second.mjs', 'bench/evaluate.mjs'], metricName: 'score', metricDirection: 'minimize' as const, policy: { normalizedPolicySha256: 'a'.repeat(64) } }
+    const first = freezeEvaluatorProvenance(setup.paths.root, input)
+    const reordered = freezeEvaluatorProvenance(realpathSync(setup.paths.root), { ...input, evaluatorFiles: [...input.evaluatorFiles].reverse() })
+    expect(first).toEqual(reordered)
+    expect(freezeEvaluatorProvenance(setup.paths.root, { ...input, policy: { normalizedPolicySha256: 'b'.repeat(64) } }).sha256).not.toBe(first.sha256)
+    expect(() => freezeEvaluatorProvenance(setup.paths.root, { ...input, evaluatorFiles: ['/etc/passwd'] })).toThrow(/relative/)
+    expect(() => freezeEvaluatorProvenance(setup.paths.root, { ...input, evaluatorFiles: ['../outside'] })).toThrow(/escapes/)
+
+    const original = join(setup.paths.root, 'bench', 'evaluate.mjs')
+    const moved = join(setup.paths.root, 'bench', 'old.mjs')
+    const before = freezeEvaluatorProvenance(setup.paths.root, { ...input, evaluatorFiles: ['bench/evaluate.mjs'] })
+    renameSync(original, moved)
+    writeFileSync(original, 'replacement bytes\n')
+    const after = freezeEvaluatorProvenance(setup.paths.root, { ...input, evaluatorFiles: ['bench/evaluate.mjs'] })
+    expect(after.sha256).not.toBe(before.sha256)
+    expect(after.evaluatorFileHashes['bench/evaluate.mjs']).not.toBe(before.evaluatorFileHashes['bench/evaluate.mjs'])
+  })
+
+  it('redacts environment values from every failure, persistence error, and spill surface', async () => {
+    const secret = 'raw-environment-value-never-durable'
+    const failures: FakeOptions[] = [
+      { exitCode: 9, stdout: reader(`${secret}\n`) },
+      { signal: 'SIGTERM', exitCode: null, stderr: reader(secret) },
+      { waitQuiescent: false, stdout: reader(secret) },
+      { spawnError: new Error(secret) },
+      { stdout: reader(`${secret}\n{"wrong":1}\n`) },
+      { stdout: reader(secret, true) },
+    ]
+    for (const fake of failures) {
+      const setup = options(fakeRuntime(fake), { environment: { ORDINARY: secret }, policy: { note: secret } })
+      const result = await runEvaluator(setup.value)
+      expect(JSON.stringify({ result, intent: setup.value.persistence.intent, outcome: setup.value.persistence.outcome })).not.toContain(secret)
+      expect(result.artifacts.map(item => readFileSync(item.location, 'utf8')).join('\n')).not.toContain(secret)
+    }
+
+    const spillSetup = options(fakeRuntime())
+    const spill = join(spillSetup.paths.root, 'secret-spill.log')
+    writeFileSync(spill, `${secret}\n{"score":3}\n`)
+    const spillRuntime = fakeRuntime({ stdout: reader(`${secret}\n{"score":3}\n`, false, spill), stderr: reader(secret) })
+    const spilled = options(spillRuntime, { environment: { ORDINARY: secret } })
+    const spillResult = await runEvaluator(spilled.value)
+    expect(JSON.stringify(spillResult)).not.toContain(secret)
+    expect(spillResult.artifacts.map(item => readFileSync(item.location, 'utf8')).join('\n')).not.toContain(secret)
+
+    const throwing = options(fakeRuntime(), { environment: { ORDINARY: secret } })
+    throwing.value.persistence.persistSpawnObserved = () => { throw new Error(secret) }
+    await expect(runEvaluator(throwing.value)).resolves.toMatchObject({ kind: 'failed', code: 'spawn', message: '[REDACTED]' })
+    const outcomeThrowing = options(fakeRuntime(), { environment: { ORDINARY: secret } })
+    outcomeThrowing.value.persistence.persistAttemptOutcome = () => { throw new Error(secret) }
+    await expect(runEvaluator(outcomeThrowing.value)).rejects.toThrow('[REDACTED]')
+    await expect(runEvaluator(outcomeThrowing.value)).rejects.not.toThrow(secret)
+  })
+
+  it.each([
+    [{ exitCode: 23 }, { exitCode: 23, signal: null }],
+    [{ exitCode: null, signal: 'SIGINT' as NodeJS.Signals }, { exitCode: null, signal: 'SIGINT' }],
+  ])('returns and durably persists exact exit facts %#', async (fake, expected) => {
+    const setup = options(fakeRuntime(fake))
+    const result = await runEvaluator(setup.value)
+    expect(result.exit).toMatchObject(expected)
+    expect(setup.value.persistence.outcome?.[0]).toMatchObject(expected)
+  })
+
+  it.each(['stdout', 'stderr'] as const)('enforces a real subprocess %s cap with bounded artifacts', async stream => {
+    const paths = fixture()
+    const payload = 'x'.repeat(512)
+    const script = stream === 'stdout'
+      ? `process.stdout.write(${JSON.stringify(payload + '\n{"score":5}\n')})`
+      : `process.stderr.write(${JSON.stringify(payload)});process.stdout.write('{"score":5}\\n')`
+    const evaluation = { command: process.execPath, args: ['-e', script], cwd: 'bench' }
+    const durable = persistence()
+    const result = await runEvaluator({
+      subprocess: new LocalSubprocess(), worktree: paths.root,
+      boundary: { worktree: captureEvaluatorWorktreeIdentity(paths.root), normalizedEvaluation: evaluation, normalizedPolicySha256: 'c'.repeat(64) },
+      evaluation, metricName: 'score', metricDirection: 'minimize', timeoutMs: 2_000, terminationGraceMs: 25,
+      maxStdoutBytes: 64, maxStderrBytes: 48, artifactDirectory: paths.artifacts, artifactPrefix: stream, persistence: durable,
+    })
+    expect(result).toMatchObject(stream === 'stdout' ? { kind: 'failed', code: 'output-limit' } : { kind: 'measured', metric: 5 })
+    const artifact = result.artifacts.find(item => item.kind === stream)!
+    expect(artifact.truncated).toBe(true)
+    expect(artifact.sizeBytes).toBeLessThanOrEqual(stream === 'stdout' ? 64 : 48)
+    expect(durable.outcome?.[1].find(item => item.kind === stream)).toMatchObject({ truncated: true })
+  })
+
 
   it('supports arbitrary override names but rejects managed environment keys', async () => {
     const supported = options(fakeRuntime(), { environment: { API_TOKEN: 'supported-secret' } })
