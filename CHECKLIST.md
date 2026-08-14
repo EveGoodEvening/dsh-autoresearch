@@ -17,8 +17,8 @@
 - [x] Identify the 12 authoritative dangling blobs and exact path/hash mapping.
 - [x] Define dependency-ordered chunks, file ownership, and parallel-safety rules in `PLAN.md`.
 - [x] Confirm current repository state is unborn `master` with no implementation files or commits before planning artifacts were created.
-- [ ] Recover any implementation file into the current worktree.
-- [ ] Create any implementation commit.
+- [x] Recover the 12 implementation files into the current worktree.
+- [x] Create the exact 12-path recovery implementation commit `3ca85a17c03d15488269b3dbc339e3ec135d98c3` (`feat: recover autoresearch plugin snapshot`).
 
 # Chunk 01 — `01-recover-authoritative-snapshot` (CURRENT)
 
@@ -31,49 +31,49 @@
 - [ ] Re-confirm `git config --get gc.auto` is `0` as defense in depth.
 - [ ] Confirm no implementation source path already exists with conflicting content.
 - [ ] Confirm only planning artifacts are present before materialization.
-- [ ] Confirm the planning-only commit contains `PLAN.md` and `CHECKLIST.md` and no recovered implementation path.
+- [x] Confirm the planning-only commit contains `PLAN.md` and `CHECKLIST.md` and no recovered implementation path.
 - [ ] If `git fsck --full` reports `missing tree 4b825dc642cb6eb9a060e54bf8d69288fbee4904` for this unborn repository, record it as the benign empty-tree warning rather than a missing recovery blob.
-- [ ] Create `src/` and `tests/` directories only as required for recovered files.
+- [x] Create `src/` and `tests/` directories only as required for recovered files.
 
 ## Materialize exact blobs
 
-- [ ] Materialize `.gitignore` from `e17975f37c2e5871018ed4cee7b190d022e11b87`.
-- [ ] Materialize `pnpm-lock.yaml` from `8555ed23387507503686e931818284961aaebc00`.
-- [ ] Materialize `README.md` from `878fed41726089151600c4205a9f4a3571fd9c4a`.
-- [ ] Materialize `tests/autoresearch.spec.ts` from `a8c6214ecd99f0c2fe9ada08fcf00588040c5c07`.
-- [ ] Materialize `cordis.patch.yml` from `2983549a5f076b657f7793e65fe6baa1bd9a92ce`.
-- [ ] Materialize `tsconfig.json` from `4a73dda7e2035dc42ece6532a3fb4a005dce3f90`.
-- [ ] Materialize `package.json` from `cbf644cfc0fcc38dc904e716d576d2feee8c4602`.
-- [ ] Materialize `tests/workflow.integration.spec.ts` from `cf39877043d803411ded03061defc7cd6a73a929`.
-- [ ] Materialize `LICENSE` from `114b31ff345b2b547a4cc070163e86a34d6f86fb`.
-- [ ] Materialize `AGENTS.md` from `732a04d9d2f809031da3e8c2f6fce4a0fe2dca0d`.
-- [ ] Materialize `vitest.config.ts` from `f8f64617446fcf5790b200c5c0d22d9b59b7ac35`.
-- [ ] Materialize `src/index.ts` from `3bb484965e3e80df22c644bd48478cdc3a6cc739`.
+- [x] Materialize `.gitignore` from `e17975f37c2e5871018ed4cee7b190d022e11b87`.
+- [x] Materialize `pnpm-lock.yaml` from `8555ed23387507503686e931818284961aaebc00`.
+- [x] Materialize `README.md` from `878fed41726089151600c4205a9f4a3571fd9c4a`.
+- [x] Materialize `tests/autoresearch.spec.ts` from `a8c6214ecd99f0c2fe9ada08fcf00588040c5c07`.
+- [x] Materialize `cordis.patch.yml` from `2983549a5f076b657f7793e65fe6baa1bd9a92ce`.
+- [x] Materialize `tsconfig.json` from `4a73dda7e2035dc42ece6532a3fb4a005dce3f90`.
+- [x] Materialize `package.json` from `cbf644cfc0fcc38dc904e716d576d2feee8c4602`.
+- [x] Materialize `tests/workflow.integration.spec.ts` from `cf39877043d803411ded03061defc7cd6a73a929`.
+- [x] Materialize `LICENSE` from `114b31ff345b2b547a4cc070163e86a34d6f86fb`.
+- [x] Materialize `AGENTS.md` from `732a04d9d2f809031da3e8c2f6fce4a0fe2dca0d`.
+- [x] Materialize `vitest.config.ts` from `f8f64617446fcf5790b200c5c0d22d9b59b7ac35`.
+- [x] Materialize `src/index.ts` from `3bb484965e3e80df22c644bd48478cdc3a6cc739`.
 - [ ] Do not reconstruct any source file from archived transcript payloads.
 - [ ] Do not apply the aborted test annotation cleanup.
 - [ ] Do not fix the Schemastery link, formatting, code, tests, docs, or metadata in the recovery snapshot.
 
 ## Recovery verification gate
 
-- [ ] Verify `.gitignore` hashes to `e17975f37c2e5871018ed4cee7b190d022e11b87`.
-- [ ] Verify `pnpm-lock.yaml` hashes to `8555ed23387507503686e931818284961aaebc00`.
-- [ ] Verify `README.md` hashes to `878fed41726089151600c4205a9f4a3571fd9c4a`.
-- [ ] Verify `tests/autoresearch.spec.ts` hashes to `a8c6214ecd99f0c2fe9ada08fcf00588040c5c07`.
-- [ ] Verify `cordis.patch.yml` hashes to `2983549a5f076b657f7793e65fe6baa1bd9a92ce`.
-- [ ] Verify `tsconfig.json` hashes to `4a73dda7e2035dc42ece6532a3fb4a005dce3f90`.
-- [ ] Verify `package.json` hashes to `cbf644cfc0fcc38dc904e716d576d2feee8c4602`.
-- [ ] Verify `tests/workflow.integration.spec.ts` hashes to `cf39877043d803411ded03061defc7cd6a73a929`.
-- [ ] Verify `LICENSE` hashes to `114b31ff345b2b547a4cc070163e86a34d6f86fb`.
-- [ ] Verify `AGENTS.md` hashes to `732a04d9d2f809031da3e8c2f6fce4a0fe2dca0d`.
-- [ ] Verify `vitest.config.ts` hashes to `f8f64617446fcf5790b200c5c0d22d9b59b7ac35`.
-- [ ] Verify `src/index.ts` hashes to `3bb484965e3e80df22c644bd48478cdc3a6cc739`.
-- [ ] Verify the recovered tracked/staged set for Chunk 01 is exactly the 12 expected paths; `PLAN.md` and `CHECKLIST.md` already belong to the separate planning-only commit and must not enter the recovery commit.
-- [ ] Run the recovered frozen install once using the recovered source-tree link dependencies when their targets are available.
+- [x] Verify `.gitignore` hashes to `e17975f37c2e5871018ed4cee7b190d022e11b87`.
+- [x] Verify `pnpm-lock.yaml` hashes to `8555ed23387507503686e931818284961aaebc00`.
+- [x] Verify `README.md` hashes to `878fed41726089151600c4205a9f4a3571fd9c4a`.
+- [x] Verify `tests/autoresearch.spec.ts` hashes to `a8c6214ecd99f0c2fe9ada08fcf00588040c5c07`.
+- [x] Verify `cordis.patch.yml` hashes to `2983549a5f076b657f7793e65fe6baa1bd9a92ce`.
+- [x] Verify `tsconfig.json` hashes to `4a73dda7e2035dc42ece6532a3fb4a005dce3f90`.
+- [x] Verify `package.json` hashes to `cbf644cfc0fcc38dc904e716d576d2feee8c4602`.
+- [x] Verify `tests/workflow.integration.spec.ts` hashes to `cf39877043d803411ded03061defc7cd6a73a929`.
+- [x] Verify `LICENSE` hashes to `114b31ff345b2b547a4cc070163e86a34d6f86fb`.
+- [x] Verify `AGENTS.md` hashes to `732a04d9d2f809031da3e8c2f6fce4a0fe2dca0d`.
+- [x] Verify `vitest.config.ts` hashes to `f8f64617446fcf5790b200c5c0d22d9b59b7ac35`.
+- [x] Verify `src/index.ts` hashes to `3bb484965e3e80df22c644bd48478cdc3a6cc739`.
+- [x] Verify the recovered tracked/staged set for Chunk 01 is exactly the 12 expected paths; `PLAN.md` and `CHECKLIST.md` already belong to the separate planning-only commit and must not enter the recovery commit.
+- [x] Run the recovered frozen install once using the recovered source-tree link dependencies when their targets are available. `pnpm install --frozen-lockfile` succeeded using local Harness links and ran the package build.
 - [ ] If a recovered local-link target is unavailable, record the frozen-install failure as expected provenance and defer the registry-resolvable dependency repair to Chunk 02; do not modify the recovery snapshot.
-- [ ] Run the recovered typecheck once when the recovered install succeeds.
-- [ ] Run the recovered five-test suite (four unit tests plus one integration test) once when the recovered install succeeds.
-- [ ] Run the recovered build once when the recovered install succeeds.
-- [ ] Run the recovered pack once when the recovered install succeeds.
+- [x] Run the recovered typecheck once when the recovered install succeeds. `pnpm run typecheck` passed.
+- [x] Run the recovered five-test suite (four unit tests plus one integration test) once when the recovered install succeeds. `pnpm run test` passed 2 files / 5 tests.
+- [x] Run the recovered build once when the recovered install succeeds. `pnpm run build` passed.
+- [x] Run the recovered pack once when the recovered install succeeds. `pnpm pack` produced `dsh-autoresearch-0.1.0.tgz`.
 - [ ] Preserve every attempted recovery command/output for the post-implementation tracker-accounting commit; do not add provenance files to the exact 12-path recovery commit.
 
 ## Recovery review gate
@@ -85,13 +85,13 @@
 
 ## Recovery implementation commit gate
 
-- [ ] Stage exactly the 12 recovered paths and no planning/checklist/provenance artifact.
-- [ ] Commit the byte-exact recovered implementation as a provenance implementation commit separate from the planning-only commit.
+- [x] Stage exactly the 12 recovered paths and no planning/checklist/provenance artifact.
+- [x] Commit the byte-exact recovered implementation as a provenance implementation commit separate from the planning-only commit: `3ca85a17c03d15488269b3dbc339e3ec135d98c3` (`feat: recover autoresearch plugin snapshot`).
 
 ## Recovery tracker-accounting gate (after the implementation commit)
 
-- [ ] Record the recovery implementation commit full SHA and command/output provenance in `CHECKLIST.md`.
-- [ ] Confirm the recovery implementation commit contains exactly the 12 authoritative blobs and no Chunk 02 or accounting work.
+- [x] Record the recovery implementation commit full SHA and command/output provenance in `CHECKLIST.md`: `3ca85a17c03d15488269b3dbc339e3ec135d98c3`; frozen install/build, typecheck, 2-file/5-test suite, standalone build, and pack all succeeded; pack produced `dsh-autoresearch-0.1.0.tgz`.
+- [x] Confirm the recovery implementation commit contains exactly the 12 authoritative blobs and no Chunk 02 or accounting work.
 - [ ] Commit that checklist/provenance update as a separate tracker-accounting commit.
 
 # Chunk 02 — `02-fix-publishability-and-package-contract`
