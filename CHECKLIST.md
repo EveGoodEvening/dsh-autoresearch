@@ -836,25 +836,25 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 - [x] Install tarball into separate consumer/profile fixture without Harness checkout.
 - [x] Run `dsh plugin --profile <name> add <tarball-or-package>` against the packed artifact.
 - [x] Run `dsh --profile <name> --dump-config` and observe the `autoresearch` row/defaults.
-- [x] Load plugin from installed profile.
-- [ ] Execute temporary-repository smoke run.
-- [x] Record final post-`b978619b89ce589f4a3eb95d9509d78e4f7f4309` gates: `pnpm install --frozen-lockfile` passed; `pnpm run typecheck` passed; Vitest passed 11 files / 271 tests; `pnpm run test:coverage` passed the focused per-file coverage thresholds; `pnpm run build` passed; `pnpm pack` produced `dsh-autoresearch-0.1.0.tgz`; `pnpm run release:smoke -- ./dsh-autoresearch-0.1.0.tgz` passed with `{"ok":true,"tarball":"dsh-autoresearch-0.1.0.tgz","profile":"autoresearch-release-smoke","files":58}` after packed-profile installation, config dump, and separate consumer installation; installed imports proved root exports exactly `Config,apply,inject,name` and the `./invariant` entry loaded; the packed runtime manifest contained no runtime/self `link:`, `file:`, or `workspace:` references or source-tree paths.
+- [x] Load and apply the plugin from the installed profile artifact, not the source tree; post-`37660dd87544b0aba04cb9a98f45e039c2f95858` smoke evidence recorded `profileBoot.sourceTreeResolved=false`, tool registration `autoresearch`, and prompt registration `tool:autoresearch`. This corrects the earlier installed-profile overmark, which had proved installation/config dump but not actual installed-module `apply()`.
+- [x] Execute temporary-repository smoke run through the installed profile; structured scenario evidence reported every required item `840` and `845`–`857` with `ok:true`.
+- [x] Record final post-`37660dd87544b0aba04cb9a98f45e039c2f95858` release-fix gates: `pnpm install --frozen-lockfile` passed; `pnpm run typecheck` passed; Vitest passed 11 files with 1 skipped / 276 tests with 5 skipped; `pnpm run test:coverage` passed the focused per-file thresholds (`agent.ts` S86/B78/F85/L95, `controller.ts` S83/B65/F91/L92, `git.ts` S88/B76/F96/L97, `index.ts` S84/B75/F62/L93, `recovery.ts` S79/B71/F91/L91); `pnpm run build` passed; clean `pnpm pack` rebuilt through `prepack` and produced `dsh-autoresearch-0.1.0.tgz` with exactly 56 allowlisted entries; `pnpm run release:smoke -- ./dsh-autoresearch-0.1.0.tgz` emitted structured JSON success with `ok:true`, the tarball/profile identity, 56 package files, installed-profile `apply()` evidence, and passing scenario evidence for items `840` and `845`–`857`. The isolated smoke did not modify an inherited external `DSH_HOME`; the clean packed manifest contained no runtime/self `link:`, `file:`, or `workspace:` references or source-tree paths; a separate consumer typechecked root and `./invariant` imports with the complete declaration graph resolving and no source-only `.ts` declaration specifiers.
 
 ## Final smoke observations
 
-- [ ] Observe caller worktree remains unchanged.
-- [ ] Observe immutable run-id-bearing dedicated worktree and branch created.
-- [ ] Observe read-only repository discovery followed by tracker creation before any mutating setup or baseline.
-- [ ] Observe baseline row recorded.
-- [ ] Observe one accepted candidate with full SHA/audit record.
-- [ ] Observe one rejected candidate with full SHA/audit record.
-- [ ] Observe strict metric decision.
-- [ ] Observe atomic deterministic TSV export.
-- [ ] Observe deferred background readiness and output through generic jobs control.
-- [ ] Observe mandatory Agent handle disposal and cancellation resource cleanup, entire evaluator process-tree quiescence, terminal persistence before lock release, and retained evidence.
-- [ ] Deliberately interrupt evaluation and prove the entire prior provider-owned process tree is quiescent.
-- [ ] Resume by run id and observe completion without duplicate candidate.
-- [ ] Separately simulate restart without whole-process-tree quiescence proof and observe typed `blocked` without signalling the recorded PID or duplicating evaluation.
+- [x] Observe caller worktree remains unchanged; item `845` emitted accepted and rejected before/after caller `HEAD`, index tree, and porcelain status evidence.
+- [x] Observe immutable run-id-bearing dedicated worktree and branch created; item `846` emitted distinct accepted/rejected run identities with run-id-bearing branch/worktree data.
+- [x] Observe read-only repository discovery followed by tracker creation before any mutating setup or baseline; item `847` recorded durable run and baseline transitions asserted before candidate mutation.
+- [x] Observe baseline row recorded; item `848` emitted the accepted scenario baseline experiment with `kind=baseline` and its durable metric/commit facts.
+- [x] Observe one accepted candidate with full SHA/audit record; item `849` emitted `strictDecision=accept`, the full candidate commit, and matching audit commit evidence.
+- [x] Observe one rejected candidate with full SHA/audit record; item `850` emitted `strictDecision=reject`, the full candidate commit, and matching audit commit evidence.
+- [x] Observe strict metric decision; item `851` emitted better=`accept`, tie=`reject`, and worse=`reject` with their concrete metrics.
+- [x] Observe atomic deterministic TSV export; item `852` emitted the TSV location/hash evidence and `deterministic=true` after repeated publication.
+- [x] Observe deferred background readiness and output through generic jobs control; item `853` emitted `listed=true`, `kill=true`, and `noLiveJobs=true`.
+- [x] Observe mandatory Agent handle disposal and cancellation resource cleanup, entire evaluator process-tree quiescence, terminal persistence before lock release, and retained evidence; item `854` emitted `agentDisposed=true`, `terminalBeforeLockRelease=true`, retained candidate/audit evidence, and process-tree quiescence.
+- [x] Deliberately interrupt evaluation and prove the entire prior provider-owned process tree is quiescent; item `855` emitted the evaluator parent/child PIDs and `processTreeQuiescent=true` after cancellation.
+- [x] Resume by run id and observe completion without duplicate candidate; item `856` emitted the resumed terminal status, exactly one attempt, and `duplicateCandidate=false`.
+- [x] Separately simulate restart without whole-process-tree quiescence proof and observe typed `blocked` without signalling the recorded PID or duplicating evaluation; item `857` emitted `status=blocked`, the typed evidence code, `pidSignalled=false`, `duplicateEvaluation=false`, and `lockRetained=true`.
 
 ## Chunk 09 review gate
 
@@ -872,7 +872,8 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 
 - [x] Record Chunk 09 implementation commit `b978619b89ce589f4a3eb95d9509d78e4f7f4309`.
 - [x] Confirm Chunk 09 implementation plus all Chunk 01–08 implementation commits and their separate tracker-accounting commits are reviewable; the not-yet-created Chunk 09 accounting commit is not required to confirm itself.
-- [ ] Commit the Chunk 09 checklist update separately from the implementation commit.
+- [x] Record Chunk 09 checklist-accounting commit `5615c97554820dbd20c64b6abed8374958bc87da` (`docs: record release candidate verification`) as complete and separate from implementation and release-fix commit `37660dd87544b0aba04cb9a98f45e039c2f95858`.
+- [ ] Complete final independent Chunk 09 review and closure, then record this new post-release-fix accounting update in a separate commit.
 
 # Final split review
 
