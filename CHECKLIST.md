@@ -5,7 +5,7 @@
 - `[x]` means verified in the current worktree or completed research/planning evidence.
 - `[ ]` means not present or not verified in the current worktree.
 - Archived implementation activity was historical evidence only until the authoritative snapshot was recovered. Chunk 01 is now closed by implementation commit `3ca85a17c03d15488269b3dbc339e3ec135d98c3`, tracker-accounting commit `4095697a6b7256937f535d739ca09678b47e333d`, review-fix commit `6524bdf`, and a clean independent correctness/accounting/security re-review after `6524bdf` with zero findings.
-- **Current dependency-ready chunk: `06-implement-recoverable-controller`.** Chunk 02 is closed by implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4`, tracker-accounting commit `fa4bf06ef24b590a81f883037b940f18d97c5cfc`, review-fix commit `7671499`, focused clean-generated-state verification, and clean independent package/accounting re-reviews. Chunk 03 is closed by implementation commits `9b18630` and `e22d99a`, tracker-accounting commit `99babc5dc3432be7c078fd6e792c97164ebfb19b`, review-fix commit `5e990acb1df3bcf8b7e2612c91f38443d364d2db`, passing post-fix frozen-install/typecheck/3-file-54-test/build/pack gates, and a clean independent correctness/security/accounting re-review. Chunk 04 is closed by implementation commit `cfc2e45366961c10b97b6fab63ffea9abfb3b5dd`, tracker-accounting commit `a1fca4c61fbf241b716a8e423a12788d16e3c71d`, review-fix commits `c9ba821923cd233c8c3112a7b3cdd2b8d311ec36`, `5ada9cd`, and `e7fb2e6`, passing final typecheck/4-file-79-test/build gates, completed correctness/security/concurrency/accounting reviews, a frozen tracker API, and a clean final re-review. Chunk 05 is closed by its recorded implementation/review-fix commits, final clean Git/evaluator/security/tracker-concurrency reviews, and final tracker/accounting commit `89f50fba279e8c2156394763f1357bd9377996b7`.
+- **Current dependency-ready chunk: `07-wire-tool-jobs-lifecycle-and-hmr`.** Chunk 02 is closed by implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4`, tracker-accounting commit `fa4bf06ef24b590a81f883037b940f18d97c5cfc`, review-fix commit `7671499`, focused clean-generated-state verification, and clean independent package/accounting re-reviews. Chunk 03 is closed by implementation commits `9b18630` and `e22d99a`, tracker-accounting commit `99babc5dc3432be7c078fd6e792c97164ebfb19b`, review-fix commit `5e990acb1df3bcf8b7e2612c91f38443d364d2db`, passing post-fix frozen-install/typecheck/3-file-54-test/build/pack gates, and a clean independent correctness/security/accounting re-review. Chunk 04 is closed by implementation commit `cfc2e45366961c10b97b6fab63ffea9abfb3b5dd`, tracker-accounting commit `a1fca4c61fbf241b716a8e423a12788d16e3c71d`, review-fix commits `c9ba821923cd233c8c3112a7b3cdd2b8d311ec36`, `5ada9cd`, and `e7fb2e6`, passing final typecheck/4-file-79-test/build gates, completed correctness/security/concurrency/accounting reviews, a frozen tracker API, and a clean final re-review. Chunk 05 is closed by its recorded implementation/review-fix commits, final clean Git/evaluator/security/tracker-concurrency reviews, and final tracker/accounting commit `89f50fba279e8c2156394763f1357bd9377996b7`. Chunk 06 is closed through final fix `e613e549e0fb4f40f0921ecd585c25d2dd6a9a03`, passing final typecheck/9-file-229-test/build gates, clean independent controller/recovery/security/accounting reviews, post-`3e9e44c57c94ad9fcbff411d0cec485a580e9832` accounting commit `bc09f43278c2ecc41acde60d3b2cd204d5eff466`, and zero unresolved Chunk 06 findings. Chunk 07 is current and dependency-ready; all Chunk 07 implementation and gate items remain unchecked.
 
 ## Established research and planning state
 
@@ -461,7 +461,7 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 - [x] Commit the final Chunk 05 tracker/accounting update separately and record its full SHA: `89f50fba279e8c2156394763f1357bd9377996b7`.
 - [x] Close Chunk 05 and advance Chunk 06 to dependency-ready after recording the separate closure commit; every Chunk 06 implementation and dependency checkbox remains unchecked.
 
-# Chunk 06 — `06-implement-recoverable-controller`
+# Chunk 06 — `06-implement-recoverable-controller` (CLOSED)
 
 ## Proposal agent (`src/agent.ts`)
 
@@ -515,7 +515,7 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 ## Controller (`src/controller.ts`)
 
 - [x] Create `src/controller.ts`.
-- [ ] Make the controller the sole production orchestration/state owner during the Chunk 07 wiring clean cutover; `AutoresearchRunController` currently owns only the new recoverable-controller path.
+- [ ] Chunk 07 clean-cutover dependency: make `AutoresearchRunController` the sole production orchestration/state owner while migrating production wiring away from the legacy path.
 - [x] Normalize and freeze run policy before execution.
 - [x] Allow only read-only repository/common-directory/start-SHA discovery before tracker creation.
 - [x] Create tracker/run row with discovered repository identity and start SHA before every mutating/allocating external setup effect.
@@ -541,17 +541,17 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 - [x] Surface a host-proven post-baseline blocker separately; child blocker claims remain non-authoritative, while proposal disposal/quiescence uncertainty transitions the run to host-authored `blocked` / `attempt-uncertain` without releasing ownership.
 - [x] Surface infrastructure/contract failure as `round-failed`.
 - [x] Handle cancellation at a quiescent durable boundary.
-- [ ] Chunk 07 clean-cutover dependency: remove `ctx.workflowEngine` production orchestration.
-- [ ] Chunk 07 clean-cutover dependency: replace or remove the four workflow-based unit tests in `tests/autoresearch.spec.ts` and the competing workflow integration coverage.
-- [ ] Chunk 07 clean-cutover dependency: remove the no-longer-used workflow runtime dependency/peer.
-- [ ] Chunk 07 clean-cutover dependency: remove temporary legacy `evaluation_command` and workflow-specific public patch/tool schema runtime compatibility.
+- [ ] Chunk 07 clean-cutover dependency (production owner): remove `ctx.workflowEngine` production orchestration.
+- [ ] Chunk 07 clean-cutover dependency (workflow coverage): replace or remove the four workflow-based unit tests in `tests/autoresearch.spec.ts` and the competing workflow integration coverage.
+- [ ] Chunk 07 clean-cutover dependency (dependency cleanup): remove the no-longer-used workflow runtime dependency/peer.
+- [ ] Chunk 07 clean-cutover dependency (schema cutover): remove temporary legacy `evaluation_command` and workflow-specific public patch/tool schema runtime compatibility.
 - [x] Keep rejected candidate commits/audit refs.
 - [x] Reconcile isolated worktree to last durable accepted commit.
 - [x] Mint the attempt artifact writer from owner-only `StateLayout` only after durable attempt identity exists; transactionally link artifact ownership before terminal transition or the next experiment.
 - [x] Persist terminal/quiescent run facts, completed Git reconciliation, and artifact references before active-lock release; make release the controller's final idempotent repository action.
 
 ## Chunk 06 verification gate
-- [x] Record final post-terminal-replay-validation Chunk 06 verification after validation commit `3e9e44c57c94ad9fcbff411d0cec485a580e9832`: `pnpm run typecheck` passed; Vitest passed 9 files / 228 tests; `pnpm run build` passed. This supersedes the verification recorded after `2c106113ca95fa231f6942cd6886dd1ef3af364a`. Independent final clean review and closure remain unchecked.
+- [x] Record final Chunk 06 verification after final fix `e613e549e0fb4f40f0921ecd585c25d2dd6a9a03`: `pnpm run typecheck` passed; Vitest passed 9 files / 229 tests; `pnpm run build` passed. This supersedes the verification recorded after `3e9e44c57c94ad9fcbff411d0cec485a580e9832`.
 
 - [x] Test baseline-target shortcut spawns no child.
 - [x] Test strict accepted improvement.
@@ -581,27 +581,28 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 - [x] Test deterministic decision replay.
 ## Chunk 06 review gate
 
-- [ ] Review controller as sole state machine; remove competing workflow logic.
-- [ ] Review all intent/outcome ordering around side effects.
-- [ ] Review acceptance/target logic for strict host authority.
-- [ ] Review recovery for idempotence and evidence preservation.
-- [ ] Review obsolete workflow code/dependencies/comments are removed.
+- [ ] Chunk 07 clean-cutover dependency (production owner): review the controller as the sole production state machine after competing workflow logic is removed.
+- [x] Complete an independent controller review of intent/outcome ordering around side effects; clean with zero findings after final fix `e613e549e0fb4f40f0921ecd585c25d2dd6a9a03`.
+- [x] Complete an independent security review of acceptance/target logic and strict host authority; clean with zero findings after final fix `e613e549e0fb4f40f0921ecd585c25d2dd6a9a03`.
+- [x] Complete an independent recovery review for idempotence and evidence preservation; clean with zero findings after final fix `e613e549e0fb4f40f0921ecd585c25d2dd6a9a03`.
+- [ ] Chunk 07 clean-cutover dependency (workflow/dependency/schema cleanup): review removal of obsolete workflow code, runtime dependencies, compatibility schema, and comments after the clean cutover.
 
 ## Chunk 06 implementation commit gate
 
 - [x] Integrate proposal/recovery lanes into controller.
-- [ ] Confirm all prior callers migrate to the controller clean cutover in Chunk 07; legacy workflow/tool wiring remains live and assigned to Chunk 07.
-- [x] Commit recoverable controller and focused tests in foundation commit `ca184254e3681fea00cbf53ec4d377c9803928a0`, proposal/recovery commit `b690a56f7df0b97dd5fb03d32201b8a933928718`, controller commit `99b7aa12a7036b5f8cf10c634a455779141d956f`, review-fix commit `b1a0e1b0cf9825d19ddbbed246a9ff790fdf410e`, recovery-matrix test commit `e28d78ad2edeb7158370b568539e27d6fecadc85`, final review-fix commit `2e45cbc7d04a558d8b55b4ef863a5aad083dc05c`, ownership-retention review-fix commit `afd2621fbb95ddc10d7ba3c3b15e76699cb59008`, final quiescence/disposal test commit `aeafc7458b7c7697fc62501f1dd06ed7c62f6e46`, terminal-lock/artifact/crash-replay closure-fix commit `2c106113ca95fa231f6942cd6886dd1ef3af364a`, and terminal replay evidence validation commit `3e9e44c57c94ad9fcbff411d0cec485a580e9832`.
+- [ ] Chunk 07 clean-cutover dependency (workflow migration): confirm every prior production caller migrates to the controller and legacy workflow/tool wiring is removed.
+- [x] Commit recoverable controller and focused tests in foundation commit `ca184254e3681fea00cbf53ec4d377c9803928a0`, proposal/recovery commit `b690a56f7df0b97dd5fb03d32201b8a933928718`, controller commit `99b7aa12a7036b5f8cf10c634a455779141d956f`, review-fix commit `b1a0e1b0cf9825d19ddbbed246a9ff790fdf410e`, recovery-matrix test commit `e28d78ad2edeb7158370b568539e27d6fecadc85`, final review-fix commit `2e45cbc7d04a558d8b55b4ef863a5aad083dc05c`, ownership-retention review-fix commit `afd2621fbb95ddc10d7ba3c3b15e76699cb59008`, final quiescence/disposal test commit `aeafc7458b7c7697fc62501f1dd06ed7c62f6e46`, terminal-lock/artifact/crash-replay closure-fix commit `2c106113ca95fa231f6942cd6886dd1ef3af364a`, terminal replay evidence validation commit `3e9e44c57c94ad9fcbff411d0cec485a580e9832`, and final fix commit `e613e549e0fb4f40f0921ecd585c25d2dd6a9a03`.
 
 ## Chunk 06 tracker-accounting gate
 
-- [x] Record Chunk 06 implementation commits: `ca184254e3681fea00cbf53ec4d377c9803928a0`, `b690a56f7df0b97dd5fb03d32201b8a933928718`, and `99b7aa12a7036b5f8cf10c634a455779141d956f`; review-fix commits: `b1a0e1b0cf9825d19ddbbed246a9ff790fdf410e`, `2e45cbc7d04a558d8b55b4ef863a5aad083dc05c`, and `afd2621fbb95ddc10d7ba3c3b15e76699cb59008`; recovery-matrix test commit: `e28d78ad2edeb7158370b568539e27d6fecadc85`; final quiescence/disposal test commit: `aeafc7458b7c7697fc62501f1dd06ed7c62f6e46`; terminal-lock/artifact/crash-replay closure-fix commit: `2c106113ca95fa231f6942cd6886dd1ef3af364a`; and terminal replay evidence validation commit: `3e9e44c57c94ad9fcbff411d0cec485a580e9832`.
+- [x] Record Chunk 06 implementation commits: `ca184254e3681fea00cbf53ec4d377c9803928a0`, `b690a56f7df0b97dd5fb03d32201b8a933928718`, and `99b7aa12a7036b5f8cf10c634a455779141d956f`; review-fix commits: `b1a0e1b0cf9825d19ddbbed246a9ff790fdf410e`, `2e45cbc7d04a558d8b55b4ef863a5aad083dc05c`, `afd2621fbb95ddc10d7ba3c3b15e76699cb59008`, and final fix `e613e549e0fb4f40f0921ecd585c25d2dd6a9a03`; recovery-matrix test commit: `e28d78ad2edeb7158370b568539e27d6fecadc85`; final quiescence/disposal test commit: `aeafc7458b7c7697fc62501f1dd06ed7c62f6e46`; terminal-lock/artifact/crash-replay closure-fix commit: `2c106113ca95fa231f6942cd6886dd1ef3af364a`; and terminal replay evidence validation commit: `3e9e44c57c94ad9fcbff411d0cec485a580e9832`.
 - [x] Record the earlier Chunk 06 checklist accounting commits separately from implementation and review-fix work: `9215f6a` and `16f97d06627a72281db8ec39bd116ffebc597512`.
 - [x] Record prior final-controller-recovery checklist accounting commit `a3db166c488596056d786de2697364dd6bc83377` as a separate accounting-only commit.
 - [x] Record post-`aeafc7458b7c7697fc62501f1dd06ed7c62f6e46` accounting commit `612eb4db75d7b0797f0ace79ac6847934adb54bd` (`docs: record controller quiescence verification`) as complete and separate from implementation, review-fix, and test commits.
-- [ ] Complete the independent final clean Chunk 06 review and closure.
+- [x] Complete clean independent controller, recovery, security, and accounting reviews after final fix `e613e549e0fb4f40f0921ecd585c25d2dd6a9a03`; record zero unresolved Chunk 06 findings and close Chunk 06.
 - [x] Record post-`2c106113ca95fa231f6942cd6886dd1ef3af364a` accounting commit `0abff2f38fdccf81eb2d2fa4ed62f8101060eec7` (`docs: record terminal recovery verification`) as complete and separate from implementation, review-fix, test, closure-fix, and prior accounting commits.
-- [ ] Commit this new post-`3e9e44c57c94ad9fcbff411d0cec485a580e9832` Chunk 06 checklist accounting update separately from the implementation, review-fix, test, closure-fix, validation, and prior accounting commits.
+- [x] Record post-`3e9e44c57c94ad9fcbff411d0cec485a580e9832` accounting commit `bc09f43278c2ecc41acde60d3b2cd204d5eff466` as complete and separate from implementation, review-fix, test, closure-fix, validation, and prior accounting commits.
+- [ ] Commit this Chunk 06 closure-accounting update separately; leave open because the commit cannot record its own SHA.
 
 # Chunk 07 — `07-wire-tool-jobs-lifecycle-and-hmr`
 
