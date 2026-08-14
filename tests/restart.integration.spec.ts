@@ -52,6 +52,39 @@ describe('controller restart and repository concurrency integration', () => {
     } finally { await f.dispose() }
   })
 
+  it('recovers a crash after local terminal release and before shared authority deletion', async () => {
+    const f = await fixture()
+    const original = DurableTracker.prototype.releaseActiveLock
+    let injected = false
+    const fault = vi.spyOn(DurableTracker.prototype, 'releaseActiveLock').mockImplementation(function (runId, releasedAt) {
+      const released = original.call(this, runId, releasedAt)
+      if (!injected && released) { injected = true; throw new Error('fault after local release') }
+      return released
+    })
+    try {
+      const interrupted = controller(f, 'release-window', 1); const identity = await interrupted.prepare()
+      await expect(interrupted.run()).rejects.toThrow('fault after local release')
+      fault.mockRestore()
+      const tracker = DurableTracker.open(identity.tracker)
+      expect(tracker.recoveryState(identity.runId).activeLock).toBeUndefined()
+      tracker.close()
+      const authorityPath = join(f.root, '.git', 'dsh-autoresearch-locks.sqlite')
+      const authority = new DatabaseSync(authorityPath)
+      expect(authority.prepare('SELECT repository_id, run_tag FROM active_locks WHERE run_id = ?').get(identity.runId)).toMatchObject({ run_tag: 'release-window' })
+      authority.close()
+
+      const resumed = controller(f, '', 1, identity.runId); const terminal = await resumed.run()
+      expect(terminal.runId).toBe(identity.runId)
+      const reconciled = new DatabaseSync(authorityPath)
+      expect(reconciled.prepare('SELECT 1 FROM active_locks WHERE run_id = ?').get(identity.runId)).toBeUndefined()
+      reconciled.close()
+
+      const reused = controller(f, 'release-window', 1, undefined, true); const running = reused.run(); const reusedIdentity = await reused.ready
+      expect(reusedIdentity.runId).not.toBe(identity.runId)
+      reused.cancel('cleanup'); await running
+    } finally { fault.mockRestore(); await f.dispose() }
+  })
+
   it('requires explicit controller release before resuming the same durable lineage exactly once', async () => {
     const f = await fixture()
     try {

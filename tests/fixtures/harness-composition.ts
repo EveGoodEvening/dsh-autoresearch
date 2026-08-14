@@ -29,7 +29,7 @@ function providerOverlay(): PatchOptions[] {
   return [{ insert: [{ id: 'autoresearch-test-model', name: modelPlugin }] }]
 }
 
-export async function composeHarness(options: { autoresearch?: boolean; omitEntry?: string } = {}): Promise<RealHarness> {
+export async function composeHarness(options: { autoresearch?: boolean; omitEntry?: string; reverseEntries?: boolean } = {}): Promise<RealHarness> {
   const root = await mkdtemp(join(tmpdir(), 'dsh-autoresearch-loader-'))
   const home = join(root, 'home')
   const profileDir = join(home, 'profiles', 'integration')
@@ -50,7 +50,7 @@ export async function composeHarness(options: { autoresearch?: boolean; omitEntr
   })
   const profile = loadProfile('dsh-autoresearch-test', 'integration', installAnchor, home, { userLayer: false })
   const entries = composeEntries([...profile.layers.map(layer => layer.patches), profile.patches, providerOverlay()])
-  const selected = options.omitEntry ? entries.filter(entry => entry.id !== options.omitEntry) : entries
+  const selected = (options.omitEntry ? entries.filter(entry => entry.id !== options.omitEntry) : entries).toSorted((left, right) => options.reverseEntries ? right.id.localeCompare(left.id) : 0)
   const bootEntries = selected.map(entry => entry.id === 'hmr'
     ? { ...entry, config: { root: [], ignored: [], debounce: 10 } }
     : entry)

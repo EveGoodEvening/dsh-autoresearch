@@ -306,7 +306,12 @@ export function releaseTerminalRunLock(tracker: DurableTracker, runId: string): 
   releaseAuthorityLock(tracker, runId)
   return released
 }
-export function recoverTerminalRunLock(tracker: DurableTracker, runId: string): boolean { return tracker.recoveryState(runId).safeToReleaseTerminalLock ? releaseTerminalRunLock(tracker, runId) : false }
+export function recoverTerminalRunLock(tracker: DurableTracker, runId: string): boolean {
+  const recovery = tracker.recoveryState(runId)
+  if (!['completed', 'baseline-blocked', 'blocked', 'round-failed', 'cancelled'].includes(String(recovery.run['state'])) || recovery.run['terminal_quiescent'] !== 1 || recovery.processDisposition !== 'quiescent') return false
+  const released = tracker.releaseActiveLock(runId)
+  return releaseAuthorityLock(tracker, runId) || released
+}
 function openLockAuthority(tracker: DurableTracker, runId: string): DatabaseSync {
   const run = tracker.getRun(runId)
   if (!run) throw new GitBoundaryError('run-lock-identity', 'Shared lock authority requires a durable run')
@@ -321,9 +326,16 @@ function openLockAuthority(tracker: DurableTracker, runId: string): DatabaseSync
   return database
 }
 
-function releaseAuthorityLock(tracker: DurableTracker, runId: string): void {
+function releaseAuthorityLock(tracker: DurableTracker, runId: string): boolean {
+  const run = tracker.getRun(runId)
+  if (!run) throw new GitBoundaryError('run-lock-identity', 'Shared lock release requires a durable run')
+  const repositoryId = String(run['repository_id']); const runTag = String(run['run_tag'])
   const authority = openLockAuthority(tracker, runId)
-  try { authority.prepare('DELETE FROM active_locks WHERE run_id = ?').run(runId) } finally { authority.close() }
+  try {
+    const row = authority.prepare('SELECT repository_id, run_tag FROM active_locks WHERE run_id = ?').get(runId)
+    if (row && (row['repository_id'] !== repositoryId || row['run_tag'] !== runTag)) throw new GitBoundaryError('run-lock-identity', 'Shared active lock identity differs from the durable run')
+    return authority.prepare('DELETE FROM active_locks WHERE run_id = ? AND repository_id = ? AND run_tag = ?').run(runId, repositoryId, runTag).changes === 1
+  } finally { authority.close() }
 }
 
 

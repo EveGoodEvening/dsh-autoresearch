@@ -236,7 +236,8 @@ function terminalDirective(request: RecoveryRequest, state: RunDurableState, rec
   const terminal = state as 'completed' | 'baseline-blocked' | 'blocked' | 'round-failed' | 'cancelled'
   const evidence = validateTerminalEvidence(request, terminal)
   if (evidence instanceof RecoveryEvidenceError) return blocked(request, evidence.code, evidence.message, 'retain')
-  const lock = !recovery.activeLock ? 'already-released' : recovery.safeToReleaseTerminalLock ? 'release' : 'retain'
+  const releasable = recovery.run['terminal_quiescent'] === 1 && recovery.processDisposition === 'quiescent'
+  const lock = !releasable ? 'retain' : recovery.activeLock ? 'release' : 'already-released'
   return { kind: 'terminal', runId: request.runId, state: terminal, lock, artifacts: evidence }
 }
 

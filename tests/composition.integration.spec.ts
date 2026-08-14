@@ -1,7 +1,9 @@
 import { execFile } from 'node:child_process'
+import { readdirSync } from 'node:fs'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
+import { DatabaseSync } from 'node:sqlite'
 import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -82,6 +84,24 @@ function processExists(pid: number): boolean {
   }
 }
 
+function persistedBackgroundJobIds(cwd: string): string[] {
+  const runs = join(cwd, '.git', 'dsh-autoresearch', 'runs')
+  let files: string[]
+  try { files = readdirSync(runs, { recursive: true, encoding: 'utf8' }) } catch { return [] }
+  const ids: string[] = []
+  for (const file of files.filter(file => file.endsWith('tracker.sqlite'))) {
+    const database = new DatabaseSync(join(runs, file), { readOnly: true })
+    try {
+      const rows = database.prepare("SELECT outcome_json FROM transitions WHERE outcome_json LIKE '%background-job-registered%'").all() as { outcome_json: string }[]
+      for (const row of rows) {
+        const outcome = JSON.parse(row.outcome_json) as { jobId?: unknown }
+        if (typeof outcome.jobId === 'string') ids.push(outcome.jobId)
+      }
+    } finally { database.close() }
+  }
+  return ids
+}
+
 describe('real Loader/profile production composition', () => {
   it('boots the shipped base profile keylessly with the opt-in stable autoresearch row and providers', async () => {
     const without = await composeHarness({ autoresearch: false })
@@ -97,6 +117,87 @@ describe('real Loader/profile production composition', () => {
     expect(harness.ctx.tools.schemas().map(tool => tool.name)).toEqual(expect.arrayContaining(['autoresearch', 'job_output', 'job_list', 'job_kill']))
     expect(await assembledPrompt(harness.ctx)).toContain('Use autoresearch only when the direct human explicitly requests')
     expect(harness.ctx.llm.listProviders().map(provider => provider.id)).toContain('autoresearch-test')
+  }, 30_000)
+
+  it('boots and executes autoresearch when equivalent profile entry rows are deliberately reversed', async () => {
+    const harness = await composeHarness({ reverseEntries: true })
+    active.push(harness)
+    const ids = harness.entries.map(entry => entry.id)
+    expect(ids).toEqual([...ids].sort((left, right) => right.localeCompare(left)))
+    expect(ids.indexOf('autoresearch')).toBeGreaterThan(ids.indexOf('jobs'))
+
+    const cwd = await repository(harness.root)
+    const parent = await parentAgent(harness, cwd, 'reordered')
+    try {
+      const started = await execute(harness, 'autoresearch', request(cwd), parent.agent)
+      expect(started.isError).toBe(false)
+      expect(started.value).toMatchObject({ kind: 'background', jobId: expect.stringMatching(/^autoresearch-/) })
+      const jobId = (started.value as { jobId: string }).jobId
+      const output = await execute(harness, 'job_output', { job_id: jobId, wait: true, timeout_ms: 20_000 }, parent.agent)
+      expect(output.isError).toBe(false)
+      expect(JSON.parse((output.value as { text: string }).text)).toMatchObject({ best: { metric: 1 }, status: 'round-failed' })
+    } finally { await parent.dispose() }
+  }, 30_000)
+
+  it('constructs LocalJobRegistry hooks synchronously, persists its returned id before owned side effects, and cancels execution through the job', async () => {
+    const harness = await composeHarness()
+    active.push(harness)
+    const cwd = await repository(harness.root)
+    const parent = await parentAgent(harness, cwd, 'ordering')
+    const marker = join(harness.root, 'ordered-evaluator.pid')
+    const events: string[] = []
+    let evaluatorSignal: AbortSignal | undefined
+    const jobs = harness.ctx.jobs
+    const originalStart = jobs.start.bind(jobs)
+    const subprocess = harness.ctx.subprocess
+    const originalSpawn = subprocess.spawn.bind(subprocess)
+    jobs.start = spec => {
+      events.push('registry-start-enter')
+      const id = originalStart({ ...spec, run: () => {
+        events.push('run-hook-enter')
+        const hooks = spec.run()
+        events.push('run-hook-return')
+        return hooks
+      } })
+      events.push(`registry-start-return:${String(id)}`)
+      return id
+    }
+    subprocess.spawn = spec => {
+      const argv = spec.argv.map(String)
+      const ownedSideEffect = (argv.includes('worktree') && argv.includes('add')) || argv.includes(holdingEvaluator)
+      if (ownedSideEffect) {
+        const returnedJobIds = events.filter(event => event.startsWith('registry-start-return:')).map(event => event.slice('registry-start-return:'.length))
+        expect(returnedJobIds).not.toHaveLength(0)
+        expect(persistedBackgroundJobIds(cwd)).toEqual(expect.arrayContaining(returnedJobIds))
+        if (argv.includes(holdingEvaluator)) evaluatorSignal = spec.signal
+      }
+      return originalSpawn(spec)
+    }
+    try {
+      const execution = execute(harness, 'autoresearch', {
+        ...request(cwd),
+        evaluation: { command: process.execPath, args: [holdingEvaluator, marker] },
+      }, parent.agent)
+      await waitUntil(() => events.some(event => event.startsWith('registry-start-return:')), 'job registry did not return an id')
+      const returned = events.find(event => event.startsWith('registry-start-return:'))!
+      const jobId = returned.slice('registry-start-return:'.length)
+      const pid = await evaluatorPid(marker)
+      expect(events.slice(0, 4)).toEqual(['registry-start-enter', 'run-hook-enter', 'run-hook-return', `registry-start-return:${jobId}`])
+      expect(persistedBackgroundJobIds(cwd)).toContain(jobId)
+      expect(evaluatorSignal?.aborted).toBe(false)
+
+      expect(harness.ctx.jobs.kill(jobId as never, parent.agent, 'ordering test cancellation')).toBe('requested')
+      await waitUntil(() => evaluatorSignal?.aborted === true, 'job cancellation did not abort the evaluator-owned signal')
+      await waitUntil(() => !processExists(pid), 'job cancellation did not terminate the evaluator')
+      expect((await harness.ctx.jobs.wait(jobId as never, 20_000, parent.agent)).status).toBe('killed')
+      const result = await execution
+      expect(result.isError).toBe(false)
+      expect(result.value).toMatchObject({ kind: 'background', jobId })
+    } finally {
+      jobs.start = originalStart
+      subprocess.spawn = originalSpawn
+      await parent.dispose()
+    }
   }, 30_000)
 
   it('invokes production autoresearch through ToolRuntime with the exact real parent, child setup, evaluator, durable job, and generic controls', async () => {

@@ -48,6 +48,7 @@
     "prepack": "pnpm run build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
     "check": "pnpm run typecheck && pnpm run test && pnpm run build"
   },
   "dsh": {
@@ -95,6 +96,7 @@
     "@deepseek-ai/dsh-tools": "^0.1.0-rc.6",
     "@types/js-yaml": "^4.0.9",
     "@types/node": "^22.0.0",
+    "@vitest/coverage-v8": "4.1.10",
     "js-yaml": "^4.3.1",
     "typescript": "^6.0.0",
     "vitest": "^4.0.0"

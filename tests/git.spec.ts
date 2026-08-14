@@ -173,8 +173,11 @@ describe('host-owned Git boundary', () => {
     f.tracker.transitionRun(f.identity.runId, 'cancelled', { terminalReason: 'done', quiescent: true })
     expect(releaseTerminalRunLock(f.tracker, f.identity.runId)).toBe(true)
     authority.prepare('INSERT INTO active_locks (repository_id, run_tag, run_id, acquired_at) VALUES (?, ?, ?, ?)').run(f.discovery.repositoryId, f.identity.runTag, f.identity.runId, new Date().toISOString())
-    expect(releaseTerminalRunLock(f.tracker, f.identity.runId)).toBe(false)
+    expect(recoverTerminalRunLock(f.tracker, f.identity.runId)).toBe(true)
     expect(authority.prepare('SELECT 1 FROM active_locks WHERE run_id = ?').get(f.identity.runId)).toBeUndefined()
+    authority.prepare('INSERT INTO active_locks (repository_id, run_tag, run_id, acquired_at) VALUES (?, ?, ?, ?)').run('wrong-repository', f.identity.runTag, f.identity.runId, new Date().toISOString())
+    expect(() => recoverTerminalRunLock(f.tracker, f.identity.runId)).toThrowError(expect.objectContaining({ code: 'run-lock-identity' }))
+    expect(authority.prepare('SELECT repository_id FROM active_locks WHERE run_id = ?').get(f.identity.runId)?.['repository_id']).toBe('wrong-repository')
     authority.close()
   })
 

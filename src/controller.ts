@@ -8,7 +8,7 @@ import { createEvaluatorArtifactWriterFactory } from './evaluator-artifacts.js'
 import { createEvaluatorBoundary, freezeEvaluatorProvenance, revalidateEvaluatorBoundary, runEvaluator, type EvaluatorResult } from './evaluator.js'
 import {
   acquireControllerClaim, acquireRunLock, allocateRunWorktree, checkoutCandidateForEvaluation, commitCandidate, currentControllerProcessIdentity, discoverRepository, durableGitIdentity,
-  heartbeatControllerClaim, makeRunGitIdentity, reconcileAcceptedHead, reconcileRejectedHead, releaseControllerClaim, releaseTerminalRunLock,
+  heartbeatControllerClaim, makeRunGitIdentity, reconcileAcceptedHead, reconcileRejectedHead, recoverTerminalRunLock, releaseControllerClaim,
   removeRunWorktree, resolveGitExecutable, restoreAcceptedWorktree, snapshotCandidate, validateCandidate,
   verifyExactWorktree, type CandidateSnapshot, type ControllerProcessIdentity, type GitCommandOptions, type GitConfigBaseline,
   type RepositoryDiscovery, type RunGitIdentity,
@@ -401,10 +401,11 @@ export class AutoresearchRunController {
 
   private async finish(r: Runtime, specific: Record<string, unknown>, release = true): Promise<AutoresearchRunResult> {
     const value = { ...common(r), ...specific }
-    const safeRelease = release && r.tracker.recoveryState(r.runId).safeToReleaseTerminalLock
+    const recovery = r.tracker.recoveryState(r.runId)
+    const safeRelease = release && recovery.run['terminal_quiescent'] === 1 && recovery.processDisposition === 'quiescent'
     if (this.options.config.exportTsv) r.tracker.exportTsv(r.runId, r.tracker.layout.resolve(join('exports', `${r.runId}.tsv`)))
     if (safeRelease && this.options.config.cleanupWorktreesOnSuccess && !this.options.config.retainWorktrees) await removeRunWorktree(this.ctx, r.gitExecutable, r.discovery, r.identity, r.gitOptions)
-    if (safeRelease) releaseTerminalRunLock(r.tracker, r.runId)
+    if (safeRelease) recoverTerminalRunLock(r.tracker, r.runId)
     return decodeRunResult(value, r.policy.metricDirection, this.options.config.maxResultChars)
   }
 }
