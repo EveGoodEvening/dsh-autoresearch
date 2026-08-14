@@ -1,7 +1,9 @@
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
+import { Worker } from 'node:worker_threads'
 import { afterEach, describe, expect, it } from 'vitest'
 import { DurableTracker, TRACKER_BUSY_TIMEOUT_MS, TRACKER_SCHEMA_VERSION, TrackerBlockedError, TrackerTransitionError } from '../src/tracker.ts'
 
@@ -10,6 +12,48 @@ const SHA = 'a'.repeat(40)
 const HASH = 'b'.repeat(64)
 function fixturePath(name = 'tracker.sqlite'): string { const root = mkdtempSync(join(tmpdir(), 'autoresearch-tracker-')); roots.push(root); return join(root, name) }
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
+const trackerModuleUrl = pathToFileURL(join(import.meta.dirname, '..', 'src', 'tracker.ts')).href
+
+function trackerWorker(operation: string, data: Record<string, unknown>, barrier?: SharedArrayBuffer): Promise<Record<string, unknown>> {
+  const { promise, resolve, reject } = Promise.withResolvers<Record<string, unknown>>()
+  const worker = new Worker(`
+    const { parentPort, workerData } = require('node:worker_threads');
+    const { registerHooks } = require('node:module');
+    const { readFileSync } = require('node:fs');
+    const ts = require('typescript');
+    registerHooks({
+      resolve(specifier, context, nextResolve) {
+        if (specifier.startsWith('./') && specifier.endsWith('.js') && context.parentURL?.includes('/src/')) specifier = specifier.slice(0, -3) + '.ts';
+        return nextResolve(specifier, context);
+      },
+      load(url, context, nextLoad) {
+        if (!url.endsWith('.ts')) return nextLoad(url, context);
+        const source = ts.transpileModule(readFileSync(new URL(url), 'utf8'), { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText;
+        return { format: 'module', source, shortCircuit: true };
+      }
+    });
+    (async () => {
+      try {
+        if (workerData.barrier) { const gate = new Int32Array(workerData.barrier); Atomics.add(gate, 0, 1); Atomics.notify(gate, 0); Atomics.wait(gate, 1, 0); }
+        // Runtime-selected source URL lets worker threads exercise the implementation under test.
+        const { DurableTracker } = await import(workerData.moduleUrl);
+        const tracker = DurableTracker.open(workerData.data.path);
+        if (workerData.operation === 'export') tracker.exportTsv(workerData.data.runId, workerData.data.destination);
+        const version = tracker.schemaVersion(); tracker.close(); parentPort.postMessage({ ok: true, version });
+      } catch (error) { parentPort.postMessage({ ok: false, name: error?.name, code: error?.code, status: error?.status, message: error?.message, causeCode: error?.cause?.code, causeErrcode: error?.cause?.errcode }); }
+    })();
+  `, { eval: true, workerData: { moduleUrl: trackerModuleUrl, operation, data, barrier } })
+  worker.once('message', (message: Record<string, unknown>) => resolve(message))
+  worker.once('error', reject)
+  worker.once('exit', (code) => { if (code !== 0) reject(new Error(`tracker worker exited ${code}`)) })
+  return promise
+}
+
+async function releaseWorkers(barrier: SharedArrayBuffer, count: number): Promise<void> {
+  const gate = new Int32Array(barrier)
+  while (Atomics.load(gate, 0) !== count) await new Promise((resolve) => setTimeout(resolve, 5))
+  Atomics.store(gate, 1, 1); Atomics.notify(gate, 1, count)
+}
 
 function initial(runId = 'run-1') {
   return {
@@ -61,6 +105,30 @@ describe('durable SQLite tracker', () => {
     const corruptPath = fixturePath('corrupt.sqlite'); writeFileSync(corruptPath, 'not a sqlite database', { mode: 0o600 }); expectBlocked(corruptPath, 'tracker-schema-invalid')
     const malformedPath = fixturePath('malformed.sqlite'); const malformed = new DatabaseSync(malformedPath); malformed.exec(`CREATE TABLE schema_metadata (singleton INTEGER PRIMARY KEY, version INTEGER NOT NULL, created_at TEXT NOT NULL) STRICT; INSERT INTO schema_metadata VALUES (1, ${TRACKER_SCHEMA_VERSION}, 'now')`); malformed.close(); chmodSync(malformedPath, 0o600); expectBlocked(malformedPath, 'tracker-schema-invalid')
   })
+
+  it('serializes competing opens while migrating an old schema', async () => {
+    const path = fixturePath(); const seed = new DatabaseSync(path)
+    seed.exec("CREATE TABLE schema_metadata (singleton INTEGER PRIMARY KEY, version INTEGER NOT NULL, created_at TEXT NOT NULL) STRICT; INSERT INTO schema_metadata VALUES (1, 0, 'now')")
+    seed.close(); chmodSync(path, 0o600)
+    const barrier = new SharedArrayBuffer(8)
+    const opens = [trackerWorker('open', { path }, barrier), trackerWorker('open', { path }, barrier)]
+    await releaseWorkers(barrier, opens.length)
+    expect(await Promise.all(opens)).toEqual([{ ok: true, version: TRACKER_SCHEMA_VERSION }, { ok: true, version: TRACKER_SCHEMA_VERSION }])
+    const inspect = new DatabaseSync(path, { readOnly: true })
+    expect(inspect.prepare('SELECT version FROM schema_metadata').get()).toEqual({ version: TRACKER_SCHEMA_VERSION }); inspect.close()
+  }, 15_000)
+
+  it('classifies exhausted SQLite writer contention as a typed busy error with its cause', () => {
+    const path = fixturePath(); const seed = new DatabaseSync(path)
+    seed.exec("CREATE TABLE schema_metadata (singleton INTEGER PRIMARY KEY, version INTEGER NOT NULL, created_at TEXT NOT NULL) STRICT; INSERT INTO schema_metadata VALUES (1, 0, 'now')"); chmodSync(path, 0o600); seed.exec('BEGIN IMMEDIATE')
+    try {
+      DurableTracker.open(path); throw new Error('expected tracker open to exhaust its busy timeout')
+    } catch (error) {
+      expect(error).toMatchObject({ name: 'TrackerBlockedError', status: 'blocked', code: 'tracker-busy' })
+      const cause = (error as TrackerBlockedError).cause as { errcode?: number }
+      expect([5, 6]).toContain((cause.errcode ?? 0) & 0xff)
+    } finally { seed.exec('ROLLBACK'); seed.close() }
+  }, TRACKER_BUSY_TIMEOUT_MS + 2_000)
 
   it('rolls a failed migration back without advancing metadata', () => {
     const path = fixturePath(); const seed = new DatabaseSync(path)
@@ -142,6 +210,15 @@ describe('durable SQLite tracker', () => {
     tracker.close()
   })
 
+  it.each(['accepted', 'rejected'] as const)('%s rejects every explicitly supplied failure-shaped field', (state) => {
+    const contradictions = [{ exitCode: null }, { exitCode: 0 }, { signal: null }, { signal: 'SIGTERM' }, { timedOut: false }, { timedOut: true }, { failureCode: undefined }, { failureCode: 'exit' }, { failureMessage: undefined }, { failureMessage: 'bad' }]
+    for (const contradiction of contradictions) {
+      const tracker = DurableTracker.open(fixturePath()); tracker.createRun(initial()); createRunningExperiment(tracker)
+      expect(() => tracker.transitionExperiment('exp-0', state, { metric: 1, decision: state === 'accepted' ? 'accept' : 'reject', ...contradiction })).toThrowError(/failure facts/)
+      tracker.close()
+    }
+  })
+
   it('publishes deterministic run-scoped TSV atomically and retries independently from committed state', () => {
     const databasePath = fixturePath(); const exportPath = join(databasePath, '..', 'compat', 'experiments.tsv'); mkdirSync(join(databasePath, '..', 'compat'), { mode: 0o700 })
     const tracker = DurableTracker.open(databasePath); tracker.createRun(initial()); createRunningExperiment(tracker); tracker.createAttemptIntent({ attemptId: 'attempt-1', runId: 'run-1', experimentId: 'exp-0', ordinal: 1 }, { kind: 'spawn' })
@@ -154,6 +231,17 @@ describe('durable SQLite tracker', () => {
     expect(readFileSync(join(databasePath, '..', 'compat', 'experiments.tsv'), 'utf8').split('\n')).toHaveLength(first.split('\n').length)
     tracker.close()
   })
+
+  it('atomically publishes one run-scoped TSV under concurrent writers', async () => {
+    const databasePath = fixturePath(); const exportPath = join(databasePath, '..', 'compat', 'experiments.tsv'); mkdirSync(join(databasePath, '..', 'compat'), { mode: 0o700 })
+    const tracker = DurableTracker.open(databasePath); tracker.createRun(initial()); createRunningExperiment(tracker); tracker.transitionExperiment('exp-0', 'accepted', { metric: 1, decision: 'accept' }); tracker.close()
+    const barrier = new SharedArrayBuffer(8)
+    const writers = [trackerWorker('export', { path: databasePath, runId: 'run-1', destination: exportPath }, barrier), trackerWorker('export', { path: databasePath, runId: 'run-1', destination: exportPath }, barrier)]
+    await releaseWorkers(barrier, writers.length)
+    expect(await Promise.all(writers)).toEqual([{ ok: true, version: TRACKER_SCHEMA_VERSION }, { ok: true, version: TRACKER_SCHEMA_VERSION }])
+    const published = readFileSync(exportPath, 'utf8')
+    expect(published.split('\n')).toHaveLength(3); expect(published).toContain('exp-0'); expect(statSync(exportPath).mode & 0o777).toBe(0o600)
+  }, 15_000)
 
   it('rejects public or symlinked state roots and arbitrary export destinations', () => {
     const publicRoot = mkdtempSync(join(tmpdir(), 'autoresearch-public-')); roots.push(publicRoot); chmodSync(publicRoot, 0o755)

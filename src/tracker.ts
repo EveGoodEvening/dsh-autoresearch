@@ -80,8 +80,7 @@ export class DurableTracker {
     } catch (error) {
       try { database?.close() } catch { /* preserve original failure */ }
       if (error instanceof TrackerBlockedError) throw error
-      const code = (error as NodeJS.ErrnoException).code
-      if (code === 'SQLITE_BUSY' || code === 'SQLITE_LOCKED') throw new TrackerBlockedError('tracker-busy', 'tracker schema is busy after the configured timeout', error)
+      if (isSqliteBusyOrLocked(error)) throw new TrackerBlockedError('tracker-busy', 'tracker schema is busy after the configured timeout', error)
       throw new TrackerBlockedError('tracker-schema-invalid', 'tracker is corrupt, malformed, or has an incompatible schema', error)
     }
   }
@@ -274,11 +273,19 @@ function validateExperimentFacts(state: ExperimentDurableState, facts: { metric?
   if (facts.metric !== undefined && !Number.isFinite(facts.metric)) throw new TrackerTransitionError('metric must be finite')
   const terminalFields = facts.metric !== undefined || facts.decision !== undefined || facts.exitCode !== undefined || facts.signal !== undefined || facts.timedOut !== undefined || facts.failureCode !== undefined || facts.failureMessage !== undefined
   if (!EXPERIMENT_TERMINAL[state]) { if (terminalFields) throw new TrackerTransitionError('nonterminal experiment transition cannot carry terminal outcome facts'); return }
-  if (state === 'accepted' || state === 'rejected') { if (facts.metric === undefined || !facts.decision) throw new TrackerTransitionError(`${state} requires a finite metric and decision`); if (facts.failureCode !== undefined || facts.failureMessage !== undefined || facts.timedOut === true || facts.signal != null) throw new TrackerTransitionError(`${state} cannot carry failure facts`); return }
+  if (state === 'accepted' || state === 'rejected') { if (facts.metric === undefined || !facts.decision) throw new TrackerTransitionError(`${state} requires a finite metric and decision`); if (hasOwn(facts, 'exitCode') || hasOwn(facts, 'signal') || hasOwn(facts, 'timedOut') || hasOwn(facts, 'failureCode') || hasOwn(facts, 'failureMessage')) throw new TrackerTransitionError(`${state} cannot carry failure facts`); return }
   if (facts.metric !== undefined || facts.decision !== undefined) throw new TrackerTransitionError(`${state} cannot carry decision metric facts`)
   if (!facts.failureCode || !facts.failureMessage) throw new TrackerTransitionError(`${state} requires failure code and message`)
   if (state === 'timed-out' && facts.timedOut !== true) throw new TrackerTransitionError('timed-out requires timedOut=true')
   if (state !== 'timed-out' && facts.timedOut === true) throw new TrackerTransitionError(`${state} cannot claim timeout`)
+}
+function hasOwn(value: object, property: PropertyKey): boolean { return Object.prototype.hasOwnProperty.call(value, property) }
+function isSqliteBusyOrLocked(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false
+  const sqliteError = error as { code?: unknown; errcode?: unknown }
+  if (sqliteError.code === 'SQLITE_BUSY' || sqliteError.code === 'SQLITE_LOCKED') return true
+  const numericCode = typeof sqliteError.errcode === 'number' ? sqliteError.errcode : typeof sqliteError.code === 'number' ? sqliteError.code : undefined
+  return numericCode !== undefined && ((numericCode & 0xff) === 5 || (numericCode & 0xff) === 6)
 }
 function canonicalJson(value: unknown): string { return JSON.stringify(sortJson(value)) }
 function sortJson(value: unknown): unknown { if (Array.isArray(value)) return value.map(sortJson); if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, item]) => [key, sortJson(item)])); if (typeof value === 'number' && !Number.isFinite(value)) throw new TypeError('tracker JSON snapshots require finite numbers'); if (value === undefined || typeof value === 'bigint' || typeof value === 'function' || typeof value === 'symbol') throw new TypeError('tracker snapshots must be JSON values'); return value }
