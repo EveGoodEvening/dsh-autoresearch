@@ -38,6 +38,8 @@ export class AutoresearchRunController {
   private readonly aborter = new AbortController()
   private runPromise?: Promise<AutoresearchRunResult>
   private cancelReason = 'cancelled'
+  private jobId?: string
+  private readySettled = false
   private tracker?: DurableTracker
   private quiescenceFailure?: ProposalAgentError
 
@@ -48,19 +50,20 @@ export class AutoresearchRunController {
     if (options.signal.aborted) abort()
   }
 
+  setJobId(jobId: string): void { if (this.runPromise) throw new Error('job id must be assigned before controller execution'); if (this.jobId !== undefined) throw new Error('job id is already assigned'); this.jobId = normalizedReason(jobId) }
   run(): Promise<AutoresearchRunResult> { return this.runPromise ??= this.execute() }
   cancel(reason = 'cancelled'): void { if (this.aborter.signal.aborted) return; this.cancelReason = normalizedReason(reason); this.aborter.abort(new Error(this.cancelReason)) }
-  async dispose(): Promise<void> { this.cancel('controller disposed'); if (this.runPromise) await this.runPromise.catch(() => undefined); else this.rejectReady(new Error('controller disposed before start')) }
+  async dispose(): Promise<void> { this.cancel('controller disposed'); if (this.runPromise) await this.runPromise.catch(() => undefined); else if (!this.readySettled) { this.readySettled = true; this.rejectReady(new Error('controller disposed before start')) } }
 
   private async execute(): Promise<AutoresearchRunResult> {
     let runtime: Runtime | undefined
     try {
       runtime = await this.initialize()
       this.tracker = runtime.tracker
-      this.resolveReady({ runId: runtime.runId, tracker: runtime.tracker.path, branch: runtime.identity.branch, worktree: runtime.identity.worktree })
+      // Readiness is published by drive() only after durable branch/worktree allocation.
       return await this.drive(runtime)
     } catch (error) {
-      this.rejectReady(error)
+      if (!this.readySettled) { this.readySettled = true; this.rejectReady(error) }
       if (runtime && this.aborter.signal.aborted) return await this.cancelled(runtime)
       throw error
     } finally {
@@ -91,12 +94,17 @@ export class AutoresearchRunController {
     const provenanceSha256 = provenance.sha256
     const identity = makeRunGitIdentity(this.options.config, discovery, runTag, runId)
     if (!existing) tracker.createRun({ runId, repositoryId: discovery.repositoryId, repository: discovery.repository, gitCommonDir: discovery.gitCommonDir, callerCwd: discovery.callerCwd, startCommit: discovery.startCommit, runTag, branch: identity.branch, worktree: identity.worktree, agentId: String(this.options.parent.id), sessionId: String(this.options.parent.session.header.id), policy: identityPolicy, policySha256, provenance, provenanceSha256 })
+    if (this.jobId !== undefined) tracker.checkpointRun(runId, { outcome: { kind: 'background-job-registered', jobId: this.jobId } })
     return { runId, policy: identityPolicy, discovery, identity, tracker, gitExecutable, policySha256, provenanceSha256, gitOptions }
   }
 
   private async drive(runtime: Runtime): Promise<AutoresearchRunResult> {
     let directive = await reconcileRecovery(this.ctx, { ...runtime, signal: this.aborter.signal })
     while (true) {
+      if (directive.kind !== 'initialize' && !this.readySettled) {
+        this.readySettled = true
+        this.resolveReady({ runId: runtime.runId, tracker: runtime.tracker.path, branch: runtime.identity.branch, worktree: runtime.identity.worktree })
+      }
       if (this.aborter.signal.aborted) return this.cancelled(runtime)
       if (directive.kind === 'initialize') { await this.allocateAndStartBaseline(runtime, directive.reuseLock); directive = await reconcileRecovery(this.ctx, { ...runtime, signal: this.aborter.signal }); continue }
       if (directive.kind === 'evaluate') { await this.evaluate(runtime, directive.experiment, directive.commit, directive.createExperiment, directive.attemptOrdinal); directive = await reconcileRecovery(this.ctx, { ...runtime, signal: this.aborter.signal }); continue }

@@ -1,202 +1,124 @@
-import { describe, expect, it, vi } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
-import type { JobStart } from '@deepseek-ai/dsh-jobs'
+import type { JobHooks, JobOutcome, JobStart } from '@deepseek-ai/dsh-jobs'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
-import type { WorkflowResult, WorkflowRun, WorkflowStartRequest } from '@deepseek-ai/dsh-workflow'
-import { apply } from '../src/index.ts'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const baselineReport = {
-  status: 'baseline',
-  metric: 1.25,
-  experimentCommit: 'abc1234',
-  headCommit: 'abc1234',
-  summary: 'Established the baseline.',
-  evidence: ['evaluation printed score=1.25', 'HEAD is abc1234'],
-  nextIdea: 'Try a smaller learning rate.',
-  blocker: '',
-} as const
+const state = vi.hoisted(() => ({
+  controllers: [] as Array<{
+    ready: Promise<{ runId: string; tracker: string; branch: string; worktree: string }>
+    setJobId: ReturnType<typeof vi.fn>
+    run: ReturnType<typeof vi.fn>
+    cancel: ReturnType<typeof vi.fn>
+    dispose: ReturnType<typeof vi.fn>
+  }>,
+  runResult: {
+    status: 'budget-limited', runId: 'run-1', tracker: '/tracker.sqlite',
+    counts: { experimentsStarted: 0, experimentsCompleted: 0, attempts: 1 },
+    artifacts: [], best: { metric: 1, commit: 'a'.repeat(40), experimentId: 'baseline' },
+  },
+}))
 
-function completedResult(value: unknown, agentsStarted = 1): WorkflowResult {
-  return { value, stopReason: 'completed', agentsStarted }
-}
+vi.mock('../src/controller.js', () => ({
+  AutoresearchRunController: class {
+    readonly ready = Promise.resolve({ runId: 'run-1', tracker: '/tracker.sqlite', branch: 'autoresearch/run-1', worktree: '/worktree' })
+    readonly setJobId = vi.fn()
+    readonly cancel = vi.fn()
+    readonly dispose = vi.fn(async () => undefined)
+    readonly run = vi.fn(async () => state.runResult)
+    constructor() { state.controllers.push(this) }
+  },
+}))
 
-function fakeRun(result: WorkflowResult): WorkflowRun & { dispose: ReturnType<typeof vi.fn>; cancel: ReturnType<typeof vi.fn> } {
-  return {
-    id: 'workflow-1' as WorkflowRun['id'],
-    meta: { name: 'autoresearch', description: 'test' },
-    result: Promise.resolve(result),
-    cancel: vi.fn(),
-    dispose: vi.fn(async () => {}),
-  }
-}
+import { apply, inject } from '../src/index.ts'
 
 interface Harness {
-  readonly tool: ToolDefinition
-  readonly prompt: { name: string; order: number; text: string }
-  readonly starts: WorkflowStartRequest[]
-  readonly jobs: JobStart[]
+  tool: ToolDefinition
+  prompt?: { name: string; order: number; text: string }
+  job?: JobStart
+  hooks?: JobHooks
+  dispose(): Promise<void>
 }
 
-function harness(result: WorkflowResult, config: Parameters<typeof apply>[1] = {}): Harness {
+function harness(): Harness {
   let tool: ToolDefinition | undefined
-  let prompt: Harness['prompt'] | undefined
-  const starts: WorkflowStartRequest[] = []
-  const jobs: JobStart[] = []
-  const ctx = {
-    systemPrompt: {
-      section(section: Harness['prompt']) {
-        prompt = section
-        return () => {}
-      },
-    },
-    tools: {
-      register(definition: ToolDefinition) {
-        tool = definition
-        return () => {}
-      },
-    },
-    subagents: {
-      getProvider() {
-        return {
-          name: 'spawn',
-          capabilities: { outputSchema: true },
-          inheritsParentContext: false,
-        }
-      },
-    },
-    workflowEngine: {
-      start(request: WorkflowStartRequest) {
-        starts.push(request)
-        return fakeRun(result)
-      },
-    },
-    jobs: {
-      start(spec: JobStart) {
-        jobs.push(spec)
-        return 'autoresearch-1'
-      },
-    },
+  let prompt: Harness['prompt']
+  let cleanup: (() => Promise<void>) | undefined
+  const value: Harness = {
+    get tool() { if (!tool) throw new Error('tool missing'); return tool },
+    get prompt() { return prompt },
+    get job() { return thisJob },
+    get hooks() { return thisHooks },
+    async dispose() { await cleanup?.() },
   }
-  apply(ctx as unknown as Context, config)
-  if (tool === undefined || prompt === undefined) throw new Error('plugin did not register its contributions')
-  return { tool, prompt, starts, jobs }
+  let thisJob: JobStart | undefined
+  let thisHooks: JobHooks | undefined
+  const ctx = {
+    agents: { create: vi.fn() },
+    subprocess: {},
+    systemPrompt: { section(section: Harness['prompt']) { prompt = section; return vi.fn() } },
+    tools: { register(definition: ToolDefinition) { tool = definition; return vi.fn() } },
+    jobs: { start(spec: JobStart) { thisJob = spec; thisHooks = spec.run(); return 'autoresearch-1' } },
+    effect(factory: () => () => Promise<void>) { cleanup = factory(); return cleanup },
+  }
+  apply(ctx as unknown as Context, {})
+  return value
 }
 
-const args = {
-  objective: 'Reduce validation loss.',
-  run_tag: 'aug14',
-  mutable_files: ['train.py'],
-  evaluation_command: 'uv run train.py',
-  metric_name: 'val_loss',
-  metric_direction: 'minimize',
-  experiment_timeout_minutes: 10,
-  max_experiments: 3,
-  run_in_background: false,
+const input = {
+  objective: 'reduce score', run_tag: 'trial', mutable_globs: ['src/**'],
+  evaluation: { command: 'node', args: ['score.mjs'] }, metric_name: 'score', metric_direction: 'minimize',
 } as const
+const parent = { id: 'parent', session: { header: { id: 'session', cwd: '/repo' } } }
+const execution = (signal = new AbortController().signal) => ({ agent: parent, signal }) as never
 
-const parent = { id: 'parent' }
+beforeEach(() => {
+  state.controllers.length = 0
+  state.runResult = { status: 'budget-limited', runId: 'run-1', tracker: '/tracker.sqlite', counts: { experimentsStarted: 0, experimentsCompleted: 0, attempts: 1 }, artifacts: [], best: { metric: 1, commit: 'a'.repeat(40), experimentId: 'baseline' } }
+})
 
-function execution(signal = new AbortController().signal) {
-  return { agent: parent, signal } as never
-}
-
-describe('dsh-autoresearch', () => {
-  it('registers explicit policy and starts a bounded foreground workflow', async () => {
-    const terminal = {
-      status: 'budget-limited',
-      experimentsStarted: 3,
-      bestMetric: 1.25,
-      bestCommit: 'abc1234',
-      lastReport: baselineReport,
-    }
-    const test = harness(completedResult(terminal, 3), { maxExperiments: 5 })
-
-    const value = await test.tool.execute(args, execution())
-
-    expect(test.prompt.name).toBe('tool:autoresearch')
-    expect(test.prompt.text).toContain('explicitly asks')
-    expect(value).toEqual({
-      kind: 'foreground',
-      runId: 'workflow-1',
-      agentsStarted: 3,
-      result: terminal,
-    })
-    expect(test.starts).toHaveLength(1)
-    expect(test.starts[0]).toMatchObject({
-      subagentProvider: 'spawn',
-      maxTotalAgents: 3,
-      parent,
-    })
-    expect(test.starts[0]?.args).toMatchObject({
-      objective: 'Reduce validation loss.',
-      runTag: 'aug14',
-      resultsFile: 'autoresearch-results.tsv',
-      branchPrefix: 'autoresearch/',
-      maxExperiments: 3,
-    })
+describe('autoresearch production wiring', () => {
+  it('injects only the controller production services and registers direct-human guidance', () => {
+    expect(inject).toEqual(['agents', 'jobs', 'subprocess', 'systemPrompt', 'tools'])
+    const test = harness()
+    expect(test.tool.name).toBe('autoresearch')
+    expect(test.prompt?.text).toContain('direct human')
+    expect(JSON.stringify(test.tool.parameters)).not.toContain('evaluation_command')
   })
 
-  it('starts a generic background job and maps terminal workflow output', async () => {
-    const terminal = {
-      status: 'target-reached',
-      experimentsStarted: 1,
-      bestMetric: 1.25,
-      bestCommit: 'abc1234',
-      lastReport: baselineReport,
-    }
-    const test = harness(completedResult(terminal))
-
-    const value = await test.tool.execute({ ...args, run_in_background: true }, execution())
-
-    expect(value).toEqual({ kind: 'background', jobId: 'autoresearch-1' })
-    expect(test.starts).toHaveLength(0)
-    expect(test.jobs).toHaveLength(1)
-    expect(test.jobs[0]).toMatchObject({ kind: 'autoresearch', owner: parent })
-
-    const hooks = test.jobs[0]!.run()
-    expect(test.starts).toHaveLength(1)
-    expect(test.starts[0]?.signal).toBeInstanceOf(AbortSignal)
-    await expect(hooks.done).resolves.toMatchObject({
-      status: 'completed',
-      detail: 'target-reached',
-      output: expect.stringContaining('Best metric: 1.25'),
-    })
+  it('returns the canonical foreground controller result', async () => {
+    const test = harness()
+    const result = await test.tool.execute({ ...input, mode: 'foreground' }, execution())
+    expect(result).toEqual({ kind: 'foreground', run: state.runResult })
+    expect(state.controllers[0]?.run).toHaveBeenCalledOnce()
+    expect(state.controllers[0]?.dispose).toHaveBeenCalledOnce()
+    expect(test.job).toBeUndefined()
   })
 
-  it('accepts a concrete blocker before baseline creation', async () => {
-    const blockedReport = {
-      status: 'blocked',
-      metric: null,
-      experimentCommit: 'abc1234',
-      headCommit: 'abc1234',
-      summary: 'The requested branch already exists.',
-      evidence: ['git branch --list returned autoresearch/aug14'],
-      nextIdea: '',
-      blocker: 'A fresh run requires a branch name that does not already exist.',
-    }
-    const terminal = {
-      status: 'blocked',
-      experimentsStarted: 1,
-      bestMetric: null,
-      bestCommit: 'abc1234',
-      lastReport: blockedReport,
-    }
-    const test = harness(completedResult(terminal))
-
-    await expect(test.tool.execute(args, execution())).resolves.toMatchObject({
-      kind: 'foreground',
-      result: terminal,
-    })
+  it('starts an owner-bound background job, assigns its id before running, and waits for readiness', async () => {
+    const test = harness()
+    const result = await test.tool.execute(input, execution())
+    expect(test.job).toMatchObject({ kind: 'autoresearch', owner: parent })
+    expect(state.controllers[0]?.setJobId).toHaveBeenCalledWith('autoresearch-1')
+    expect(state.controllers[0]?.setJobId.mock.invocationCallOrder[0]).toBeLessThan(state.controllers[0]?.run.mock.invocationCallOrder[0] ?? 0)
+    expect(result).toEqual({ kind: 'background', jobId: 'autoresearch-1', runId: 'run-1', tracker: '/tracker.sqlite', branch: 'autoresearch/run-1', worktree: '/worktree' })
+    await expect(test.hooks?.done).resolves.toMatchObject({ status: 'completed', detail: 'budget-limited' })
   })
 
-  it('rejects unsafe inputs and deployment-cap escalation before starting work', async () => {
-    const test = harness(completedResult(null), { maxExperiments: 2 })
+  it('uses synchronous idempotent cancellation and maps settled cancellation to killed', async () => {
+    state.runResult = { ...state.runResult, status: 'cancelled', lastState: 'ready', reason: 'stop', quiescent: true } as never
+    const test = harness()
+    await test.tool.execute(input, execution())
+    test.hooks?.cancel('stop')
+    test.hooks?.cancel('again')
+    expect(state.controllers[0]?.cancel).toHaveBeenCalledTimes(1)
+    await expect(test.hooks?.done).resolves.toMatchObject({ status: 'killed', detail: 'cancelled' })
+  })
 
-    await expect(test.tool.execute({ ...args, mutable_files: ['../train.py'] }, execution()))
-      .rejects.toThrow('parent traversal')
-    await expect(test.tool.execute({ ...args, max_experiments: 3 }, execution()))
-      .rejects.toThrow('exceeds the deployment ceiling 2')
-    expect(test.starts).toHaveLength(0)
-    expect(test.jobs).toHaveLength(0)
+  it('settles completed background resources before plugin unload', async () => {
+    const test = harness()
+    await test.tool.execute(input, execution())
+    await expect(test.hooks?.done).resolves.toMatchObject({ status: 'completed' })
+    await test.dispose()
+    expect(state.controllers[0]?.dispose).toHaveBeenCalled()
   })
 })
