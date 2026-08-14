@@ -162,7 +162,7 @@ class ControllerSubprocess {
     if (spec.argv[0] === 'fake-evaluator') {
       const step = this.evaluations[this.evaluatorSpawns++] ?? { stdout: '{"score":999}\n' }
       step.edit?.(spec.cwd)
-      const script = step.hang ? 'setInterval(() => {}, 1000)' : `process.stdout.write(${JSON.stringify(step.stdout ?? '')});process.stderr.write(${JSON.stringify(step.stderr ?? '')});process.exit(${step.exitCode ?? 0})`
+      const script = step.hang ? 'setInterval(() => {}, 1000)' : step.signal ? `process.kill(process.pid, ${JSON.stringify(step.signal)})` : `process.stdout.write(${JSON.stringify(step.stdout ?? '')});process.stderr.write(${JSON.stringify(step.stderr ?? '')});process.exit(${step.exitCode ?? 0})`
       const stdout: Buffer[] = []; const stderr: Buffer[] = []
       const child = spawn(process.execPath, ['-e', script], { cwd: spec.cwd, env: spec.env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] })
       child.stdout.on('data', (chunk: Buffer) => stdout.push(chunk)); child.stderr.on('data', (chunk: Buffer) => stderr.push(chunk))
@@ -234,6 +234,19 @@ describe('controller real Git/SQLite outcomes', () => {
     const f = controllerFixture([step])
     try { const { result, tracker } = await runControllerCase(f); expect(result.status).toBe('baseline-blocked'); expect(f.creates).toHaveLength(0); expect(tracker.database.prepare('SELECT state FROM experiments').get()?.['state']).toBe('crashed'); expect(tracker.database.prepare('SELECT COUNT(*) AS n FROM artifacts').get()?.['n']).toBe(2); tracker.close() } finally { rmSync(f.root, { recursive: true, force: true }) }
   })
+
+  it('persists baseline signal artifacts with zero child allocation and zero candidate budget', async () => {
+    const f = controllerFixture([{ signal: 'SIGTERM', stdout: 'partial', stderr: 'terminated' }])
+    try {
+      const { result, tracker } = await runControllerCase(f, { max_experiments: 1 })
+      expect(result).toMatchObject({ status: 'baseline-blocked', counts: { experimentsStarted: 0, experimentsCompleted: 0, attempts: 1 } })
+      expect(f.creates).toHaveLength(0)
+      expect(tracker.database.prepare('SELECT state, signal FROM experiments').get()).toMatchObject({ state: 'crashed', signal: 'SIGTERM' })
+      expect(tracker.database.prepare('SELECT COUNT(*) AS n FROM artifacts').get()?.['n']).toBe(2)
+      tracker.close()
+    } finally { rmSync(f.root, { recursive: true, force: true }) }
+  })
+
 
   it('classifies a real evaluator timeout, awaits process-tree exit, retains artifacts, and spawns no child', async () => {
     const f = controllerFixture([{ hang: true }])

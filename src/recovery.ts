@@ -14,7 +14,16 @@ export type RecoveryBlockCode = 'run-missing' | 'repository-mismatch' | 'start-c
 export interface RecoveredExperiment { readonly experimentId: ExperimentId; readonly ordinal: number; readonly kind: 'baseline' | 'candidate'; readonly parentCommit: FullCommitSha; readonly candidateCommit?: FullCommitSha }
 export type RecoveredEvaluation = { readonly kind: 'measured'; readonly attemptId: AttemptId; readonly metric: number; readonly provenanceSha256: string; readonly exit: EvaluatorAttemptFacts; readonly artifacts: readonly ArtifactRecord[] } | { readonly kind: 'failed'; readonly attemptId: AttemptId; readonly code: Extract<EvaluatorResult, { kind: 'failed' }>['code']; readonly message: string; readonly provenanceSha256: string; readonly exit: EvaluatorAttemptFacts; readonly artifacts: readonly ArtifactRecord[] }
 export interface RecoveryRequest { readonly tracker: DurableTracker; readonly runId: RunId; readonly discovery: RepositoryDiscovery; readonly identity: RunGitIdentity; readonly policy: NormalizedRunPolicy; readonly policySha256: string; readonly provenanceSha256: string; readonly gitExecutable: string; readonly gitOptions: Omit<GitCommandOptions, 'cwd' | 'signal'>; readonly signal: AbortSignal }
-export type RecoveryDirective = { readonly kind: 'initialize'; readonly runId: RunId; readonly startCommit: FullCommitSha } | { readonly kind: 'ready'; readonly runId: RunId; readonly best: BestResult; readonly nextOrdinal: number; readonly restoreCommit: FullCommitSha } | { readonly kind: 'commit-candidate'; readonly runId: RunId; readonly experiment: RecoveredExperiment; readonly snapshot: CandidateSnapshot; readonly validatedPaths: readonly string[] } | { readonly kind: 'evaluate'; readonly runId: RunId; readonly experiment: RecoveredExperiment; readonly commit: FullCommitSha; readonly createExperiment: boolean; readonly attemptOrdinal: number; readonly rerun: boolean } | { readonly kind: 'finalize-evaluation'; readonly runId: RunId; readonly experiment: RecoveredExperiment; readonly evaluation: RecoveredEvaluation } | { readonly kind: 'reconcile-candidate'; readonly runId: RunId; readonly experiment: RecoveredExperiment; readonly candidateCommit: FullCommitSha; readonly expectedAcceptedCommit: FullCommitSha; readonly outcome: { readonly kind: 'accept'; readonly metric: number } | { readonly kind: 'reject'; readonly metric: number } | { readonly kind: 'cleanup'; readonly terminalExperimentState: 'crashed' | 'timed-out' | 'policy-violation' | 'cancelled' } } | { readonly kind: 'terminal'; readonly runId: RunId; readonly state: 'completed' | 'baseline-blocked' | 'blocked' | 'round-failed' | 'cancelled'; readonly lock: 'release' | 'already-released' | 'retain' } | { readonly kind: 'blocked'; readonly runId: RunId; readonly code: RecoveryBlockCode; readonly evidence: readonly BlockerEvidence[]; readonly lock: 'retain' | 'release-after-persist' }
+export type RecoveryDirective =
+  | { readonly kind: 'initialize'; readonly runId: RunId; readonly startCommit: FullCommitSha; readonly reuseLock: boolean }
+  | { readonly kind: 'settle-baseline'; readonly runId: RunId; readonly experiment: RecoveredExperiment; readonly outcome: ({ readonly kind: 'accept'; readonly metric: number } | { readonly kind: 'fail'; readonly state: 'crashed' | 'timed-out' | 'policy-violation' | 'cancelled'; readonly code: string; readonly message: string; readonly quiescent: boolean }) }
+  | { readonly kind: 'ready'; readonly runId: RunId; readonly best: BestResult; readonly nextOrdinal: number; readonly restoreCommit: FullCommitSha }
+  | { readonly kind: 'commit-candidate'; readonly runId: RunId; readonly experiment: RecoveredExperiment; readonly snapshot: CandidateSnapshot; readonly validatedPaths: readonly string[] }
+  | { readonly kind: 'evaluate'; readonly runId: RunId; readonly experiment: RecoveredExperiment; readonly commit: FullCommitSha; readonly createExperiment: boolean; readonly attemptOrdinal: number; readonly rerun: boolean }
+  | { readonly kind: 'finalize-evaluation'; readonly runId: RunId; readonly experiment: RecoveredExperiment; readonly evaluation: RecoveredEvaluation }
+  | { readonly kind: 'reconcile-candidate'; readonly runId: RunId; readonly experiment: RecoveredExperiment; readonly candidateCommit: FullCommitSha; readonly expectedAcceptedCommit: FullCommitSha; readonly outcome: ({ readonly kind: 'accept' | 'reject'; readonly metric: number } | { readonly kind: 'cleanup'; readonly terminalExperimentState: 'crashed' | 'timed-out' | 'policy-violation' | 'cancelled' }) }
+  | { readonly kind: 'blocked'; readonly runId: RunId; readonly code: RecoveryBlockCode; readonly evidence: readonly BlockerEvidence[]; readonly lock: 'retain' | 'release-after-persist' }
+  | { readonly kind: 'terminal'; readonly runId: RunId; readonly state: 'completed' | 'baseline-blocked' | 'blocked' | 'round-failed' | 'cancelled'; readonly lock: 'release' | 'retain' | 'already-released' }
 
 const SHA = /^[0-9a-f]{40}$/u
 const HASH = /^[0-9a-f]{64}$/u
@@ -38,7 +47,7 @@ export async function reconcileRecovery(ctx: Context, request: RecoveryRequest):
   if (recovery.activeLock && (text(recovery.activeLock['repository_id']) !== request.discovery.repositoryId || text(recovery.activeLock['run_tag']) !== text(run['run_tag']) || text(recovery.activeLock['run_id']) !== request.runId)) return blocked(request, 'lock-mismatch', 'active lock identity differs from durable run identity', 'retain')
   if (TERMINAL[state]) return terminalDirective(request, state, recovery)
   if (state !== 'initializing' && !recovery.activeLock) return blocked(request, 'lock-mismatch', 'non-initial run has no active run lock', 'retain')
-  if (state === 'initializing' && !recovery.activeLock) return { kind: 'initialize', runId: request.runId, startCommit: request.discovery.startCommit }
+  if (state === 'initializing') return { kind: 'initialize', runId: request.runId, startCommit: request.discovery.startCommit, reuseLock: Boolean(recovery.activeLock) }
 
   const inspection = await inspectRunGitState(ctx, request.gitExecutable, request.discovery, request.identity, { ...request.gitOptions, signal: request.signal })
   const gitFailure = validateGitInspection(request, state, inspection)
@@ -48,7 +57,6 @@ export async function reconcileRecovery(ctx: Context, request: RecoveryRequest):
   const attempts = request.tracker.database.prepare('SELECT * FROM attempts WHERE run_id = ? ORDER BY experiment_id, ordinal').all(request.runId) as Row[]
   if (experiments.filter(row => !isExperimentTerminal(text(row['state']))).length > 1) return blocked(request, 'state-ambiguous', 'multiple unresolved experiments exist', 'retain')
 
-  if (state === 'initializing') return { kind: 'initialize', runId: request.runId, startCommit: request.discovery.startCommit }
   if (state === 'ready') return readyDirective(request, run, experiments)
 
   const row = recovery.unresolvedExperiment ?? experiments.at(-1)
@@ -75,6 +83,8 @@ export async function reconcileRecovery(ctx: Context, request: RecoveryRequest):
     return evaluationDirective(request, experiment, row, attempts)
   }
 
+  if (state === 'baseline-running' && isExperimentTerminal(text(row['state']))) return baselineSettlement(request, experiment, row)
+  if ((state === 'candidate-running' || state === 'deciding') && isExperimentTerminal(text(row['state']))) return decidingDirective(request, run, experiment, row, attempts)
   if (state === 'baseline-running' || state === 'candidate-running') return evaluationDirective(request, experiment, row, attempts)
   if (state === 'deciding') return decidingDirective(request, run, experiment, row, attempts)
   return blocked(request, 'state-ambiguous', `unsupported nonterminal state ${state}`, 'retain')
@@ -133,7 +143,7 @@ function evaluationDirective(request: RecoveryRequest, experiment: RecoveredExpe
 function reconstructEvaluation(request: RecoveryRequest, experiment: RecoveredExperiment, attempt: Row): RecoveredEvaluation | undefined {
   if (!attempt['exited_at']) return undefined
   const artifacts = request.tracker.database.prepare('SELECT * FROM artifacts WHERE run_id = ? AND experiment_id = ? AND attempt_id = ? ORDER BY kind').all(request.runId, experiment.experimentId, text(attempt['attempt_id'])) as Row[]
-  if (artifacts.length === 0) return undefined
+  if (artifacts.length === 0) throw new RecoveryEvidenceError('artifact-incomplete', 'completed evaluator attempt has no durable artifacts')
   if (artifacts.length !== 2 || artifacts.map(row => text(row['kind'])).sort().join(',') !== 'stderr,stdout') throw new RecoveryEvidenceError('artifact-incomplete', 'durable attempt artifacts are incomplete or duplicated')
   const decoded: ArtifactRecord[] = []
   let stdout = ''
@@ -165,6 +175,16 @@ function reconstructEvaluation(request: RecoveryRequest, experiment: RecoveredEx
   if (truncated) return { kind: 'failed', attemptId, code: 'output-limit', message: 'evaluator output was truncated', provenanceSha256, exit, artifacts: decoded }
   try { return { kind: 'measured', attemptId, metric: parseFinalLineMetric(stdout, request.policy.metricName), provenanceSha256, exit, artifacts: decoded } }
   catch (error) { return { kind: 'failed', attemptId, code: 'metric-protocol', message: error instanceof Error ? error.message : String(error), provenanceSha256, exit, artifacts: decoded } }
+}
+
+function baselineSettlement(request: RecoveryRequest, experiment: RecoveredExperiment, row: Row): RecoveryDirective {
+  const state = text(row['state'])
+  const metric = number(row['metric'])
+  if (state === 'accepted' && metric !== undefined) return { kind: 'settle-baseline', runId: request.runId, experiment, outcome: { kind: 'accept', metric } }
+  const terminal = terminalExperimentState(row)
+  if (!terminal) return blocked(request, 'state-ambiguous', 'terminal baseline lacks an accepted metric or failure state', 'retain')
+  const uncertain = request.tracker.database.prepare('SELECT 1 FROM attempts WHERE experiment_id = ? AND process_tree_quiescent IS NOT 1 LIMIT 1').get(experiment.experimentId)
+  return { kind: 'settle-baseline', runId: request.runId, experiment, outcome: { kind: 'fail', state: terminal, code: text(row['failure_code']) || terminal, message: text(row['failure_message']) || terminal, quiescent: !uncertain } }
 }
 
 function decidingDirective(request: RecoveryRequest, run: Row, experiment: RecoveredExperiment, row: Row, attempts: Row[]): RecoveryDirective {

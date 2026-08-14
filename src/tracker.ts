@@ -128,7 +128,16 @@ export class DurableTracker {
     })
   }
   acquireActiveLock(runId: string, repositoryId: string, runTag: string, acquiredAt = new Date().toISOString()): void {
-    this.transaction(() => { const run = this.requireRun(runId); if (run['repository_id'] !== repositoryId || run['run_tag'] !== runTag) throw new TrackerTransitionError('active lock identity must match immutable run identity'); this.database.prepare('INSERT INTO active_locks (repository_id, run_tag, run_id, acquired_at) VALUES (?, ?, ?, ?)').run(repositoryId, runTag, runId, acquiredAt) })
+    this.transaction(() => {
+      const run = this.requireRun(runId)
+      if (run['repository_id'] !== repositoryId || run['run_tag'] !== runTag) throw new TrackerTransitionError('active lock identity must match immutable run identity')
+      const active = this.database.prepare('SELECT run_id, repository_id, run_tag FROM active_locks WHERE repository_id = ? AND run_tag = ? AND released_at IS NULL').get(repositoryId, runTag)
+      if (active) {
+        if (active['run_id'] === runId && active['repository_id'] === repositoryId && active['run_tag'] === runTag) return
+        throw new TrackerTransitionError('active lock is owned by a different run')
+      }
+      this.database.prepare('INSERT INTO active_locks (repository_id, run_tag, run_id, acquired_at) VALUES (?, ?, ?, ?)').run(repositoryId, runTag, runId, acquiredAt)
+    })
   }
   releaseActiveLock(runId: string, releasedAt = new Date().toISOString()): boolean {
     return this.transaction(() => {

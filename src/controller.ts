@@ -98,9 +98,10 @@ export class AutoresearchRunController {
     let directive = await reconcileRecovery(this.ctx, { ...runtime, signal: this.aborter.signal })
     while (true) {
       if (this.aborter.signal.aborted) return this.cancelled(runtime)
-      if (directive.kind === 'initialize') { await this.allocateAndStartBaseline(runtime); directive = await reconcileRecovery(this.ctx, { ...runtime, signal: this.aborter.signal }); continue }
+      if (directive.kind === 'initialize') { await this.allocateAndStartBaseline(runtime, directive.reuseLock); directive = await reconcileRecovery(this.ctx, { ...runtime, signal: this.aborter.signal }); continue }
       if (directive.kind === 'evaluate') { await this.evaluate(runtime, directive.experiment, directive.commit, directive.createExperiment, directive.attemptOrdinal); directive = await reconcileRecovery(this.ctx, { ...runtime, signal: this.aborter.signal }); continue }
       if (directive.kind === 'finalize-evaluation') { await this.finalizeEvaluation(runtime, directive.experiment, directive.evaluation); directive = await reconcileRecovery(this.ctx, { ...runtime, signal: this.aborter.signal }); continue }
+      if (directive.kind === 'settle-baseline') { this.settleBaseline(runtime, directive); directive = await reconcileRecovery(this.ctx, { ...runtime, signal: this.aborter.signal }); continue }
       if (directive.kind === 'commit-candidate') { await this.commitRecoveredCandidate(runtime, directive.experiment, directive.snapshot, directive.validatedPaths); directive = await reconcileRecovery(this.ctx, { ...runtime, signal: this.aborter.signal }); continue }
       if (directive.kind === 'reconcile-candidate') { await this.reconcileCandidate(runtime, directive); directive = await reconcileRecovery(this.ctx, { ...runtime, signal: this.aborter.signal }); continue }
       if (directive.kind === 'ready') {
@@ -114,13 +115,15 @@ export class AutoresearchRunController {
     }
   }
 
-  private async allocateAndStartBaseline(r: Runtime): Promise<void> {
-    r.tracker.checkpointRun(r.runId, { intent: { kind: 'acquire-lock' } })
-    acquireRunLock(r.tracker, r.identity, r.discovery.repositoryId, this.options.config.maxActiveRunsPerRepository)
-    r.tracker.checkpointRun(r.runId, { outcome: { kind: 'lock-acquired' }, intent: { kind: 'allocate-worktree' } })
-    await allocateRunWorktree(this.ctx, r.gitExecutable, r.discovery, r.identity, durableGitIdentity(r.tracker, r.runId), { ...r.gitOptions, signal: this.aborter.signal })
+  private async allocateAndStartBaseline(r: Runtime, reuseLock: boolean): Promise<void> {
+    if (!reuseLock) {
+      r.tracker.checkpointRun(r.runId, { intent: { kind: 'acquire-lock' } })
+      acquireRunLock(r.tracker, r.identity, r.discovery.repositoryId, this.options.config.maxActiveRunsPerRepository)
+      r.tracker.checkpointRun(r.runId, { outcome: { kind: 'lock-acquired' }, intent: { kind: 'allocate-worktree' } })
+    }
+    await allocateRunWorktree(this.ctx, r.gitExecutable, r.discovery, r.identity, durableGitIdentity(r.tracker, r.runId), { ...r.gitOptions, signal: this.aborter.signal }, reuseLock)
     await verifyExactWorktree(this.ctx, r.gitExecutable, r.identity.worktree, r.discovery.startCommit, { ...r.gitOptions, signal: this.aborter.signal })
-    r.tracker.transitionRun(r.runId, 'baseline-running', { outcome: { kind: 'worktree-allocated-and-verified' } })
+    r.tracker.transitionRun(r.runId, 'baseline-running', { outcome: { kind: reuseLock ? 'worktree-reconciled-and-verified' : 'worktree-allocated-and-verified' } })
   }
 
   private async propose(r: Runtime, best: BestResult, ordinal: number): Promise<void> {
@@ -188,6 +191,16 @@ export class AutoresearchRunController {
     r.tracker.transitionRun(r.runId, 'deciding', { outcome: { kind: 'measured', metric: evaluation.metric } })
     r.tracker.checkpointRun(r.runId, { intent: { kind: 'decision', metric: evaluation.metric } })
   }
+  private settleBaseline(r: Runtime, directive: Extract<RecoveryDirective, { kind: 'settle-baseline' }>): void {
+    if (directive.outcome.kind === 'accept') {
+      const best = { metric: directive.outcome.metric, commit: directive.experiment.parentCommit, experimentId: directive.experiment.experimentId }
+      r.tracker.transitionRun(r.runId, 'ready', { best, outcome: { kind: 'baseline-settled', metric: directive.outcome.metric } })
+      return
+    }
+    const state = directive.outcome.state === 'cancelled' && directive.outcome.quiescent ? 'cancelled' : directive.outcome.quiescent ? 'baseline-blocked' : 'blocked'
+    r.tracker.transitionRun(r.runId, state, { terminalReason: directive.outcome.message, blockedCode: directive.outcome.quiescent ? directive.outcome.code : 'attempt-uncertain', quiescent: directive.outcome.quiescent })
+  }
+
   private failEvaluation(r: Runtime, experiment: RecoveredExperiment, evaluation: RecoveredEvaluation, code: string, message: string): void {
     const state: ExperimentDurableState = code === 'timeout' ? 'timed-out' : code === 'cancelled' ? 'cancelled' : code === 'provenance-mismatch' ? 'policy-violation' : 'crashed'
     r.tracker.commitTerminalExperiment(experiment.experimentId, state, experimentFacts(evaluation, { failureCode: code, failureMessage: message }))
@@ -197,17 +210,20 @@ export class AutoresearchRunController {
 
   private async reconcileCandidate(r: Runtime, directive: Extract<RecoveryDirective, { kind: 'reconcile-candidate' }>): Promise<void> {
     const best = durableBest(r.tracker, r.runId)
-    if (directive.outcome.kind !== 'cleanup') r.tracker.checkpointExperiment(directive.experiment.experimentId, { decision: directive.outcome.kind })
+    const experimentRow = r.tracker.database.prepare('SELECT state FROM experiments WHERE experiment_id = ?').get(directive.experiment.experimentId)
+    const experimentTerminal = experimentRow && !['baseline-pending', 'running'].includes(String(experimentRow['state']))
+    if (!experimentTerminal && directive.outcome.kind !== 'cleanup') r.tracker.checkpointExperiment(directive.experiment.experimentId, { decision: directive.outcome.kind })
+    if (r.tracker.getRun(r.runId)?.['state'] === 'candidate-running') r.tracker.transitionRun(r.runId, 'deciding', { outcome: { kind: 'terminal-experiment-recovered' } })
     r.tracker.checkpointRun(r.runId, { intent: { kind: 'git-reconciliation', outcome: directive.outcome } })
     if (directive.outcome.kind === 'accept') {
       await reconcileAcceptedHead(this.ctx, r.gitExecutable, r.identity.worktree, r.identity, directive.candidateCommit, { ...r.gitOptions, signal: this.aborter.signal })
       const next = { metric: directive.outcome.metric, commit: directive.candidateCommit, experimentId: directive.experiment.experimentId }
-      r.tracker.commitTerminalExperiment(directive.experiment.experimentId, 'accepted', { metric: next.metric, decision: 'accept' })
+      if (!experimentTerminal) r.tracker.commitTerminalExperiment(directive.experiment.experimentId, 'accepted', { metric: next.metric, decision: 'accept' })
       const target = r.policy.target !== undefined && isTargetReached(r.policy.metricDirection, next.metric, r.policy.target)
       r.tracker.transitionRun(r.runId, target ? 'completed' : 'ready', { best: next, outcome: { kind: 'reconciled', decision: 'accept' } })
     } else {
       await reconcileRejectedHead(this.ctx, r.gitExecutable, r.identity.worktree, r.identity, directive.candidateCommit, directive.expectedAcceptedCommit, { ...r.gitOptions, signal: this.aborter.signal })
-      if (directive.outcome.kind === 'reject') r.tracker.commitTerminalExperiment(directive.experiment.experimentId, 'rejected', { metric: directive.outcome.metric, decision: 'reject' })
+      if (!experimentTerminal && directive.outcome.kind === 'reject') r.tracker.commitTerminalExperiment(directive.experiment.experimentId, 'rejected', { metric: directive.outcome.metric, decision: 'reject' })
       r.tracker.transitionRun(r.runId, directive.outcome.kind === 'cleanup' ? 'round-failed' : 'ready', { best, outcome: { kind: 'reconciled', decision: directive.outcome.kind } })
     }
   }

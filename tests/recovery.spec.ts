@@ -56,8 +56,19 @@ describe('recovery reconciler', () => {
 
   it('authorizes initialization only from the exact immutable row without an active lock', async () => {
     const { tracker, request } = fixture(); createRun(tracker, request)
-    await expect(reconcileRecovery(unusedContext, request)).resolves.toEqual({ kind: 'initialize', runId: request.runId, startCommit: SHA })
+    await expect(reconcileRecovery(unusedContext, request)).resolves.toEqual({ kind: 'initialize', runId: request.runId, startCommit: SHA, reuseLock: false })
     tracker.close()
+  })
+
+  it('reuses a matching initialization lock and resumes the same worktree without reacquisition', async () => {
+    const f = await realFixture()
+    const directive = await reconcileRecovery(f.ctx, f.request)
+    expect(directive).toEqual({ kind: 'initialize', runId: f.request.runId, startCommit: f.request.discovery.startCommit, reuseLock: true })
+    f.tracker.acquireActiveLock(f.request.runId, f.request.discovery.repositoryId, f.request.identity.runTag)
+    await allocateRunWorktree(f.ctx, f.request.gitExecutable, f.request.discovery, f.request.identity, durableGitIdentity(f.tracker, f.request.runId), f.request.gitOptions, true)
+    expect(f.tracker.database.prepare('SELECT COUNT(*) AS n FROM active_locks WHERE run_id = ? AND released_at IS NULL').get(f.request.runId)?.['n']).toBe(1)
+    expect(execFileSync('git', ['-C', f.request.identity.worktree, 'rev-parse', 'HEAD']).toString().trim()).toBe(f.request.discovery.startCommit)
+    f.tracker.close()
   })
 
   it.each(['completed', 'baseline-blocked', 'blocked', 'round-failed', 'cancelled'] as const)('classifies terminal %s and releases only a retained safe lock', async state => {
@@ -129,9 +140,31 @@ describe('recovery nonterminal state matrix with real Git/SQLite', () => {
     const f = await realFixture(); f.tracker.transitionRun(f.request.runId, 'baseline-running'); arrange(f); const first = await reconcileRecovery(f.ctx, f.request); const second = await reconcileRecovery(f.ctx, f.request); expect(first).toMatchObject(expected); expect(second).toEqual(first); expect(f.subprocess.specs.every(spec => spec.argv[0] === f.request.gitExecutable)).toBe(true); f.tracker.close()
   })
 
+
+  it.each([
+    ['accepted', { metric: 7, decision: 'accept' }, { kind: 'settle-baseline', outcome: { kind: 'accept', metric: 7 } }],
+    ['crashed', { failureCode: 'signal', failureMessage: 'signal' }, { kind: 'settle-baseline', outcome: { kind: 'fail', state: 'crashed', code: 'signal', message: 'signal' } }],
+  ] as const)('advances only the missing run transition after a terminal %s baseline', async (terminal, facts, expected) => {
+    const f = await realFixture(); f.tracker.transitionRun(f.request.runId, 'baseline-running')
+    f.tracker.createExperiment({ experimentId: 'baseline', runId: f.request.runId, ordinal: 0, kind: 'baseline', parentCommit: f.request.discovery.startCommit, command: 'node', args: [] }); f.tracker.transitionExperiment('baseline', 'running'); f.tracker.commitTerminalExperiment('baseline', terminal, facts)
+    const first = await reconcileRecovery(f.ctx, f.request); const second = await reconcileRecovery(f.ctx, f.request)
+    expect(first).toMatchObject(expected); expect(second).toEqual(first); expect(f.tracker.database.prepare('SELECT COUNT(*) AS n FROM attempts').get()?.['n']).toBe(0)
+    f.tracker.close()
+  })
   it('blocks an uncertain prior evaluator repeatedly without PID signalling or duplicate execution', async () => {
     const f = await realFixture(); f.tracker.transitionRun(f.request.runId, 'baseline-running'); f.tracker.createExperiment({ experimentId: 'baseline', runId: f.request.runId, ordinal: 0, kind: 'baseline', parentCommit: f.request.discovery.startCommit, command: 'node', args: [] }); f.tracker.transitionExperiment('baseline', 'running'); f.tracker.createAttemptIntent({ attemptId: 'attempt-1', runId: f.request.runId, experimentId: 'baseline', ordinal: 1 }, { provenanceSha256: HASH }); f.tracker.recordAttemptObserved('attempt-1', { providerPid: 4242, spawnedAt: new Date().toISOString() })
     const before = f.subprocess.specs.length; const first = await reconcileRecovery(f.ctx, f.request); const second = await reconcileRecovery(f.ctx, f.request); expect(first).toMatchObject({ kind: 'blocked', code: 'attempt-uncertain', lock: 'retain' }); expect(second).toEqual(first); expect(f.subprocess.specs.slice(before).every(spec => spec.argv[0] === f.request.gitExecutable)).toBe(true); expect(f.tracker.database.prepare('SELECT COUNT(*) AS n FROM attempts').get()?.['n']).toBe(1); f.tracker.close()
+  })
+
+  it('blocks a completed zero-artifact attempt as artifact-incomplete and never schedules a rerun', async () => {
+    const f = await realFixture(); f.tracker.transitionRun(f.request.runId, 'baseline-running')
+    f.tracker.createExperiment({ experimentId: 'baseline', runId: f.request.runId, ordinal: 0, kind: 'baseline', parentCommit: f.request.discovery.startCommit, command: 'node', args: [] }); f.tracker.transitionExperiment('baseline', 'running')
+    f.tracker.createAttemptIntent({ attemptId: 'attempt-1', runId: f.request.runId, experimentId: 'baseline', ordinal: 1 }, { provenanceSha256: HASH })
+    f.tracker.recordAttemptOutcome('attempt-1', { facts: { exitedAt: new Date().toISOString(), exitCode: 0, signal: null, timedOut: false, processTreeQuiescent: true }, artifacts: [] })
+    const first = await reconcileRecovery(f.ctx, f.request); const second = await reconcileRecovery(f.ctx, f.request)
+    expect(first).toMatchObject({ kind: 'blocked', code: 'artifact-incomplete', lock: 'retain' }); expect(second).toEqual(first)
+    expect(f.tracker.database.prepare('SELECT COUNT(*) AS n FROM attempts').get()?.['n']).toBe(1)
+    f.tracker.close()
   })
 
   it.each([
@@ -155,7 +188,7 @@ describe('recovery nonterminal state matrix with real Git/SQLite', () => {
     ['maximize accept', 'maximize', 11, 'accept'], ['maximize tie', 'maximize', 10, 'reject'], ['maximize regression', 'maximize', 9, 'reject'],
   ] as const)('deterministically replays %s decisions', async (_label, direction, metric, outcome) => {
     const f = await realFixture(); const policy = { ...f.request.policy, metricDirection: direction }; const request = { ...f.request, policy }; const best = { metric: 10, commit: f.request.discovery.startCommit, experimentId: 'baseline' }; f.tracker.transitionRun(f.request.runId, 'baseline-running'); f.tracker.transitionRun(f.request.runId, 'ready', { best })
-    const baseline = await captureGitConfigBaseline(f.ctx, f.request.gitExecutable, f.request.identity.worktree, policy, f.request.gitOptions); writeFileSync(join(f.request.identity.worktree, 'src', 'code.ts'), `${metric}\n`); const snapshot = await snapshotCandidate(f.ctx, f.request.gitExecutable, f.request.identity.worktree, baseline, f.request.gitOptions); const paths = validateCandidate(snapshot, policy); const experimentId = 'candidate-1'; f.tracker.prepareCandidate({ experimentId, runId: f.request.runId, ordinal: 1, kind: 'candidate', parentCommit: best.commit, command: 'node', args: [] }, { intent: { kind: 'candidate-snapshot', experimentId, snapshot, validatedPaths: paths } }); const candidate = await commitCandidate(f.ctx, f.request.gitExecutable, f.request.identity.worktree, f.request.identity, experimentId, snapshot, paths, f.request.gitOptions); await checkoutCandidateForEvaluation(f.ctx, f.request.gitExecutable, f.request.identity.worktree, f.request.identity, candidate.candidateCommit, best.commit, f.request.gitOptions); f.tracker.recordCandidateCommit(experimentId, candidate.candidateCommit); f.tracker.transitionExperiment(experimentId, 'running'); f.tracker.transitionRun(f.request.runId, 'candidate-running'); f.tracker.checkpointExperiment(experimentId, { metric }); f.tracker.transitionRun(f.request.runId, 'deciding')
+    const baseline = await captureGitConfigBaseline(f.ctx, f.request.gitExecutable, f.request.identity.worktree, policy, f.request.gitOptions); writeFileSync(join(f.request.identity.worktree, 'src', 'code.ts'), `${metric}\n`); const snapshot = await snapshotCandidate(f.ctx, f.request.gitExecutable, f.request.identity.worktree, baseline, f.request.gitOptions); const paths = validateCandidate(snapshot, policy); const experimentId = 'candidate-1'; f.tracker.prepareCandidate({ experimentId, runId: f.request.runId, ordinal: 1, kind: 'candidate', parentCommit: best.commit, command: 'node', args: [] }, { intent: { kind: 'candidate-snapshot', experimentId, snapshot, validatedPaths: paths } }); const candidate = await commitCandidate(f.ctx, f.request.gitExecutable, f.request.identity.worktree, f.request.identity, experimentId, snapshot, paths, f.request.gitOptions); await checkoutCandidateForEvaluation(f.ctx, f.request.gitExecutable, f.request.identity.worktree, f.request.identity, candidate.candidateCommit, best.commit, f.request.gitOptions); f.tracker.recordCandidateCommit(experimentId, candidate.candidateCommit); f.tracker.transitionExperiment(experimentId, 'running'); f.tracker.transitionRun(f.request.runId, 'candidate-running'); f.tracker.transitionRun(f.request.runId, 'deciding'); f.tracker.commitTerminalExperiment(experimentId, outcome === 'accept' ? 'accepted' : 'rejected', { metric, decision: outcome })
     const first = await reconcileRecovery(f.ctx, request); const second = await reconcileRecovery(f.ctx, request); expect(first).toMatchObject({ kind: 'reconcile-candidate', outcome: { kind: outcome, metric } }); expect(second).toEqual(first); f.tracker.close()
   })
 })
