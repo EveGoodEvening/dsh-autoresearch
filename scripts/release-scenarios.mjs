@@ -17,17 +17,30 @@ await run(vitest, ['run', 'tests/release-scenarios.integration.spec.ts', '--repo
   DSH_AUTORESEARCH_EVIDENCE: evidencePath,
 })
 const evidence = JSON.parse(await readFile(evidencePath, 'utf8'))
-const required = ['accepted', 'tie', 'rejected', 'background', 'interruptionResume', 'uncertainRestart']
+const required = ['prepareBarrier', 'accepted', 'tie', 'rejected', 'background', 'interruptionResume', 'uncertainRestart']
+const prepare = evidence.prepareBarrier
+const tsv = evidence.accepted.tsv
 evidence.items = {
   '840': { ok: true, scenario: 'temporary repositories executed from installed profile' },
   '845': { ok: Boolean(evidence.accepted.caller && evidence.rejected.caller), accepted: evidence.accepted.caller, rejected: evidence.rejected.caller },
   '846': { ok: true, accepted: evidence.accepted.identity, rejected: evidence.rejected.identity },
-  '847': { ok: true, tracker: 'durable run and baseline transitions asserted before candidate mutation' },
+  '847': {
+    ok: prepare?.prepared?.trackerExists === true && prepare.prepared.runExists === true && prepare.prepared.runState === 'initializing'
+      && prepare.prepared.experiments === 0 && prepare.prepared.localLocks === 0 && prepare.prepared.sharedLocks === 0
+      && prepare.prepared.worktreeExists === false && prepare.prepared.refs?.length === 0 && prepare.prepared.evaluatorMarkerExists === false
+      && prepare.afterRun?.evaluatorMarkerExists === true,
+    observations: prepare,
+  },
   '848': { ok: evidence.accepted.baseline?.kind === 'baseline', baseline: evidence.accepted.baseline },
   '849': { ok: evidence.accepted.strictDecision === 'accept', candidate: evidence.accepted.candidate, auditCommit: evidence.accepted.auditCommit },
   '850': { ok: evidence.rejected.strictDecision === 'reject', candidate: evidence.rejected.candidate, auditCommit: evidence.rejected.auditCommit },
   '851': { ok: evidence.accepted.strictDecision === 'accept' && evidence.tie.strictDecision === 'reject' && evidence.rejected.strictDecision === 'reject', better: evidence.accepted.candidate.metric, tie: evidence.tie.candidate.metric, worse: evidence.rejected.candidate.metric },
-  '852': { ok: evidence.accepted.tsv?.deterministic === true, tsv: evidence.accepted.tsv },
+  '852': {
+    ok: tsv?.equalBytes === true && /^[0-9a-f]{64}$/u.test(tsv.firstSha256) && tsv.firstSha256 === tsv.secondSha256
+      && tsv.rowCount === evidence.accepted.candidate.ordinal + 1 && tsv.ordinals?.every((ordinal, index, rows) => index === 0 || rows[index - 1] <= ordinal)
+      && tsv.temporaryFiles?.length === 0 && typeof tsv.lowerLayerAtomicFaultTest === 'string',
+    tsv,
+  },
   '853': { ok: evidence.background.listed === true && evidence.background.kill === true && evidence.background.noLiveJobs === true, background: evidence.background },
   '854': { ok: evidence.accepted.agentDisposed === true && evidence.accepted.terminalBeforeLockRelease === true && evidence.interruptionResume.processTreeQuiescent === true, retained: evidence.accepted },
   '855': { ok: evidence.interruptionResume.processTreeQuiescent === true, interruption: evidence.interruptionResume },

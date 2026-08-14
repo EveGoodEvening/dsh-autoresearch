@@ -106,6 +106,59 @@ describe('durable SQLite tracker', () => {
     const malformedPath = fixturePath('malformed.sqlite'); const malformed = new DatabaseSync(malformedPath); malformed.exec(`CREATE TABLE schema_metadata (singleton INTEGER PRIMARY KEY, version INTEGER NOT NULL, created_at TEXT NOT NULL) STRICT; INSERT INTO schema_metadata VALUES (1, ${TRACKER_SCHEMA_VERSION}, 'now')`); malformed.close(); chmodSync(malformedPath, 0o600); expectBlocked(malformedPath, 'tracker-schema-invalid')
   })
 
+  it('rejects same-named ineffective replacements for every canonical trigger and index', () => {
+    const triggerTables: Readonly<Record<string, string>> = {
+      runs_immutable_identity: 'runs',
+      experiments_immutable_lineage: 'experiments',
+      attempts_immutable_intent: 'attempts',
+    }
+    for (const [trigger, table] of Object.entries(triggerTables)) {
+      const path = fixturePath(`${trigger}.sqlite`)
+      const tracker = DurableTracker.open(path); tracker.close()
+      const database = new DatabaseSync(path)
+      database.exec(`DROP TRIGGER ${trigger}; CREATE TRIGGER ${trigger} BEFORE UPDATE ON ${table} BEGIN SELECT 1; END;`)
+      database.close()
+      expectBlocked(path, 'tracker-schema-invalid')
+    }
+
+    const ineffectiveIndexes: Readonly<Record<string, string>> = {
+      runs_recovery: 'runs(run_id)',
+      experiments_recovery: 'experiments(experiment_id)',
+      attempts_recovery: 'attempts(attempt_id)',
+      artifacts_owner: 'artifacts(artifact_id)',
+      transitions_scope: 'transitions(transition_id)',
+      active_locks_live: 'active_locks(run_id)',
+    }
+    for (const [index, definition] of Object.entries(ineffectiveIndexes)) {
+      const path = fixturePath(`${index}.sqlite`)
+      const tracker = DurableTracker.open(path); tracker.close()
+      const database = new DatabaseSync(path)
+      database.exec(`DROP INDEX ${index}; CREATE INDEX ${index} ON ${definition};`)
+      database.close()
+      expectBlocked(path, 'tracker-schema-invalid')
+    }
+  })
+
+  it('rejects same-named weakened definitions for every authoritative table', () => {
+    const canonicalPath = fixturePath('canonical-schema.sqlite')
+    const tracker = DurableTracker.open(canonicalPath); tracker.close()
+    const canonical = new DatabaseSync(canonicalPath, { readOnly: true })
+    const definitions = canonical.prepare(`SELECT type, name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' AND sql IS NOT NULL ORDER BY CASE type WHEN 'table' THEN 0 WHEN 'index' THEN 1 ELSE 2 END, name`).all()
+    canonical.close()
+
+    for (const table of ['schema_metadata', 'runs', 'experiments', 'attempts', 'artifacts', 'transitions', 'transition_artifacts', 'active_locks']) {
+      const path = fixturePath(`${table}.sqlite`)
+      const database = new DatabaseSync(path)
+      for (const definition of definitions) {
+        const sql = String(definition['sql'])
+        database.exec(definition['type'] === 'table' && definition['name'] === table ? sql.replace(/\sSTRICT$/u, '') : sql)
+      }
+      database.prepare('INSERT INTO schema_metadata (singleton, version, created_at) VALUES (1, ?, ?)').run(TRACKER_SCHEMA_VERSION, 'now')
+      database.close(); chmodSync(path, 0o600)
+      expectBlocked(path, 'tracker-schema-invalid')
+    }
+  })
+
   it('eventually converges competing opens while migrating an old schema', async () => {
     const path = fixturePath(); const seed = new DatabaseSync(path)
     seed.exec("CREATE TABLE schema_metadata (singleton INTEGER PRIMARY KEY, version INTEGER NOT NULL, created_at TEXT NOT NULL) STRICT; INSERT INTO schema_metadata VALUES (1, 0, 'now')")

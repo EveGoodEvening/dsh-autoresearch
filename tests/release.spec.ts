@@ -54,7 +54,8 @@ describe('release and consumer contract', () => {
       const evidence = JSON.parse(stdout)
       expect(evidence).toMatchObject({
         ok: true,
-        accepted: { ok: true, strictDecision: 'accept', terminalBeforeLockRelease: true, agentDisposed: true },
+        prepareBarrier: { ok: true, prepared: { trackerExists: true, runExists: true, runState: 'initializing', experiments: 0, localLocks: 0, sharedLocks: 0, worktreeExists: false, refs: [], evaluatorMarkerExists: false }, afterRun: { evaluatorMarkerExists: true } },
+        accepted: { ok: true, strictDecision: 'accept', terminalBeforeLockRelease: true, agentDisposed: true, tsv: { equalBytes: true, firstSha256: expect.stringMatching(/^[0-9a-f]{64}$/), secondSha256: expect.stringMatching(/^[0-9a-f]{64}$/), temporaryFiles: [], lowerLayerAtomicFaultTest: expect.stringContaining('publishes deterministic run-scoped TSV atomically') } },
         tie: { ok: true, strictDecision: 'reject', terminalBeforeLockRelease: true, agentDisposed: true },
         rejected: { ok: true, strictDecision: 'reject', terminalBeforeLockRelease: true, agentDisposed: true },
         background: { ok: true, listed: true, kill: true, noLiveJobs: true },
@@ -62,6 +63,9 @@ describe('release and consumer contract', () => {
         uncertainRestart: { ok: true, status: 'blocked', pidSignalled: false, duplicateEvaluation: false, lockRetained: true },
         items: Object.fromEntries(['840','845','846','847','848','849','850','851','852','853','854','855','856','857'].map(item => [item, { ok: true }])),
       })
+      expect(evidence.accepted.tsv.firstSha256).toBe(evidence.accepted.tsv.secondSha256)
+      expect(evidence.items['847'].observations).toEqual(evidence.prepareBarrier)
+      expect(evidence.items['852'].tsv).toEqual(evidence.accepted.tsv)
     } finally {
       await rm(work, { recursive: true, force: true })
     }

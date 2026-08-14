@@ -83,7 +83,8 @@ async function processState(pid: number): Promise<string | undefined> {
     const stat = await readFile(`/proc/${pid}/stat`, 'utf8')
     return stat.slice(stat.lastIndexOf(')') + 2).split(' ', 1)[0]
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+    const code = (error as NodeJS.ErrnoException).code
+    if (code === 'ENOENT' || code === 'ESRCH') return undefined
     throw error
   }
 }

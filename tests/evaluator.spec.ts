@@ -718,7 +718,8 @@ function readLinuxProcessState(pid: number): string | undefined {
     const stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
     return stat.slice(stat.lastIndexOf(') ') + 2, stat.lastIndexOf(') ') + 3)
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+    const code = (error as NodeJS.ErrnoException).code
+    if (code === 'ENOENT' || code === 'ESRCH') return undefined
     throw error
   }
 }

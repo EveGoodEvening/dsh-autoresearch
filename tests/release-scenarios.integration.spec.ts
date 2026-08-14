@@ -1,6 +1,8 @@
+import { createHash } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { access, mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -14,6 +16,9 @@ const evidencePath = process.env.DSH_AUTORESEARCH_EVIDENCE
 const installedRoot = process.env.DSH_AUTORESEARCH_INSTALLED_ROOT
 const releaseDescribe = installedRoot === undefined ? describe.skip : describe
 if (installedRoot !== undefined && packageRoot !== installedRoot) throw new Error(`fixture resolved ${packageRoot}, expected installed package ${installedRoot}`)
+// The release test intentionally loads the runtime-selected packed installation rather than source modules.
+const installedModule = (name: string) => pathToFileURL(join(installedRoot!, 'lib', `${name}.js`)).href
+
 interface ReleaseRun {
   readonly status: string
   readonly runId: string
@@ -103,10 +108,16 @@ async function processGone(pid: number): Promise<boolean> {
     const stat = await readFile(`/proc/${pid}/stat`, 'utf8')
     return stat.slice(stat.lastIndexOf(')') + 2).split(' ', 1)[0] === 'Z'
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return true
+    const code = (error as NodeJS.ErrnoException).code
+    if (code === 'ENOENT' || code === 'ESRCH') return true
     throw error
   }
 }
+async function pathExists(path: string): Promise<boolean> {
+  try { await access(path); return true } catch { return false }
+}
+
+
 
 function inspect(trackerPath: string, runId: string) {
   const db = new DatabaseSync(trackerPath, { readOnly: true })
@@ -124,6 +135,50 @@ function inspect(trackerPath: string, runId: string) {
 const evidence: Record<string, unknown> = { installedRoot }
 
 releaseDescribe('packed release scenarios', () => {
+  it('observes the installed controller prepare barrier before any autoresearch mutation', async () => {
+    const harness = await composeHarness()
+    const cwd = await repository(harness.root, 'prepare-barrier')
+    const owner = await parent(harness.ctx, cwd)
+    const marker = join(harness.root, 'prepare-evaluator.marker')
+    const before = snapshot(cwd)
+    const { AutoresearchRunController } = await import(installedModule('controller'))
+    const { resolveConfig } = await import(installedModule('config'))
+    const args = request(cwd, 'release accepted candidate')
+    args.evaluation = {
+      command: process.execPath,
+      args: ['-e', `const fs=require('node:fs');fs.appendFileSync(process.argv[1],'spawned\\n');const score=Number(fs.readFileSync('score.txt','utf8'));process.stdout.write(JSON.stringify({score})+'\\n')`, marker],
+    }
+    const controller = new AutoresearchRunController(harness.ctx, {
+      config: resolveConfig({ terminationGraceMs: 5_000 }), input: args, parent: owner.agent, signal: new AbortController().signal,
+    })
+    try {
+      const prepared = await controller.prepare()
+      const preparedDb = new DatabaseSync(prepared.tracker, { readOnly: true })
+      const run = preparedDb.prepare('SELECT run_id,state FROM runs WHERE run_id=?').get(prepared.runId) as Record<string, unknown>
+      const experiments = Number(preparedDb.prepare('SELECT COUNT(*) n FROM experiments WHERE run_id=?').get(prepared.runId)?.n)
+      const localLocks = Number(preparedDb.prepare('SELECT COUNT(*) n FROM active_locks WHERE run_id=? AND released_at IS NULL').get(prepared.runId)?.n)
+      preparedDb.close()
+      const refs = git(cwd, ['for-each-ref', '--format=%(refname)', `refs/autoresearch/runs/${prepared.runId}/`]).split('\n').filter(Boolean)
+      const authority = new DatabaseSync(join(git(cwd, ['rev-parse', '--path-format=absolute', '--git-common-dir']), 'dsh-autoresearch-locks.sqlite'), { readOnly: true })
+      const sharedLocks = Number(authority.prepare('SELECT COUNT(*) n FROM active_locks WHERE run_id=?').get(prepared.runId)?.n)
+      authority.close()
+      const preparedObservation = {
+        trackerExists: await pathExists(prepared.tracker), runExists: run.run_id === prepared.runId, runState: run.state,
+        experiments, localLocks, sharedLocks, worktreeExists: await pathExists(prepared.worktree), refs, evaluatorMarkerExists: await pathExists(marker), caller: snapshot(cwd),
+      }
+      expect(preparedObservation).toEqual({ trackerExists: true, runExists: true, runState: 'initializing', experiments: 0, localLocks: 0, sharedLocks: 0, worktreeExists: false, refs: [], evaluatorMarkerExists: false, caller: before })
+
+      const completed = await controller.run()
+      expect(completed.status).toBe('budget-limited')
+      expect(await pathExists(marker)).toBe(true)
+      evidence.prepareBarrier = { ok: true, prepared: preparedObservation, afterRun: { status: completed.status, evaluatorMarkerExists: true } }
+    } finally {
+      await controller.dispose()
+      await owner.dispose()
+      await harness.dispose().catch(() => undefined)
+    }
+  }, 45_000)
+
   it('runs accepted and rejected candidates with strict decisions and durable Git/tracker evidence', async () => {
     const harness = await composeHarness()
     const scenarios = [
@@ -159,12 +214,26 @@ releaseDescribe('packed release scenarios', () => {
           expect(durable.lock.released_at).not.toBeNull()
           expect(durable.run.terminal_quiescent).toBe(1)
 
-          const tsvPath = join(dirname(run.tracker), 'exports', `${run.runId}.tsv`)
-          const first = await readFile(tsvPath, 'utf8')
-          expect(await readFile(tsvPath, 'utf8')).toBe(first)
-          expect(first).toContain(candidate)
+          const exportDirectory = join(dirname(run.tracker), 'exports')
+          const tsvPath = join(exportDirectory, `${run.runId}.tsv`)
+          const { DurableTracker } = await import(installedModule('tracker'))
+          const publisher = DurableTracker.open(run.tracker)
+          publisher.exportTsv(run.runId, tsvPath)
+          const first = await readFile(tsvPath)
+          publisher.exportTsv(run.runId, tsvPath)
+          const second = await readFile(tsvPath)
+          const firstHash = createHash('sha256').update(first).digest('hex'); const secondHash = createHash('sha256').update(second).digest('hex')
+          const lines = first.toString('utf8').trimEnd().split('\n')
+          const ordinals = lines.slice(1).map(line => Number(line.split('\t', 1)[0]))
+          const temporaryFiles = (await readdir(exportDirectory)).filter(name => name.startsWith(`${run.runId}.tsv.`) && name.endsWith('.tmp'))
+          expect(second).toEqual(first)
+          expect(firstHash).toBe(secondHash)
+          expect(ordinals).toEqual([...ordinals].sort((left, right) => left - right))
+          expect(lines).toHaveLength(durable.experiments.length + 1)
+          expect(first.toString('utf8')).toContain(candidate)
+          expect(temporaryFiles).toEqual([])
           expect(harness.ctx.agents.list().map((agent: Agent) => agent.id)).toEqual([owner.agent.id])
-          evidence[scenario.name] = { ok: true, runId: run.runId, caller: before, identity: { branch: durable.run.branch, worktree: durable.run.worktree, startCommit: durable.run.start_commit }, baseline: durable.experiments[0], candidate: durable.experiments[1], auditCommit: candidate, strictDecision: scenario.decision, tsv: { location: tsvPath, deterministic: true }, terminalBeforeLockRelease: true, agentDisposed: true }
+          evidence[scenario.name] = { ok: true, runId: run.runId, caller: before, identity: { branch: durable.run.branch, worktree: durable.run.worktree, startCommit: durable.run.start_commit }, baseline: durable.experiments[0], candidate: durable.experiments[1], auditCommit: candidate, strictDecision: scenario.decision, tsv: { location: tsvPath, firstSha256: firstHash, secondSha256: secondHash, equalBytes: first.equals(second), rowCount: lines.length - 1, ordinals, temporaryFiles, lowerLayerAtomicFaultTest: "tests/tracker.spec.ts: 'publishes deterministic run-scoped TSV atomically and retries independently from committed state'" }, terminalBeforeLockRelease: true, agentDisposed: true }
         } finally {
           await owner.dispose()
         }
@@ -242,7 +311,7 @@ releaseDescribe('packed release scenarios', () => {
   }, 45_000)
 
   it('writes machine-readable evidence', async () => {
-    expect(evidence.accepted).toBeDefined(); expect(evidence.tie).toBeDefined(); expect(evidence.rejected).toBeDefined(); expect(evidence.background).toBeDefined(); expect(evidence.interruptionResume).toBeDefined(); expect(evidence.uncertainRestart).toBeDefined()
+    expect(evidence.prepareBarrier).toBeDefined(); expect(evidence.accepted).toBeDefined(); expect(evidence.tie).toBeDefined(); expect(evidence.rejected).toBeDefined(); expect(evidence.background).toBeDefined(); expect(evidence.interruptionResume).toBeDefined(); expect(evidence.uncertainRestart).toBeDefined()
     if (evidencePath) await writeFile(evidencePath, JSON.stringify({ ok: true, ...evidence }))
   })
 })

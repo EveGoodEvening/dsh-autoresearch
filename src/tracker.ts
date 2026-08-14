@@ -5,7 +5,7 @@ import { DatabaseSync, type SQLOutputValue } from 'node:sqlite'
 import { StateLayout } from './state-layout.js'
 import type { ExperimentDurableState, RunDurableState } from './types.js'
 
-export const TRACKER_SCHEMA_VERSION = 4
+export const TRACKER_SCHEMA_VERSION = 5
 export const TRACKER_BUSY_TIMEOUT_MS = 5_000
 const TRACKER_RETRY_WAIT = new Int32Array(new SharedArrayBuffer(4))
 
@@ -325,11 +325,9 @@ export class DurableTracker {
     }
   }
   private validateSchema(): void {
-    const integrity = String(this.database.prepare('PRAGMA integrity_check').get()?.['integrity_check']); if (integrity !== 'ok') throw new TrackerBlockedError('tracker-schema-invalid', `tracker integrity check failed: ${integrity}`)
-    const required: Record<string, readonly string[]> = { runs: ['run_id','state','terminal_quiescent'], experiments: ['experiment_id','run_id','state','metric'], attempts: ['attempt_id','run_id','experiment_id','process_tree_quiescent'], artifacts: ['artifact_id','run_id','experiment_id','attempt_id'], transitions: ['transition_id','run_id','experiment_id','sequence'], transition_artifacts: ['transition_id','artifact_id'], active_locks: ['run_id','repository_id','run_tag'] }
-    for (const [table, columns] of Object.entries(required)) { const actual = new Set(this.database.prepare(`PRAGMA table_info(${table})`).all().map((row) => String(row['name']))); if (columns.some((column) => !actual.has(column))) throw new TrackerBlockedError('tracker-schema-invalid', `tracker table ${table} is missing required columns`) }
-    for (const trigger of ['runs_immutable_identity','experiments_immutable_lineage','attempts_immutable_intent']) if (!this.database.prepare("SELECT 1 FROM sqlite_master WHERE type='trigger' AND name=?").get(trigger)) throw new TrackerBlockedError('tracker-schema-invalid', `tracker is missing invariant trigger ${trigger}`)
-    for (const index of ['active_locks_live','experiments_recovery','attempts_recovery']) if (!this.database.prepare("SELECT 1 FROM sqlite_master WHERE type='index' AND name=?").get(index)) throw new TrackerBlockedError('tracker-schema-invalid', `tracker is missing recovery index ${index}`)
+    const integrity = String(this.database.prepare('PRAGMA integrity_check').get()?.['integrity_check'])
+    if (integrity !== 'ok') throw new TrackerBlockedError('tracker-schema-invalid', `tracker integrity check failed: ${integrity}`)
+    if (schemaFingerprint(this.database) !== canonicalSchemaFingerprint()) throw new TrackerBlockedError('tracker-schema-invalid', 'tracker schema does not match the canonical schema definition')
     if (!this.foreignKeysEnabled()) throw new TrackerBlockedError('tracker-schema-invalid', 'tracker foreign keys are disabled')
   }
   private secureSidecars(): void { for (const suffix of ['', '-wal', '-shm']) { try { this.layout.secureFile(`${this.path}${suffix}`) } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error } } }
@@ -388,6 +386,36 @@ const MIGRATIONS: Record<number, (database: DatabaseSync) => void> = {
   2(database) { database.exec(`ALTER TABLE runs ADD COLUMN terminal_quiescent INTEGER CHECK(terminal_quiescent IN (0,1)); CREATE TRIGGER runs_immutable_identity BEFORE UPDATE OF repository_id, repository, git_common_dir, caller_cwd, start_commit, run_tag, branch, worktree, policy_json, policy_sha256, provenance_json, provenance_sha256 ON runs BEGIN SELECT RAISE(ABORT, 'immutable run identity/policy/provenance'); END; CREATE TRIGGER experiments_immutable_lineage BEFORE UPDATE OF run_id, ordinal, kind, parent_commit, candidate_commit, command, args_json, cwd ON experiments BEGIN SELECT RAISE(ABORT, 'immutable experiment lineage/evaluator'); END; CREATE TRIGGER attempts_immutable_intent BEFORE UPDATE OF run_id, experiment_id, ordinal, spawn_intent_json ON attempts BEGIN SELECT RAISE(ABORT, 'immutable attempt identity/intent'); END;`) },
   3(_database) { /* Version 3 tightens repository-level transactional invariants without destructive table rebuilds. */ },
   4(database) { database.exec(`DROP TRIGGER experiments_immutable_lineage; CREATE TRIGGER experiments_immutable_lineage BEFORE UPDATE OF run_id, ordinal, kind, parent_commit, candidate_commit, command, args_json, cwd ON experiments WHEN OLD.run_id != NEW.run_id OR OLD.ordinal != NEW.ordinal OR OLD.kind != NEW.kind OR OLD.parent_commit != NEW.parent_commit OR OLD.command != NEW.command OR OLD.args_json != NEW.args_json OR OLD.cwd IS NOT NEW.cwd OR OLD.candidate_commit IS NOT NULL OR NEW.candidate_commit IS NULL OR length(NEW.candidate_commit) != 40 BEGIN SELECT RAISE(ABORT, 'immutable experiment lineage/evaluator'); END;`) },
+  5(database) { database.exec(`CREATE TABLE schema_metadata_canonical (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), version INTEGER NOT NULL, created_at TEXT NOT NULL) STRICT; INSERT INTO schema_metadata_canonical SELECT singleton, version, created_at FROM schema_metadata; DROP TABLE schema_metadata; ALTER TABLE schema_metadata_canonical RENAME TO schema_metadata;`) },
+}
+
+let expectedSchemaFingerprint: string | undefined
+function canonicalSchemaFingerprint(): string {
+  if (expectedSchemaFingerprint !== undefined) return expectedSchemaFingerprint
+  const database = new DatabaseSync(':memory:', { enableForeignKeyConstraints: true, enableDoubleQuotedStringLiterals: false })
+  try {
+    for (let version = 1; version <= TRACKER_SCHEMA_VERSION; version += 1) {
+      MIGRATIONS[version]!(database)
+      database.prepare('UPDATE schema_metadata SET version = ? WHERE singleton = 1').run(version)
+    }
+    expectedSchemaFingerprint = schemaFingerprint(database)
+    return expectedSchemaFingerprint
+  } finally { database.close() }
+}
+
+function schemaFingerprint(database: DatabaseSync): string {
+  const objects = database.prepare(`SELECT type, name, tbl_name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' AND sql IS NOT NULL ORDER BY type, name`).all()
+  const tables = objects.filter((object) => object['type'] === 'table').map((object) => String(object['name']))
+  const tableDetails = tables.map((table) => ({
+    table,
+    columns: database.prepare('SELECT cid, name, type, "notnull", dflt_value, pk, hidden FROM pragma_table_xinfo(?) ORDER BY cid').all(table),
+    foreignKeys: database.prepare('SELECT id, seq, "table", "from", "to", on_update, on_delete, match FROM pragma_foreign_key_list(?) ORDER BY id, seq').all(table),
+    indexes: database.prepare('SELECT seq, name, "unique", origin, partial FROM pragma_index_list(?) ORDER BY seq').all(table).map((index) => ({
+      ...index,
+      columns: database.prepare('SELECT seqno, cid, name, desc, coll, key FROM pragma_index_xinfo(?) ORDER BY seqno').all(String(index['name'])),
+    })),
+  }))
+  return createHash('sha256').update(canonicalJson({ objects, tableDetails })).digest('hex')
 }
 
 function validateTransition(scope: 'run', from: RunDurableState, to: RunDurableState): void
