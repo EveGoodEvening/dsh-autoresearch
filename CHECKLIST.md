@@ -355,7 +355,7 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 ## Chunk 04 tracker-accounting gate
 
 - [x] Record Chunk 04 implementation commit full SHA after it exists: `cfc2e45366961c10b97b6fab63ffea9abfb3b5dd`.
-- [ ] Commit the checklist update separately from the Chunk 04 implementation commit.
+- [x] Commit the checklist update separately from the Chunk 04 implementation commit as tracker-accounting commit `a1fca4c61fbf241b716a8e423a12788d16e3c71d`.
 
 # Chunk 05 — `05-build-host-git-and-evaluator-boundaries`
 
