@@ -227,6 +227,21 @@ async function runControllerCase(f: ControllerFixture, overrides: Partial<typeof
   const result = await controller.run(); const ready = await controller.ready; return { result, ready, tracker: DurableTracker.open(ready.tracker) }
 }
 
+function createCaseController(f: ControllerFixture, overrides: Partial<typeof input> = {}, resumeRunId?: string) {
+  const { run_tag: _runTag, ...baseInput } = input
+  const identity = resumeRunId ? { resume_run_id: resumeRunId } : { run_tag: input.run_tag }
+  return new AutoresearchRunController(f.ctx, {
+    config: resolveConfig({ stateRoot: '.autoresearch-test', cleanupWorktreesOnSuccess: false, retainWorktrees: true, exportTsv: false }),
+    input: { ...baseInput, ...identity, repository: f.root, evaluation: { command: 'fake-evaluator', args: [] }, mutable_globs: ['src/**'], ...overrides },
+    parent: f.parent,
+    signal: new AbortController().signal,
+  })
+}
+
+function candidateAuditCommits(root: string, runId: string): string[] {
+  return execFileSync('git', ['-C', root, 'for-each-ref', '--format=%(objectname)', `refs/autoresearch/runs/${runId}/candidates/`]).toString().trim().split('\n').filter(Boolean)
+}
+
 describe('controller real Git/SQLite outcomes', () => {
   it.each([
     ['minimize', 5, 5, 'target-reached'],
@@ -265,6 +280,78 @@ describe('controller real Git/SQLite outcomes', () => {
     const assertCandidateHead = (cwd: string) => { expect(execFileSync('git', ['-C', cwd, 'show', '-s', '--format=%s', 'HEAD']).toString().trim()).toMatch(/^autoresearch candidate /u); expect(execFileSync('git', ['-C', cwd, 'status', '--porcelain=v1']).toString()).toBe('') }
     const f = controllerFixture([{ stdout: `{"score":${baseline}}\n` }, { stdout: `{"score":${candidate}}\n`, edit: assertCandidateHead }], [(worktree) => writeFileSync(join(worktree, 'src', 'code.ts'), `export const n = ${candidate}\n`)])
     try { const { result, tracker } = await runControllerCase(f, { metric_direction: direction, max_experiments: 1 }); expect(result.status).toBe('budget-limited'); const row = tracker.database.prepare("SELECT state, decision, metric, candidate_commit FROM experiments WHERE kind = 'candidate'").get()!; expect(row).toMatchObject({ state, decision: state === 'accepted' ? 'accept' : 'reject', metric: candidate }); expect(String(row['candidate_commit'])).toMatch(/^[0-9a-f]{40}$/); expect(f.creates).toHaveLength(1); tracker.close() } finally { rmSync(f.root, { recursive: true, force: true }) }
+  })
+
+  it('reruns a proven-quiescent candidate evaluation exactly once from its recorded candidate commit', async () => {
+    const f = controllerFixture([{ stdout: '{"score":10}\n' }, { stdout: '{"score":9}\n' }, { stdout: '{"score":8}\n' }], [(worktree) => writeFileSync(join(worktree, 'src', 'code.ts'), 'export const n = 2\n')])
+    const original = DurableTracker.prototype.recordAttemptOutcome
+    let candidateInterruptions = 0
+    const fault = vi.spyOn(DurableTracker.prototype, 'recordAttemptOutcome').mockImplementation(function (attemptId, facts) {
+      if (attemptId.includes('-candidate-') && candidateInterruptions < 2) {
+        candidateInterruptions++
+        this.database.prepare('UPDATE attempts SET process_tree_quiescent = 1 WHERE attempt_id = ?').run(attemptId)
+        throw new Error(`candidate outcome barrier ${candidateInterruptions}`)
+      }
+      return original.call(this, attemptId, facts)
+    })
+    try {
+      const first = createCaseController(f, { max_experiments: 1 }); await expect(first.run()).rejects.toThrow('candidate outcome barrier 1'); const ready = await first.ready
+      const trackerBefore = DurableTracker.open(ready.tracker)
+      const candidateCommit = String(trackerBefore.database.prepare("SELECT candidate_commit FROM experiments WHERE kind = 'candidate'").get()?.['candidate_commit'])
+      expect(candidateCommit).toMatch(/^[0-9a-f]{40}$/u)
+      expect(candidateAuditCommits(f.root, ready.runId)).toEqual([candidateCommit])
+      trackerBefore.close()
+      await expect(createCaseController(f, { max_experiments: 1 }, ready.runId).run()).rejects.toThrow('candidate outcome barrier 2')
+      fault.mockRestore()
+      const terminal = await createCaseController(f, { max_experiments: 1 }, ready.runId).run()
+      expect(terminal).toMatchObject({ status: 'round-failed', counts: { experimentsStarted: 1, experimentsCompleted: 1, attempts: 3 } })
+      const tracker = DurableTracker.open(ready.tracker)
+      expect(tracker.database.prepare("SELECT candidate_commit, state, failure_code FROM experiments WHERE kind = 'candidate'").get()).toEqual({ candidate_commit: candidateCommit, state: 'crashed', failure_code: 'recovery-rerun-exhausted' })
+      expect(tracker.database.prepare("SELECT ordinal, process_tree_quiescent, exited_at FROM attempts WHERE experiment_id LIKE '%-candidate-%' ORDER BY ordinal").all()).toEqual([
+        { ordinal: 1, process_tree_quiescent: 1, exited_at: null },
+        { ordinal: 2, process_tree_quiescent: 1, exited_at: null },
+      ])
+      expect(candidateAuditCommits(f.root, ready.runId)).toEqual([candidateCommit])
+      tracker.close()
+    } finally { fault.mockRestore(); rmSync(f.root, { recursive: true, force: true }) }
+  })
+
+  it.each([
+    ['accept', 9, 'before-publication'], ['accept', 9, 'after-publication'],
+    ['reject', 11, 'before-publication'], ['reject', 11, 'after-publication'],
+  ] as const)('reconciles an interrupted %s decision with metric %s at %s deterministically and idempotently', async (decision, metric, barrier) => {
+    const f = controllerFixture([{ stdout: '{"score":10}\n' }, { stdout: `{"score":${metric}}\n` }], [(worktree) => writeFileSync(join(worktree, 'src', 'code.ts'), `export const n = ${metric}\n`)])
+    const checkpoint = DurableTracker.prototype.checkpointRun
+    const commitTerminal = DurableTracker.prototype.commitTerminalExperiment
+    let hits = 0
+    const fault = barrier === 'before-publication'
+      ? vi.spyOn(DurableTracker.prototype, 'checkpointRun').mockImplementation(function (runId, facts, at) {
+          if ((facts.intent as { kind?: string } | undefined)?.kind === 'git-reconciliation' && hits++ === 0) throw new Error('decision barrier before publication')
+          return checkpoint.call(this, runId, facts, at)
+        })
+      : vi.spyOn(DurableTracker.prototype, 'commitTerminalExperiment').mockImplementation(function (experimentId, state, facts, at) {
+          if (experimentId.includes('-candidate-') && hits++ === 0) throw new Error('decision barrier after publication')
+          return commitTerminal.call(this, experimentId, state, facts, at)
+        })
+    try {
+      const interrupted = createCaseController(f, { max_experiments: 1 }); await expect(interrupted.run()).rejects.toThrow(`decision barrier ${barrier === 'before-publication' ? 'before' : 'after'} publication`); const ready = await interrupted.ready
+      fault.mockRestore()
+      const candidates = DurableTracker.open(ready.tracker)
+      const rowBefore = candidates.database.prepare("SELECT candidate_commit FROM experiments WHERE kind = 'candidate'").get()!
+      const candidateCommit = String(rowBefore['candidate_commit']); const startCommit = execFileSync('git', ['-C', f.root, 'rev-list', '--max-parents=0', 'HEAD']).toString().trim()
+      candidates.close()
+      const [left, right] = await Promise.allSettled([createCaseController(f, { max_experiments: 1 }, ready.runId).run(), createCaseController(f, { max_experiments: 1 }, ready.runId).run()])
+      expect([left, right].some(result => result.status === 'fulfilled' && result.value.status === 'budget-limited')).toBe(true)
+      const tracker = DurableTracker.open(ready.tracker)
+      expect(tracker.database.prepare("SELECT state, decision, metric, candidate_commit FROM experiments WHERE kind = 'candidate'").get()).toEqual({ state: decision === 'accept' ? 'accepted' : 'rejected', decision, metric, candidate_commit: candidateCommit })
+      const run = tracker.getRun(ready.runId)!
+      expect(run['best_commit']).toBe(decision === 'accept' ? candidateCommit : startCommit)
+      expect(execFileSync('git', ['-C', ready.worktree, 'rev-parse', 'HEAD']).toString().trim()).toBe(decision === 'accept' ? candidateCommit : startCommit)
+      expect(candidateAuditCommits(f.root, ready.runId)).toEqual([candidateCommit])
+      expect(tracker.database.prepare("SELECT COUNT(*) AS n FROM attempts WHERE experiment_id LIKE '%-candidate-%'").get()?.['n']).toBe(1)
+      expect(tracker.database.prepare("SELECT COUNT(*) AS n FROM transitions WHERE scope = 'experiment' AND experiment_id LIKE '%-candidate-%' AND to_state = ?").get(decision === 'accept' ? 'accepted' : 'rejected')?.['n']).toBe(1)
+      tracker.close()
+    } finally { fault.mockRestore(); rmSync(f.root, { recursive: true, force: true }) }
   })
 
   it('persists a terminal experiment and artifacts before the next child and releases only after terminal run persistence', async () => {

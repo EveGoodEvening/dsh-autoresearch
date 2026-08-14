@@ -211,7 +211,8 @@ function decidingDirective(request: RecoveryRequest, run: Row, experiment: Recov
     return blocked(request, 'attempt-uncertain', message, 'retain')
   }
   const durableMetric = number(row['metric'])
-  if (isExperimentTerminal(text(row['state'])) || durableMetric !== undefined) {
+  const recoveryRerunExhausted = text(row['failure_code']) === 'recovery-rerun-exhausted'
+  if ((isExperimentTerminal(text(row['state'])) || durableMetric !== undefined) && !recoveryRerunExhausted) {
     const evaluation = terminalEvaluation(request, experiment, row)
     if (evaluation instanceof RecoveryEvidenceError) return blocked(request, evaluation.code, evaluation.message, 'retain')
     if (durableMetric !== undefined && (evaluation.kind !== 'measured' || evaluation.metric !== durableMetric)) return blocked(request, 'state-ambiguous', 'candidate metric does not match its durable evaluator outcome', 'retain')
@@ -266,7 +267,8 @@ function validateTerminalEvidence(request: RecoveryRequest, state: 'completed' |
     const evaluatedExperiments = new Set((request.tracker.database.prepare("SELECT DISTINCT experiment_id FROM transitions WHERE run_id = ? AND scope = 'experiment' AND from_state = 'running' AND to_state NOT IN ('running','baseline-pending')").all(request.runId) as Row[]).map(row => text(row['experiment_id'])))
     for (const experimentId of evaluatedExperiments) {
       const latest = attempts.filter(row => text(row['experiment_id']) === experimentId).at(-1)
-      if (!latest || !latest['exited_at']) throw new RecoveryEvidenceError('attempt-uncertain', `terminal evaluated experiment ${experimentId} lacks a completed evaluator attempt`)
+      const experiment = experiments.find(row => text(row['experiment_id']) === experimentId)
+      if (!latest || !latest['exited_at'] && text(experiment?.['failure_code']) !== 'recovery-rerun-exhausted') throw new RecoveryEvidenceError('attempt-uncertain', `terminal evaluated experiment ${experimentId} lacks a completed evaluator attempt`)
     }
     if (state === 'baseline-blocked') {
       const baseline = experiments.find(row => text(row['kind']) === 'baseline')
