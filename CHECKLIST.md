@@ -704,56 +704,58 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 
 ## Real Harness composition
 
-- [ ] Replace the fixed-report workflow integration test and replace/remove the four workflow-based unit tests in `tests/autoresearch.spec.ts`.
-- [ ] Compose real Loader/app agent stack in process.
-- [ ] Include tools registry.
-- [ ] Include system-prompt registry.
-- [ ] Include jobs registry and generic jobs tools.
-- [ ] Include subprocess provider.
-- [ ] Include core Agent registry/runtime capable of `ctx.agents.create` and child-scoped setup.
+- [x] Replace the fixed-report workflow integration test and replace/remove the four workflow-based unit tests in `tests/autoresearch.spec.ts`; the obsolete workflow integration file is absent and the remaining unit coverage targets production wiring and input validation.
+- [x] Compose real Loader/app agent stack in process through Cordis plugin fibers.
+- [x] Include tools registry.
+- [x] Include system-prompt registry.
+- [x] Include jobs registry and generic jobs tools.
+- [x] Include subprocess provider.
+- [x] Include core Agent registry/runtime capable of `ctx.agents.create` and child-scoped setup.
 - [ ] Mock only model proposal content.
-- [ ] Observe tool registration through real composition.
-- [ ] Observe prompt guidance through real composition.
+- [x] Observe tool registration through real composition.
+- [x] Observe prompt guidance through real composition.
 - [ ] Exercise host filesystem/Git validation.
-- [ ] Exercise real evaluator fixture.
-- [ ] Exercise background publication/collection/cancellation.
+- [x] Exercise real evaluator fixture through the local subprocess provider.
+- [x] Exercise background publication/collection/cancellation through the actual local jobs registry and generic list/output/kill tools.
 - [ ] Verify persisted transcript/tool/job lifecycle.
-- [ ] Verify HMR removal through real composition.
+- [x] Verify HMR removal through real composition by disposing the plugin fiber and observing tool and prompt removal.
 
 ## Bundle/profile and failure composition
 
-- [ ] Parse `cordis.patch.yml` through Harness schema.
-- [ ] Verify stable id/module/config.
+- [x] Parse `cordis.patch.yml` through Harness schema.
+- [x] Verify stable id/module/config.
 - [ ] Boot keyless assembled profile snapshot.
 - [ ] Verify missing `dsh-tool-jobs` fails clearly.
-- [ ] Verify missing subprocess provider fails clearly.
-- [ ] Verify missing/incompatible Agent registry/runtime or child setup capability fails clearly.
-- [ ] Verify no missing-service path hangs.
+- [x] Verify missing subprocess provider fails clearly.
+- [x] Verify missing/incompatible Agent registry/runtime or child setup capability fails clearly.
+- [x] Verify no missing-service path hangs; missing and incompatible required services fail synchronously.
 
 ## Recovery/concurrency integration
 
 - [ ] Test deliberate interruption during baseline where entire prior evaluator process-tree quiescence is proven and safe rerun occurs once.
 - [ ] Test deliberate interruption during candidate evaluation where entire prior evaluator process-tree quiescence is proven and safe rerun occurs once.
-- [ ] Test restart without proof that every prior evaluator descendant is quiescent blocks without PID signalling or duplicate execution, including the parent-dead/descendant-uncertain case.
+- [x] Test restart without proof that every prior evaluator descendant is quiescent blocks without PID signalling or duplicate execution, including the parent-dead/descendant-uncertain case.
 - [ ] Test deliberate interruption during decision.
 - [ ] Test safely reconcilable resume completes without duplicate candidate.
-- [ ] Test same repository/run-tag active exclusion.
-- [ ] Test later same-tag reuse with retained prior run-id-bearing worktree.
-- [ ] Test two independent run tags concurrently.
-- [ ] Verify separate immutable run-id-bearing worktrees/branches.
-- [ ] Verify no caller HEAD/index/ledger interference.
+- [x] Test same repository/run-tag active exclusion.
+- [x] Test later same-tag reuse with retained prior run-id-bearing worktree.
+- [x] Test two independent run tags concurrently.
+- [x] Verify separate immutable run-id-bearing worktrees/branches.
+- [x] Verify no caller HEAD/index/ledger interference.
 - [ ] Verify serialized promotion/tracker updates.
 - [ ] Test plugin/HMR disposal with active child/evaluator and mandatory Agent handle disposal plus whole-process-tree quiescence.
 
 ## Chunk 08 verification gate
 
-- [ ] Observe actual Loader exposes `autoresearch` tool.
-- [ ] Observe actual Loader contributes guidance.
+- [x] Observe actual Loader exposes `autoresearch` tool.
+- [x] Observe actual Loader contributes guidance.
 - [ ] Observe temporary repository tracker/Git/evaluator/job facts end to end.
-- [ ] Observe concurrent run isolation.
-- [ ] Observe same-tag collision block.
+- [x] Observe concurrent run isolation through independent active run tags and immutable run-id-bearing Git identities.
+- [x] Observe same-tag collision block.
 - [ ] Observe interrupted run resumes successfully.
 - [ ] Run focused per-file coverage expected by project policy.
+
+- [x] Record post-implementation gates: frozen install passed; typecheck passed; Vitest passed 9 files / 252 tests; build passed; pack passed.
 
 ## Chunk 08 review gate
 
@@ -764,11 +766,11 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 
 ## Chunk 08 implementation commit gate
 
-- [ ] Commit real DSH composition/recovery/concurrency tests and required defect fixes.
+- [x] Commit real DSH composition/recovery/concurrency tests and required defect fixes as `3b5b819bb66ca3cc34fe561c84b8bdec324d9eb6` (`test(integration): add real dsh composition coverage`).
 
 ## Chunk 08 tracker-accounting gate
 
-- [ ] Record Chunk 08 implementation commit full SHA after it exists.
+- [x] Record Chunk 08 implementation commit full SHA: `3b5b819bb66ca3cc34fe561c84b8bdec324d9eb6`.
 - [ ] Commit the checklist update separately from the Chunk 08 implementation commit.
 
 # Chunk 09 — `09-complete-docs-and-release-gate`
