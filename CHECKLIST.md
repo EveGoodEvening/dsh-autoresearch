@@ -608,7 +608,7 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 
 ## Plugin wiring (`src/index.ts`)
 
-- [ ] Keep named exports only: `name`, `inject`, `Config`, `apply`.
+- [x] Keep named exports only: `name`, `inject`, `Config`, `apply`; built-root runtime inspection returned exactly `Config,apply,inject,name`.
 - [x] Inject `tools`.
 - [x] Inject `agents`.
 - [x] Inject `subprocess`.
@@ -621,16 +621,16 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 - [x] Return canonical foreground result union.
 - [x] Start background jobs by default with `owner: exec.agent`.
 - [x] Honor explicit foreground mode.
-- [ ] In the synchronous LocalJobRegistry `run()` callback, create the job-owned `AbortController`, idempotent cancellation hook, deferred execution gate, `done` promise, and readiness promise without starting controller work.
+- [x] In the synchronous LocalJobRegistry `run()` callback, create the job-owned `AbortController`, idempotent cancellation hook, deferred execution gate, `done` promise, and readiness promise without starting controller work.
 - [x] Call `ctx.jobs.start`, receive the returned job id, and durably record it before releasing the deferred execution gate.
-- [ ] Ensure failures before gate release settle `done` and readiness without orphaning resources.
+- [x] Ensure failures before gate release settle `done` and readiness without orphaning resources.
 - [x] Run durable initialization under the job-owned signal after gate release; resolve readiness only after tracker, run-id-bearing branch, and worktree facts are committed.
 - [x] Return background `{ kind, runId, jobId, tracker, branch, worktree }` only from the readiness result.
 - [x] Return typed startup failure/cancellation when initialization fails before readiness; do not fabricate tracker/branch/worktree values.
 - [x] Declare `autoresearch` job kind through type augmentation.
 - [x] Use generic jobs control rather than private job tools.
 - [ ] Chunk 08 composition dependency: require and verify compatible jobs registry plus generic jobs-tool composition through the real Harness stack.
-- [ ] Map `target-reached` and `budget-limited` to completed jobs, and map every uncertain `blocked` result to failed while preserving its canonical durable result.
+- [x] Map `target-reached` and `budget-limited` to completed jobs, and map every uncertain `blocked` result to failed while preserving its canonical durable result.
 - [x] Map `baseline-blocked` and `round-failed` to failed jobs.
 - [x] Map plugin-internal cancellation to Harness job outcome status `killed` while preserving the plugin result variant `cancelled`.
 - [x] Ensure job `done` waits for controller/child-dispose/process/tracker/Git quiescence and resolves only after cleanup, not merely after cancellation is requested.
@@ -660,40 +660,45 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 ## Chunk 07 verification gate
 
 - [x] Test foreground tool result.
-- [ ] Test background tool result waits for durable readiness facts.
-- [ ] Test actual LocalJobRegistry ordering: `run()` remains synchronous, controller work stays gated until returned job id is durably recorded, then starts under the job-owned signal.
-- [ ] Test typed initialization failure/cancellation before readiness and no orphaned resources.
+- [x] Test background tool result waits for durable readiness facts.
+- [ ] Test actual LocalJobRegistry ordering: `run()` remains synchronous, controller work stays gated until returned job id is durably recorded, then starts under the job-owned signal; real-registry composition proof remains Chunk 08.
+- [x] Test typed initialization failure/cancellation before readiness and no orphaned resources.
 - [ ] Test background job output consumption.
 - [ ] Test generic job list/output/kill compatibility.
 - [ ] Test jobs-controller absence fails clearly.
 - [ ] Test missing/incompatible core Agent registry/runtime or child setup capability fails clearly.
 - [x] Test cancellation idempotence.
-- [ ] Test a registered background job survives the outer tool call's `exec.signal` abort.
-- [ ] Test child creation derives `parentSession`/delegation/model route from `exec.agent`, background job start receives `owner: exec.agent`, and a real controller-created tracker run row records the same authority identity.
+- [x] Test a registered background job survives the outer tool call's `exec.signal` abort.
+- [x] Test child creation derives `parentSession`/delegation/model route from `exec.agent`, background job start receives `owner: exec.agent`, and a real controller-created tracker run row records the same authority identity.
 - [x] Test fresh child durable cwd is the canonical isolated worktree and differs from the caller workspace.
 - [x] Test plugin cancellation maps to Harness job status `killed`.
 - [x] Test cancellation/job completion waits for mandatory Agent handle disposal and whole-process-tree quiescence.
-- [ ] Test job status mapping for every terminal run status.
-- [ ] Test HMR/unload removes tool.
-- [ ] Test HMR/unload removes prompt.
-- [ ] Test HMR/unload settles active resources.
+- [x] Test job status mapping for every terminal run status.
+- [x] Test HMR/unload removes tool.
+- [x] Test HMR/unload removes prompt.
+- [x] Test HMR/unload settles active resources.
 - [x] Record production-cutover verification for `952267ba41689cf21c63092e37cb61c34ccd5e61`: `pnpm install --frozen-lockfile` passed; `pnpm run typecheck` passed; Vitest passed 8 files / 229 tests; `pnpm run build` passed; `pnpm pack` passed.
 
 ## Chunk 07 review gate
 
-- [ ] Review lifecycle/disposal symmetry for every registration/resource.
-- [ ] Review job completion is not reported before durable settlement.
-- [ ] Review canonical result data is not replaced by prose.
-- [ ] Review plugin does not modify DeepSeek Harness AgentLoop.
+- [x] Review lifecycle/disposal symmetry for every registration/resource.
+- [x] Review job completion is not reported before durable settlement.
+- [x] Review canonical result data is not replaced by prose.
+- [x] Review plugin does not modify DeepSeek Harness AgentLoop.
 
 ## Chunk 07 implementation commit gate
 
 - [x] Commit tool/jobs/lifecycle/HMR wiring and focused tests in production cutover commit `952267ba41689cf21c63092e37cb61c34ccd5e61` (`feat: wire autoresearch controller lifecycle`).
+- [x] Record lifecycle hardening commit `8b17077feaf3f9458120d1b2acf4ec6978000733` (`fix(plugin): harden jobs and lifecycle wiring`); focused verification passed typecheck, 8 files / 239 tests, build, and pack.
+- [x] Record durable startup completion commit `7a66971a5f01e8b0fd50abe807b6e9bc7037690e` (`fix(plugin): complete durable background startup`).
 
 ## Chunk 07 tracker-accounting gate
 
 - [x] Record Chunk 07 implementation commit full SHA: `952267ba41689cf21c63092e37cb61c34ccd5e61`.
 - [x] Record separate Chunk 07 checklist-accounting commit `a0cbd7d1b819155b9debdc0ddc0e57b7951633a5` (`docs: record production cutover verification`) as complete and separate from implementation commit `952267ba41689cf21c63092e37cb61c34ccd5e61`.
+- [x] Record final post-`7a66971a5f01e8b0fd50abe807b6e9bc7037690e` verification: `pnpm run typecheck` passed; Vitest passed 8 files / 243 tests; `pnpm run build` passed; `pnpm pack` passed; built-root runtime export inspection returned exactly `Config,apply,inject,name`.
+- [ ] Complete the final independent Chunk 07 correctness/accounting review and close Chunk 07.
+- [ ] Commit this post-`7a66971a5f01e8b0fd50abe807b6e9bc7037690e` checklist accounting update separately.
 
 # Chunk 08 — `08-add-real-dsh-composition-and-recovery-tests`
 
