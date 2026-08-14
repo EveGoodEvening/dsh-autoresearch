@@ -143,6 +143,8 @@ describe('host-owned Git boundary', () => {
     const f = fixture(); const first = await createRun(f, 'same', 'run-a', 3); first.tracker.transitionRun(first.identity.runId, 'cancelled', { terminalReason: 'done', quiescent: true }); expect(releaseTerminalRunLock(first.tracker, first.identity.runId)).toBe(true)
     const second = await createRun(f, 'same', 'run-b', 3); const third = await createRun(f, 'other', 'run-c', 3)
     expect(new Set([first.identity.worktree, second.identity.worktree, third.identity.worktree]).size).toBe(3); expect(second.identity.branch).not.toBe(first.identity.branch); assertState(second, second.discovery.startCommit); assertState(third, third.discovery.startCommit)
+    expect(existsSync(join(first.discovery.gitCommonDir, 'dsh-autoresearch-locks.sqlite'))).toBe(true)
+    expect(existsSync(join(f.root, '.tracker', 'locks.sqlite'))).toBe(false)
   })
 
   it('enforces staged, unstaged, untracked, rename, dependency, and protected policy', async () => {

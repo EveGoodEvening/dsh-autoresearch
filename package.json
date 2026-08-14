@@ -60,32 +60,39 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-agent": "^0.1.0-rc.5",
-    "@deepseek-ai/dsh-invariants": "^0.1.0-rc.5",
-    "@deepseek-ai/dsh-jobs": "^0.1.0-rc.5",
-    "@deepseek-ai/dsh-llm": "^0.1.0-rc.5",
-    "@deepseek-ai/dsh-session": "^0.1.0-rc.5",
-    "@deepseek-ai/dsh-subagent": "0.1.0-rc.6",
-    "@deepseek-ai/dsh-subprocess": "^0.1.0-rc.5",
-    "@deepseek-ai/dsh-system-prompt": "^0.1.0-rc.5",
-    "@deepseek-ai/dsh-tool-jobs": "^0.1.0-rc.5",
-    "@deepseek-ai/dsh-tools": "^0.1.0-rc.5"
+    "@deepseek-ai/dsh-agent": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-invariants": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-jobs": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-llm": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-session": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-subagent": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-subprocess": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-system-prompt": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-tool-jobs": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-tools": "^0.1.0-rc.6"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/cordis-plugin-group": "1.0.1",
+    "@deepseek-ai/cordis-plugin-hmr": "1.0.16",
     "@deepseek-ai/cordis-plugin-include": "^1.0.6",
-    "@deepseek-ai/dsh-agent": "^0.1.0-rc.5",
-    "@deepseek-ai/dsh-invariants": "^0.1.0-rc.5",
-    "@deepseek-ai/dsh-jobs": "^0.1.0-rc.5",
-    "@deepseek-ai/dsh-jobs-local": "^0.1.0-rc.5",
-    "@deepseek-ai/dsh-llm": "^0.1.0-rc.5",
-    "@deepseek-ai/dsh-session": "^0.1.0-rc.5",
+    "@deepseek-ai/cordis-plugin-loader": "1.0.2",
+    "@deepseek-ai/dsh-agent": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-app-boot": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-base": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-home-paths": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-invariants": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-jobs": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-jobs-local": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-launch-environment": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-llm": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-session": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-subagent": "0.1.0-rc.6",
-    "@deepseek-ai/dsh-subprocess": "^0.1.0-rc.5",
-    "@deepseek-ai/dsh-subprocess-local": "^0.1.0-rc.5",
-    "@deepseek-ai/dsh-system-prompt": "^0.1.0-rc.5",
-    "@deepseek-ai/dsh-tool-jobs": "^0.1.0-rc.5",
-    "@deepseek-ai/dsh-tools": "^0.1.0-rc.5",
+    "@deepseek-ai/dsh-subprocess": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-subprocess-local": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-system-prompt": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-tool-jobs": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-tools": "^0.1.0-rc.6",
     "@types/js-yaml": "^4.0.9",
     "@types/node": "^22.0.0",
     "js-yaml": "^4.3.1",
@@ -95,5 +102,12 @@
   "engines": {
     "node": "^22.19.0 || >=24.0.0"
   },
-  "packageManager": "pnpm@11.7.0"
+  "packageManager": "pnpm@11.7.0",
+  "pnpm": {
+    "ignoredBuiltDependencies": [
+      "@google/genai",
+      "koffi",
+      "protobufjs"
+    ]
+  }
 }

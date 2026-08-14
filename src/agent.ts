@@ -207,7 +207,10 @@ function reportTool(execute: ToolDefinition['execute']): ToolDefinition {
 // in a prompt does not bind the child process or durable session to that worktree.
 /** Create, drive, drain, and dispose one isolated proposal child. */
 export async function requestProposal(ctx: Context, request: ProposalAgentRequest): Promise<ProposalAgentResult> {
-  if (request.parent.ctx !== ctx) throw fail('capability-unavailable', 'Proposal parent and controller must share one authoritative Context')
+  const sameAuthority = request.parent.ctx.root === undefined || ctx.root === undefined
+    ? request.parent.ctx === ctx
+    : request.parent.ctx.root === ctx.root
+  if (!sameAuthority) throw fail('capability-unavailable', 'Proposal parent and controller must share one authoritative Context root')
   // These delegation inputs belong to this call even if the parent changes while Git is inspected.
   const childDepth = resolveChildDepth(request.parent, undefined)
   const delegatedPolicy = captureDelegatedPolicyOverrides(request.parent)

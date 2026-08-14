@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto'
 import { mkdtemp, readFile, realpath, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { isAbsolute, join, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { scrubbedParentEnv, type SubprocessHandle, type SubprocessOutcome, type SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
 import type { ResolvedConfig } from './config.js'
 import type { NormalizedRunPolicy } from './types.js'
@@ -103,14 +104,25 @@ export function durableGitIdentity(tracker: DurableTracker, runId: string): Dura
 }
 
 export function acquireRunLock(tracker: DurableTracker, identity: RunGitIdentity, repositoryId: string, maxActiveRunsPerRepository: number): void {
-  const database = tracker.database; database.exec('BEGIN IMMEDIATE')
+  const run = tracker.getRun(identity.runId)
+  if (!run || run['repository_id'] !== repositoryId || run['run_tag'] !== identity.runTag) throw new GitBoundaryError('run-lock-identity', 'Active lock identity must match the durable run')
+  const authority = openLockAuthority(tracker, identity.runId)
+  let reserved = false
   try {
-    const run = tracker.getRun(identity.runId)
-    if (!run || run['repository_id'] !== repositoryId || run['run_tag'] !== identity.runTag) throw new GitBoundaryError('run-lock-identity', 'Active lock identity must match the durable run')
-    const active = Number(database.prepare('SELECT COUNT(*) AS count FROM active_locks WHERE repository_id = ? AND released_at IS NULL').get(repositoryId)?.['count'] ?? 0)
+    authority.exec('BEGIN IMMEDIATE')
+    const owner = authority.prepare('SELECT run_id FROM active_locks WHERE repository_id = ? AND run_tag = ?').get(repositoryId, identity.runTag)
+    if (owner) throw new GitBoundaryError('run-tag-active', 'The repository/run-tag is already active')
+    const active = Number(authority.prepare('SELECT COUNT(*) AS count FROM active_locks WHERE repository_id = ?').get(repositoryId)?.['count'] ?? 0)
     if (active >= maxActiveRunsPerRepository) throw new GitBoundaryError('repository-active-limit', 'Repository active-run limit reached')
-    database.prepare('INSERT INTO active_locks (repository_id, run_tag, run_id, acquired_at) VALUES (?, ?, ?, ?)').run(repositoryId, identity.runTag, identity.runId, new Date().toISOString()); database.exec('COMMIT')
-  } catch (error) { try { database.exec('ROLLBACK') } catch {} if (isUniqueConstraint(error)) throw new GitBoundaryError('run-tag-active', 'The repository/run-tag is already active'); throw error }
+    authority.prepare('INSERT INTO active_locks (repository_id, run_tag, run_id, acquired_at) VALUES (?, ?, ?, ?)').run(repositoryId, identity.runTag, identity.runId, new Date().toISOString())
+    reserved = true
+    authority.exec('COMMIT')
+    tracker.acquireActiveLock(identity.runId, repositoryId, identity.runTag)
+  } catch (error) {
+    try { authority.exec('ROLLBACK') } catch {}
+    if (reserved) authority.prepare('DELETE FROM active_locks WHERE run_id = ?').run(identity.runId)
+    throw error
+  } finally { authority.close() }
 }
 
 export async function allocateRunWorktree(ctx: GitContext, executable: string, discovery: RepositoryDiscovery, identity: RunGitIdentity, durable: DurableGitIdentity, options: Omit<GitCommandOptions, 'cwd'>, resume = false): Promise<void> {
@@ -249,10 +261,30 @@ export async function restoreAcceptedWorktree(ctx: GitContext, executable: strin
   const branch = await readOptionalRef(ctx, executable, branchRef, worktree, options)
   const head = (await invoke(['rev-parse', '--verify', 'HEAD^{commit}'])).stdout.trim()
   if (accepted !== expectedAcceptedCommit || branch !== expectedAcceptedCommit || head !== expectedAcceptedCommit) throw new GitBoundaryError('restore-accepted-identity', 'Accepted ref, branch, and HEAD are not the durable restoration target')
-  await invoke(['read-tree', '--reset', '-u', expectedAcceptedCommit])
-  await invoke(['clean', '-ffdx'])
-  await verifyExactWorktree(ctx, executable, worktree, expectedAcceptedCommit, options)
+  await invoke(['read-tree', '--reset', '-u', expectedAcceptedCommit]); await invoke(['clean', '-ffdx']); await verifyExactWorktree(ctx, executable, worktree, expectedAcceptedCommit, options)
 }
+export function releaseTerminalRunLock(tracker: DurableTracker, runId: string): boolean {
+  const released = tracker.releaseActiveLock(runId)
+  if (released) releaseAuthorityLock(tracker, runId)
+  return released
+}
+export function recoverTerminalRunLock(tracker: DurableTracker, runId: string): boolean { return tracker.recoveryState(runId).safeToReleaseTerminalLock ? releaseTerminalRunLock(tracker, runId) : false }
+function openLockAuthority(tracker: DurableTracker, runId: string): DatabaseSync {
+  const run = tracker.getRun(runId)
+  if (!run) throw new GitBoundaryError('run-lock-identity', 'Shared lock authority requires a durable run')
+  const gitCommonDir = String(run['git_common_dir'])
+  if (!isAbsolute(gitCommonDir)) throw new GitBoundaryError('run-lock-identity', 'Shared lock authority requires a canonical Git common directory')
+  const path = join(gitCommonDir, 'dsh-autoresearch-locks.sqlite')
+  const database = new DatabaseSync(path, { timeout: 5_000 })
+  database.exec('PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000; CREATE TABLE IF NOT EXISTS active_locks (repository_id TEXT NOT NULL, run_tag TEXT NOT NULL, run_id TEXT NOT NULL UNIQUE, acquired_at TEXT NOT NULL, PRIMARY KEY (repository_id, run_tag)) STRICT')
+  return database
+}
+
+function releaseAuthorityLock(tracker: DurableTracker, runId: string): void {
+  const authority = openLockAuthority(tracker, runId)
+  try { authority.prepare('DELETE FROM active_locks WHERE run_id = ?').run(runId) } finally { authority.close() }
+}
+
 
 export async function inspectRunGitState(ctx: GitContext, executable: string, discovery: RepositoryDiscovery, identity: RunGitIdentity, options: Omit<GitCommandOptions, 'cwd'>): Promise<RunGitInspection> {
   const acceptedCommit = await readOptionalRef(ctx, executable, identity.acceptedRef, discovery.repository, options)
@@ -263,8 +295,6 @@ export async function inspectRunGitState(ctx: GitContext, executable: string, di
   return { ...(acceptedCommit ? { acceptedCommit } : {}), ...(branchCommit ? { branchCommit } : {}), ...(headCommit ? { headCommit } : {}), auditCommits, worktreeRegistered: registered !== undefined, ...(registered?.branch ? { registeredBranch: registered.branch } : {}) }
 }
 
-export function releaseTerminalRunLock(tracker: DurableTracker, runId: string): boolean { return tracker.releaseActiveLock(runId) }
-export function recoverTerminalRunLock(tracker: DurableTracker, runId: string): boolean { return tracker.recoveryState(runId).safeToReleaseTerminalLock ? tracker.releaseActiveLock(runId) : false }
 export async function removeRunWorktree(ctx: GitContext, executable: string, discovery: RepositoryDiscovery, identity: RunGitIdentity, options: Omit<GitCommandOptions, 'cwd'>): Promise<void> { const listed = parseWorktreeList((await runGit(ctx, executable, ['worktree', 'list', '--porcelain'], { ...options, cwd: discovery.repository })).stdout); if (listed.some((item) => item.path === identity.worktree)) await runGit(ctx, executable, ['worktree', 'remove', identity.worktree], { ...options, cwd: discovery.repository }) }
 
 function safeGitArgs(args: readonly string[]): readonly string[] { return args[0] === '-e' ? args : ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'diff.external=', '-c', 'interactive.diffFilter=', ...args] }
