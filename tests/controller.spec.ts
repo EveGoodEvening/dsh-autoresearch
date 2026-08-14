@@ -1,5 +1,5 @@
 import { execFileSync, spawn } from 'node:child_process'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
@@ -292,6 +292,37 @@ describe('controller real Git/SQLite outcomes', () => {
       const refs = terminal.artifacts
       expect(refs.map(item => item.kind).sort()).toEqual(['stderr', 'stdout']); expect(new Set(refs.map(item => item.artifactId)).size).toBe(2); expect(refs).toContainEqual(expect.objectContaining(terminal.exit.stdout)); expect(refs).toContainEqual(expect.objectContaining(terminal.exit.stderr)); expect(tracker.database.prepare('SELECT COUNT(*) AS n FROM artifacts').get()?.['n']).toBe(2); tracker.close()
     } finally { rmSync(f.root, { recursive: true, force: true }) }
+  })
+
+  it('revalidates terminal baseline artifacts before cancellation can release the lock', async () => {
+    const f = controllerFixture([{ stdout: '', exitCode: 9 }])
+    const transitionRun = DurableTracker.prototype.transitionRun
+    let controller!: AutoresearchRunController
+    let observedTerminalBaseline = false
+    const transitionSpy = vi.spyOn(DurableTracker.prototype, 'transitionRun').mockImplementation(function (runId, to, facts, at) {
+      const transitionId = transitionRun.call(this, runId, to, facts, at)
+      if (to === 'baseline-blocked') {
+        observedTerminalBaseline = true
+        const artifact = this.database.prepare("SELECT run_id, experiment_id, attempt_id, kind FROM artifacts WHERE run_id = ? AND kind = 'stdout'").get(runId)!
+        unlinkSync(join(this.layout.root, 'artifacts', String(artifact['run_id']), String(artifact['experiment_id']), String(artifact['attempt_id']), `${String(artifact['kind'])}.log`))
+        controller.cancel('operator stop after terminal persistence')
+      }
+      return transitionId
+    })
+    try {
+      controller = new AutoresearchRunController(f.ctx, { config: resolveConfig({ stateRoot: '.autoresearch-test', cleanupWorktreesOnSuccess: false, retainWorktrees: true, exportTsv: false }), input: { ...input, repository: f.root, evaluation: { command: 'fake-evaluator', args: [] }, mutable_globs: ['src/**'] }, parent: f.parent, signal: new AbortController().signal })
+      const result = await controller.run()
+      const ready = await controller.ready
+      const tracker = DurableTracker.open(ready.tracker)
+      expect(observedTerminalBaseline).toBe(true)
+      expect(result).toMatchObject({ status: 'round-failed', evidence: [{ code: 'artifact-incomplete' }] })
+      expect(tracker.getRun(result.runId)).toMatchObject({ state: 'baseline-blocked' })
+      expect(tracker.database.prepare('SELECT released_at FROM active_locks').get()?.['released_at']).toBeNull()
+      tracker.close()
+    } finally {
+      transitionSpy.mockRestore()
+      rmSync(f.root, { recursive: true, force: true })
+    }
   })
 
   it('persists baseline signal artifacts with zero child allocation and zero candidate budget', async () => {

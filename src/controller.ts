@@ -61,7 +61,7 @@ export class AutoresearchRunController {
       return await this.drive(runtime)
     } catch (error) {
       this.rejectReady(error)
-      if (runtime && this.aborter.signal.aborted) return this.cancelled(runtime)
+      if (runtime && this.aborter.signal.aborted) return await this.cancelled(runtime)
       throw error
     } finally {
       runtime?.tracker.close()
@@ -258,7 +258,12 @@ export class AutoresearchRunController {
     if (this.quiescenceFailure) return this.block(r, { kind: 'blocked', runId: r.runId, code: 'attempt-uncertain', evidence: [{ code: this.quiescenceFailure.code, message: this.quiescenceFailure.message, artifacts: [] }], lock: 'retain' })
     if (!row) throw new Error(this.cancelReason)
     const lastState = String(row['state']) as RunDurableState
-    if (['completed','baseline-blocked','blocked','round-failed','cancelled'].includes(lastState)) return this.returnTerminal(r, { kind: 'terminal', runId: r.runId, state: lastState as never, lock: 'release', artifacts: [] })
+    if (['completed','baseline-blocked','blocked','round-failed','cancelled'].includes(lastState)) {
+      const directive = await reconcileRecovery(this.ctx, { ...r, signal: new AbortController().signal })
+      if (directive.kind === 'blocked') return this.block(r, directive)
+      if (directive.kind === 'terminal') return this.returnTerminal(r, directive)
+      throw new Error(`terminal cancellation reconciliation returned ${directive.kind}`)
+    }
     r.tracker.checkpointRun(r.runId, { intent: { kind: 'cancellation', reason: this.cancelReason } })
     const unresolved = r.tracker.recoveryState(r.runId).unresolvedExperiment
     const best = optionalBest(r.tracker, r.runId)
