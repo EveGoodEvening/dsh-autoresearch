@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { readFileSync } from 'node:fs'
 import { mkdtemp, readFile, realpath, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
@@ -102,33 +103,43 @@ export function durableGitIdentity(tracker: DurableTracker, runId: string): Dura
   const run = tracker.getRun(runId); if (!run) throw new GitBoundaryError('git-run-missing', `Unknown durable run ${runId}`)
   return { runId, repositoryId: String(run['repository_id']), startCommit: String(run['start_commit']), branch: String(run['branch']), worktree: String(run['worktree']) }
 }
-export interface ControllerClaim { readonly ownerId: string; readonly expiresAt: string }
+export interface ControllerProcessIdentity { readonly pid: number; readonly startToken?: string }
+export interface ControllerClaim extends ControllerProcessIdentity { readonly ownerId: string; readonly expiresAt: string }
 
-export function acquireControllerClaim(tracker: DurableTracker, runId: string, ownerId: string, leaseMs: number, now = new Date()): ControllerClaim {
+export function currentControllerProcessIdentity(pid = process.pid): ControllerProcessIdentity {
+  if (!Number.isSafeInteger(pid) || pid <= 0) throw new TypeError('controller PID must be a positive integer')
+  const startToken = linuxProcessStartToken(pid)
+  return { pid, ...(startToken === undefined ? {} : { startToken }) }
+}
+
+export function acquireControllerClaim(tracker: DurableTracker, runId: string, ownerId: string, leaseMs: number, now = new Date(), processIdentity = currentControllerProcessIdentity()): ControllerClaim {
   if (!Number.isSafeInteger(leaseMs) || leaseMs <= 0) throw new TypeError('controller claim lease must be a positive integer')
+  validateControllerProcessIdentity(processIdentity)
   const authority = openLockAuthority(tracker, runId); const expiresAt = new Date(now.getTime() + leaseMs).toISOString()
   try {
     authority.exec('BEGIN IMMEDIATE')
-    const claim = authority.prepare('SELECT owner_id, expires_at FROM controller_claims WHERE run_id = ?').get(runId)
-    if (claim && claim['owner_id'] !== ownerId && Date.parse(String(claim['expires_at'])) > now.getTime()) throw new GitBoundaryError('run-controller-active', 'Another controller instance owns this run')
-    authority.prepare('INSERT INTO controller_claims (run_id, owner_id, acquired_at, heartbeat_at, expires_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(run_id) DO UPDATE SET owner_id=excluded.owner_id, acquired_at=excluded.acquired_at, heartbeat_at=excluded.heartbeat_at, expires_at=excluded.expires_at').run(runId, ownerId, now.toISOString(), now.toISOString(), expiresAt)
+    const claim = authority.prepare('SELECT owner_id, owner_pid, owner_start_token FROM controller_claims WHERE run_id = ?').get(runId)
+    if (claim && claim['owner_id'] !== ownerId && !priorControllerIsProvablyGone(claim)) throw new GitBoundaryError('run-controller-active', 'Another controller instance owns this run')
+    authority.prepare('INSERT INTO controller_claims (run_id, owner_id, owner_pid, owner_start_token, acquired_at, heartbeat_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(run_id) DO UPDATE SET owner_id=excluded.owner_id, owner_pid=excluded.owner_pid, owner_start_token=excluded.owner_start_token, acquired_at=excluded.acquired_at, heartbeat_at=excluded.heartbeat_at, expires_at=excluded.expires_at').run(runId, ownerId, processIdentity.pid, processIdentity.startToken ?? null, now.toISOString(), now.toISOString(), expiresAt)
     authority.exec('COMMIT')
-    return { ownerId, expiresAt }
+    return { ownerId, ...processIdentity, expiresAt }
   } catch (error) { try { authority.exec('ROLLBACK') } catch {} throw error } finally { authority.close() }
 }
 
-export function heartbeatControllerClaim(tracker: DurableTracker, runId: string, ownerId: string, leaseMs: number, now = new Date()): ControllerClaim {
+export function heartbeatControllerClaim(tracker: DurableTracker, runId: string, ownerId: string, leaseMs: number, now = new Date(), processIdentity = currentControllerProcessIdentity()): ControllerClaim {
+  validateControllerProcessIdentity(processIdentity)
   const authority = openLockAuthority(tracker, runId); const expiresAt = new Date(now.getTime() + leaseMs).toISOString()
   try {
-    const changed = authority.prepare('UPDATE controller_claims SET heartbeat_at = ?, expires_at = ? WHERE run_id = ? AND owner_id = ?').run(now.toISOString(), expiresAt, runId, ownerId).changes
+    const changed = authority.prepare('UPDATE controller_claims SET heartbeat_at = ?, expires_at = ? WHERE run_id = ? AND owner_id = ? AND owner_pid = ? AND owner_start_token IS ?').run(now.toISOString(), expiresAt, runId, ownerId, processIdentity.pid, processIdentity.startToken ?? null).changes
     if (changed !== 1) throw new GitBoundaryError('run-controller-claim-lost', 'Controller instance no longer owns this run')
-    return { ownerId, expiresAt }
+    return { ownerId, ...processIdentity, expiresAt }
   } finally { authority.close() }
 }
 
-export function releaseControllerClaim(tracker: DurableTracker, runId: string, ownerId: string): boolean {
+export function releaseControllerClaim(tracker: DurableTracker, runId: string, ownerId: string, processIdentity = currentControllerProcessIdentity()): boolean {
+  validateControllerProcessIdentity(processIdentity)
   const authority = openLockAuthority(tracker, runId)
-  try { return authority.prepare('DELETE FROM controller_claims WHERE run_id = ? AND owner_id = ?').run(runId, ownerId).changes === 1 } finally { authority.close() }
+  try { return authority.prepare('DELETE FROM controller_claims WHERE run_id = ? AND owner_id = ? AND owner_pid = ? AND owner_start_token IS ?').run(runId, ownerId, processIdentity.pid, processIdentity.startToken ?? null).changes === 1 } finally { authority.close() }
 }
 
 
@@ -303,7 +314,10 @@ function openLockAuthority(tracker: DurableTracker, runId: string): DatabaseSync
   if (!isAbsolute(gitCommonDir)) throw new GitBoundaryError('run-lock-identity', 'Shared lock authority requires a canonical Git common directory')
   const path = join(gitCommonDir, 'dsh-autoresearch-locks.sqlite')
   const database = new DatabaseSync(path, { timeout: 5_000 })
-  database.exec('PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000; CREATE TABLE IF NOT EXISTS active_locks (repository_id TEXT NOT NULL, run_tag TEXT NOT NULL, run_id TEXT NOT NULL UNIQUE, acquired_at TEXT NOT NULL, PRIMARY KEY (repository_id, run_tag)) STRICT; CREATE TABLE IF NOT EXISTS controller_claims (run_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, acquired_at TEXT NOT NULL, heartbeat_at TEXT NOT NULL, expires_at TEXT NOT NULL) STRICT')
+  database.exec('PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000; CREATE TABLE IF NOT EXISTS active_locks (repository_id TEXT NOT NULL, run_tag TEXT NOT NULL, run_id TEXT NOT NULL UNIQUE, acquired_at TEXT NOT NULL, PRIMARY KEY (repository_id, run_tag)) STRICT; CREATE TABLE IF NOT EXISTS controller_claims (run_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, owner_pid INTEGER, owner_start_token TEXT, acquired_at TEXT NOT NULL, heartbeat_at TEXT NOT NULL, expires_at TEXT NOT NULL) STRICT')
+  const columns = new Set((database.prepare('PRAGMA table_info(controller_claims)').all() as Record<string, unknown>[]).map(column => String(column['name'])))
+  if (!columns.has('owner_pid')) database.exec('ALTER TABLE controller_claims ADD COLUMN owner_pid INTEGER')
+  if (!columns.has('owner_start_token')) database.exec('ALTER TABLE controller_claims ADD COLUMN owner_start_token TEXT')
   return database
 }
 
@@ -324,6 +338,29 @@ export async function inspectRunGitState(ctx: GitContext, executable: string, di
 
 export async function removeRunWorktree(ctx: GitContext, executable: string, discovery: RepositoryDiscovery, identity: RunGitIdentity, options: Omit<GitCommandOptions, 'cwd'>): Promise<void> { const listed = parseWorktreeList((await runGit(ctx, executable, ['worktree', 'list', '--porcelain'], { ...options, cwd: discovery.repository })).stdout); if (listed.some((item) => item.path === identity.worktree)) await runGit(ctx, executable, ['worktree', 'remove', identity.worktree], { ...options, cwd: discovery.repository }) }
 
+function validateControllerProcessIdentity(identity: ControllerProcessIdentity): void {
+  if (!Number.isSafeInteger(identity.pid) || identity.pid <= 0) throw new TypeError('controller PID must be a positive integer')
+  if (identity.startToken !== undefined && !/^\d+$/u.test(identity.startToken)) throw new TypeError('controller process start token must be numeric')
+}
+function linuxProcessStartToken(pid: number): string | undefined {
+  if (process.platform !== 'linux') return undefined
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
+    const close = stat.lastIndexOf(')')
+    const fields = stat.slice(close + 2).split(' ')
+    return fields[19]
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT' || (error as NodeJS.ErrnoException).code === 'ESRCH') return undefined
+    throw error
+  }
+}
+function priorControllerIsProvablyGone(claim: Record<string, unknown>): boolean {
+  const pid = Number(claim['owner_pid'])
+  const expected = claim['owner_start_token'] === null || claim['owner_start_token'] === undefined ? undefined : String(claim['owner_start_token'])
+  if (!Number.isSafeInteger(pid) || pid <= 0 || expected === undefined || process.platform !== 'linux') return false
+  const actual = linuxProcessStartToken(pid)
+  return actual === undefined || actual !== expected
+}
 function safeGitArgs(args: readonly string[]): readonly string[] { return args[0] === '-e' ? args : ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'diff.external=', '-c', 'interactive.diffFilter=', ...args] }
 function closedGitEnvironment(overrides: GitEnvironmentOverrides = {}): Record<string, string> { const base = scrubbedParentEnv(); for (const key of Object.keys(base)) if (/^GIT_/iu.test(key)) delete base[key]; const allowed: Readonly<Record<string, true>> = { GIT_INDEX_FILE: true, GIT_AUTHOR_NAME: true, GIT_AUTHOR_EMAIL: true, GIT_COMMITTER_NAME: true, GIT_COMMITTER_EMAIL: true, GIT_AUTHOR_DATE: true, GIT_COMMITTER_DATE: true }; for (const key of Object.keys(overrides)) if (allowed[key] !== true) throw new TypeError(`Unsupported Git environment override ${key}`); const explicit = Object.fromEntries(Object.entries(overrides).filter((entry): entry is [string, string] => entry[1] !== undefined)); return { ...base, ...explicit, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '1', GIT_PAGER: 'cat' } }
 function requireSha(value: string, label: string): void { if (!FULL_SHA.test(value)) throw new GitBoundaryError('git-invalid-sha', `Git returned a non-full ${label}`) }

@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { setTimeout as delay } from 'node:timers/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { LocalSubprocessRuntime } from '@deepseek-ai/dsh-subprocess-local'
@@ -55,8 +56,17 @@ describe('controller restart and repository concurrency integration', () => {
     const f = await fixture()
     try {
       const interrupted = controller(f, 'resume', 1); const ready = await interrupted.prepare()
+      const authority = new DatabaseSync(join(f.root, '.git', 'dsh-autoresearch-locks.sqlite'))
+      authority.prepare('UPDATE controller_claims SET expires_at = ? WHERE run_id = ?').run('2000-01-01T00:00:00.000Z', ready.runId)
+      authority.close()
+      const before = DurableTracker.open(ready.tracker)
+      const durableBefore = { run: before.getRun(ready.runId), transitions: before.listTransitions(ready.runId), experiments: before.database.prepare('SELECT * FROM experiments WHERE run_id = ?').all(ready.runId), attempts: before.database.prepare('SELECT * FROM attempts WHERE run_id = ?').all(ready.runId) }
+      before.close()
       const competing = controller(f, '', 1, ready.runId)
       await expect(competing.run()).rejects.toMatchObject({ code: 'run-controller-active' })
+      const after = DurableTracker.open(ready.tracker)
+      expect({ run: after.getRun(ready.runId), transitions: after.listTransitions(ready.runId), experiments: after.database.prepare('SELECT * FROM experiments WHERE run_id = ?').all(ready.runId), attempts: after.database.prepare('SELECT * FROM attempts WHERE run_id = ?').all(ready.runId) }).toEqual(durableBefore)
+      after.close()
       await interrupted.dispose()
       const resumed = controller(f, '', 1, ready.runId); const result = await resumed.run(); const resumedReady = await resumed.ready
       expect(resumedReady).toEqual(ready); expect(result.runId).toBe(ready.runId); expect(result.counts.attempts).toBe(1)
@@ -106,26 +116,29 @@ describe('controller restart and repository concurrency integration', () => {
     } finally { await f.dispose() }
   })
   it('reruns exactly once after a proven-quiescent attempt with no durable outcome', async () => {
-    const f = await fixture(); const original = DurableTracker.prototype.recordAttemptOutcome; let injected = false
+    const f = await fixture(); const original = DurableTracker.prototype.recordAttemptOutcome; let interruptions = 0
     const fault = vi.spyOn(DurableTracker.prototype, 'recordAttemptOutcome').mockImplementation(function (attemptId, facts) {
-      if (!injected) {
-        injected = true
+      if (interruptions < 2) {
+        interruptions++
         this.database.prepare('UPDATE attempts SET process_tree_quiescent = 1 WHERE attempt_id = ?').run(attemptId)
-        throw new Error('fault after quiescence before outcome')
+        throw new Error(`fault after quiescence before outcome ${interruptions}`)
       }
       return original.call(this, attemptId, facts)
     })
     try {
       const interrupted = controller(f, 'incomplete', 1); const identity = await interrupted.prepare()
-      await expect(interrupted.run()).rejects.toThrow('fault after quiescence before outcome')
+      await expect(interrupted.run()).rejects.toThrow('fault after quiescence before outcome 1')
+      const rerun = controller(f, '', 1, identity.runId)
+      await expect(rerun.run()).rejects.toThrow('fault after quiescence before outcome 2')
       fault.mockRestore()
       const resumed = controller(f, '', 1, identity.runId); const result = await resumed.run()
-      expect(result.runId).toBe(identity.runId)
+      expect(result).toMatchObject({ runId: identity.runId, status: 'round-failed' })
       const tracker = DurableTracker.open(identity.tracker)
       expect(tracker.database.prepare('SELECT ordinal, process_tree_quiescent, exited_at FROM attempts WHERE run_id = ? ORDER BY ordinal').all(identity.runId)).toEqual([
         { ordinal: 1, process_tree_quiescent: 1, exited_at: null },
-        expect.objectContaining({ ordinal: 2, process_tree_quiescent: 1 }),
+        { ordinal: 2, process_tree_quiescent: 1, exited_at: null },
       ])
+      expect(tracker.database.prepare('SELECT state, failure_code FROM experiments WHERE run_id = ?').get(identity.runId)).toEqual({ state: 'crashed', failure_code: 'recovery-rerun-exhausted' })
       tracker.close()
     } finally { fault.mockRestore(); await f.dispose() }
   })

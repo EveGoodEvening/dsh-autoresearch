@@ -1,5 +1,5 @@
 import { execFileSync, spawn } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { DatabaseSync } from 'node:sqlite'
 import { join } from 'node:path'
@@ -157,14 +157,18 @@ describe('host-owned Git boundary', () => {
     acquireRunLock(f.tracker, f.identity, f.discovery.repositoryId, 2)
     expect(f.tracker.recoveryState(f.identity.runId).activeLock).toBeDefined()
 
-    const first = acquireControllerClaim(f.tracker, f.identity.runId, 'owner-a', 1_000, new Date('2026-01-01T00:00:00.000Z'))
-    expect(first.ownerId).toBe('owner-a')
-    expect(() => acquireControllerClaim(f.tracker, f.identity.runId, 'owner-b', 1_000, new Date('2026-01-01T00:00:00.500Z'))).toThrowError(expect.objectContaining({ code: 'run-controller-active' }))
-    expect(heartbeatControllerClaim(f.tracker, f.identity.runId, 'owner-a', 1_000, new Date('2026-01-01T00:00:00.750Z')).ownerId).toBe('owner-a')
-    expect(acquireControllerClaim(f.tracker, f.identity.runId, 'owner-b', 1_000, new Date('2026-01-01T00:00:02.000Z')).ownerId).toBe('owner-b')
-    expect(() => heartbeatControllerClaim(f.tracker, f.identity.runId, 'owner-a', 1_000)).toThrowError(expect.objectContaining({ code: 'run-controller-claim-lost' }))
-    expect(releaseControllerClaim(f.tracker, f.identity.runId, 'owner-a')).toBe(false)
-    expect(releaseControllerClaim(f.tracker, f.identity.runId, 'owner-b')).toBe(true)
+    const liveIdentity = { pid: process.pid, startToken: readFileSync(`/proc/${process.pid}/stat`, 'utf8').slice(readFileSync(`/proc/${process.pid}/stat`, 'utf8').lastIndexOf(')') + 2).split(' ')[19]! }
+    const first = acquireControllerClaim(f.tracker, f.identity.runId, 'owner-a', 1_000, new Date('2026-01-01T00:00:00.000Z'), liveIdentity)
+    expect(first).toMatchObject({ ownerId: 'owner-a', pid: process.pid, startToken: liveIdentity.startToken })
+    expect(() => acquireControllerClaim(f.tracker, f.identity.runId, 'owner-b', 1_000, new Date('2026-01-01T00:00:00.500Z'), liveIdentity)).toThrowError(expect.objectContaining({ code: 'run-controller-active' }))
+    expect(heartbeatControllerClaim(f.tracker, f.identity.runId, 'owner-a', 1_000, new Date('2026-01-01T00:00:00.750Z'), liveIdentity).ownerId).toBe('owner-a')
+    expect(() => acquireControllerClaim(f.tracker, f.identity.runId, 'owner-b', 1_000, new Date('2026-01-01T00:00:02.000Z'), liveIdentity)).toThrowError(expect.objectContaining({ code: 'run-controller-active' }))
+    authority.prepare('UPDATE controller_claims SET owner_start_token = ? WHERE run_id = ?').run(`${BigInt(liveIdentity.startToken) + 1n}`, f.identity.runId)
+    const replacement = acquireControllerClaim(f.tracker, f.identity.runId, 'owner-b', 1_000, new Date('2026-01-01T00:00:02.000Z'), liveIdentity)
+    expect(replacement.ownerId).toBe('owner-b')
+    expect(() => heartbeatControllerClaim(f.tracker, f.identity.runId, 'owner-a', 1_000, new Date(), liveIdentity)).toThrowError(expect.objectContaining({ code: 'run-controller-claim-lost' }))
+    expect(releaseControllerClaim(f.tracker, f.identity.runId, 'owner-a', liveIdentity)).toBe(false)
+    expect(releaseControllerClaim(f.tracker, f.identity.runId, 'owner-b', { pid: replacement.pid, startToken: replacement.startToken })).toBe(true)
 
     f.tracker.transitionRun(f.identity.runId, 'cancelled', { terminalReason: 'done', quiescent: true })
     expect(releaseTerminalRunLock(f.tracker, f.identity.runId)).toBe(true)
