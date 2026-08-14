@@ -515,7 +515,7 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 ## Controller (`src/controller.ts`)
 
 - [x] Create `src/controller.ts`.
-- [ ] Chunk 07 clean-cutover dependency: make `AutoresearchRunController` the sole production orchestration/state owner while migrating production wiring away from the legacy path.
+- [x] Chunk 07 clean-cutover dependency: make `AutoresearchRunController` the sole production orchestration/state owner while migrating production wiring away from the legacy path.
 - [x] Normalize and freeze run policy before execution.
 - [x] Allow only read-only repository/common-directory/start-SHA discovery before tracker creation.
 - [x] Create tracker/run row with discovered repository identity and start SHA before every mutating/allocating external setup effect.
@@ -541,10 +541,10 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 - [x] Surface a host-proven post-baseline blocker separately; child blocker claims remain non-authoritative, while proposal disposal/quiescence uncertainty transitions the run to host-authored `blocked` / `attempt-uncertain` without releasing ownership.
 - [x] Surface infrastructure/contract failure as `round-failed`.
 - [x] Handle cancellation at a quiescent durable boundary.
-- [ ] Chunk 07 clean-cutover dependency (production owner): remove `ctx.workflowEngine` production orchestration.
-- [ ] Chunk 07 clean-cutover dependency (workflow coverage): replace or remove the four workflow-based unit tests in `tests/autoresearch.spec.ts` and the competing workflow integration coverage.
-- [ ] Chunk 07 clean-cutover dependency (dependency cleanup): remove the no-longer-used workflow runtime dependency/peer.
-- [ ] Chunk 07 clean-cutover dependency (schema cutover): remove temporary legacy `evaluation_command` and workflow-specific public patch/tool schema runtime compatibility.
+- [x] Chunk 07 clean-cutover dependency (production owner): remove `ctx.workflowEngine` production orchestration.
+- [x] Chunk 07 clean-cutover dependency (workflow coverage): replace or remove the four workflow-based unit tests in `tests/autoresearch.spec.ts` and the competing workflow integration coverage.
+- [x] Chunk 07 clean-cutover dependency (dependency cleanup): remove the no-longer-used workflow runtime dependency/peer.
+- [x] Chunk 07 clean-cutover dependency (schema cutover): remove temporary legacy `evaluation_command` and workflow-specific public patch/tool schema runtime compatibility.
 - [x] Keep rejected candidate commits/audit refs.
 - [x] Reconcile isolated worktree to last durable accepted commit.
 - [x] Mint the attempt artifact writer from owner-only `StateLayout` only after durable attempt identity exists; transactionally link artifact ownership before terminal transition or the next experiment.
@@ -581,16 +581,16 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 - [x] Test deterministic decision replay.
 ## Chunk 06 review gate
 
-- [ ] Chunk 07 clean-cutover dependency (production owner): review the controller as the sole production state machine after competing workflow logic is removed.
+- [x] Chunk 07 clean-cutover dependency (production owner): review the controller as the sole production state machine after competing workflow logic is removed.
 - [x] Complete an independent controller review of intent/outcome ordering around side effects; clean with zero findings after final fix `e613e549e0fb4f40f0921ecd585c25d2dd6a9a03`.
 - [x] Complete an independent security review of acceptance/target logic and strict host authority; clean with zero findings after final fix `e613e549e0fb4f40f0921ecd585c25d2dd6a9a03`.
 - [x] Complete an independent recovery review for idempotence and evidence preservation; clean with zero findings after final fix `e613e549e0fb4f40f0921ecd585c25d2dd6a9a03`.
-- [ ] Chunk 07 clean-cutover dependency (workflow/dependency/schema cleanup): review removal of obsolete workflow code, runtime dependencies, compatibility schema, and comments after the clean cutover.
+- [x] Chunk 07 clean-cutover dependency (workflow/dependency/schema cleanup): review removal of obsolete workflow code, runtime dependencies, compatibility schema, and comments after the clean cutover.
 
 ## Chunk 06 implementation commit gate
 
 - [x] Integrate proposal/recovery lanes into controller.
-- [ ] Chunk 07 clean-cutover dependency (workflow migration): confirm every prior production caller migrates to the controller and legacy workflow/tool wiring is removed.
+- [x] Chunk 07 clean-cutover dependency (workflow migration): confirm every prior production caller migrates to the controller and legacy workflow/tool wiring is removed.
 - [x] Commit recoverable controller and focused tests in foundation commit `ca184254e3681fea00cbf53ec4d377c9803928a0`, proposal/recovery commit `b690a56f7df0b97dd5fb03d32201b8a933928718`, controller commit `99b7aa12a7036b5f8cf10c634a455779141d956f`, review-fix commit `b1a0e1b0cf9825d19ddbbed246a9ff790fdf410e`, recovery-matrix test commit `e28d78ad2edeb7158370b568539e27d6fecadc85`, final review-fix commit `2e45cbc7d04a558d8b55b4ef863a5aad083dc05c`, ownership-retention review-fix commit `afd2621fbb95ddc10d7ba3c3b15e76699cb59008`, final quiescence/disposal test commit `aeafc7458b7c7697fc62501f1dd06ed7c62f6e46`, terminal-lock/artifact/crash-replay closure-fix commit `2c106113ca95fa231f6942cd6886dd1ef3af364a`, terminal replay evidence validation commit `3e9e44c57c94ad9fcbff411d0cec485a580e9832`, and final fix commit `e613e549e0fb4f40f0921ecd585c25d2dd6a9a03`.
 
 ## Chunk 06 tracker-accounting gate
@@ -602,81 +602,82 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 - [x] Complete clean independent controller, recovery, security, and accounting reviews after final fix `e613e549e0fb4f40f0921ecd585c25d2dd6a9a03`; record zero unresolved Chunk 06 findings and close Chunk 06.
 - [x] Record post-`2c106113ca95fa231f6942cd6886dd1ef3af364a` accounting commit `0abff2f38fdccf81eb2d2fa4ed62f8101060eec7` (`docs: record terminal recovery verification`) as complete and separate from implementation, review-fix, test, closure-fix, and prior accounting commits.
 - [x] Record post-`3e9e44c57c94ad9fcbff411d0cec485a580e9832` accounting commit `bc09f43278c2ecc41acde60d3b2cd204d5eff466` as complete and separate from implementation, review-fix, test, closure-fix, validation, and prior accounting commits.
-- [ ] Commit this Chunk 06 closure-accounting update separately; leave open because the commit cannot record its own SHA.
+- [x] Record Chunk 06 closure-accounting commit `99a03707559c2d5fc02903dd215792e56848eb31` (`docs: close recoverable controller chunk`) as complete and separate from implementation, review-fix, test, validation, and prior accounting commits.
 
 # Chunk 07 — `07-wire-tool-jobs-lifecycle-and-hmr`
 
 ## Plugin wiring (`src/index.ts`)
 
 - [ ] Keep named exports only: `name`, `inject`, `Config`, `apply`.
-- [ ] Inject `tools`.
-- [ ] Inject `agents`.
-- [ ] Inject `subprocess`.
-- [ ] Inject `jobs`.
-- [ ] Inject `systemPrompt`.
-- [ ] Treat the tool execute body's `exec.agent` as the sole parent/session/workspace authority anchor; do not infer an ambient agent.
-- [ ] Populate the durable `runs` agent/session identity from `exec.agent`.
-- [ ] Register exactly one `autoresearch` tool through `ctx.tools.register`/`defineTool`.
-- [ ] Add direct-human-request system guidance.
-- [ ] Return canonical foreground result union.
-- [ ] Start background jobs by default with `owner: exec.agent`.
-- [ ] Honor explicit foreground mode.
-- [ ] In the synchronous LocalJobRegistry `run()` callback, create the job-owned `AbortController`, idempotent cancellation hook, deferred execution gate, `done` promise, and readiness promise without starting controller work.
-- [ ] Call `ctx.jobs.start`, receive the returned job id, and durably record it before releasing the deferred execution gate.
-- [ ] Ensure failures before gate release settle `done` and readiness without orphaning resources.
-- [ ] Run durable initialization under the job-owned signal after gate release; resolve readiness only after tracker, run-id-bearing branch, and worktree facts are committed.
-- [ ] Return background `{ kind, runId, jobId, tracker, branch, worktree }` only from the readiness result.
-- [ ] Return typed startup failure/cancellation when initialization fails before readiness; do not fabricate tracker/branch/worktree values.
-- [ ] Declare `autoresearch` job kind through type augmentation.
-- [ ] Use generic jobs control rather than private job tools.
-- [ ] Require compatible jobs controller/tool composition.
-- [ ] Map `target-reached`, `budget-limited`, and proven `blocked` to completed jobs.
-- [ ] Map `baseline-blocked` and `round-failed` to failed jobs.
-- [ ] Map plugin-internal cancellation to Harness job outcome status `killed` while preserving the plugin result variant `cancelled`.
-- [ ] Ensure job `done` waits for controller/child-dispose/process/tracker/Git quiescence and resolves only after cleanup, not merely after cancellation is requested.
-- [ ] Implement synchronous/idempotent job cancellation hook.
-- [ ] Sever background lifetime from the outer tool call's `exec.signal` before releasing deferred controller execution.
-- [ ] Pass the job-owned controller signal to `AutoresearchRunController`, child Agent cancellation, evaluator subprocesses, and Git subprocesses.
-- [ ] Persist cancellation intent before aborting resources.
-- [ ] Await `AgentHandle.dispose()`, entire owned process-tree termination, and worktree reconciliation.
-- [ ] Atomically persist terminal cancellation/quiescent facts without deleting evidence.
-- [ ] Release repository/run-tag active lock only after terminal persistence, as the final idempotent operation.
-- [ ] Remove tool registration on plugin disposal/HMR.
-- [ ] Remove prompt contribution on plugin disposal/HMR.
-- [ ] Settle active controllers/children/evaluators/jobs on disposal/HMR.
-- [ ] Add no redundant durable Harness session event.
+- [x] Inject `tools`.
+- [x] Inject `agents`.
+- [x] Inject `subprocess`.
+- [x] Inject `jobs`.
+- [x] Inject `systemPrompt`.
+- [x] Treat the tool execute body's `exec.agent` as the sole parent/session/workspace authority anchor; do not infer an ambient agent.
+- [x] Populate the durable `runs` agent/session identity from `exec.agent`.
+- [x] Register exactly one `autoresearch` tool through `ctx.tools.register`/`defineTool`.
+- [x] Add direct-human-request system guidance.
+- [x] Return canonical foreground result union.
+- [x] Start background jobs by default with `owner: exec.agent`.
+- [x] Honor explicit foreground mode.
+- [x] In the synchronous LocalJobRegistry `run()` callback, create the job-owned `AbortController`, idempotent cancellation hook, deferred execution gate, `done` promise, and readiness promise without starting controller work.
+- [x] Call `ctx.jobs.start`, receive the returned job id, and durably record it before releasing the deferred execution gate.
+- [x] Ensure failures before gate release settle `done` and readiness without orphaning resources.
+- [x] Run durable initialization under the job-owned signal after gate release; resolve readiness only after tracker, run-id-bearing branch, and worktree facts are committed.
+- [x] Return background `{ kind, runId, jobId, tracker, branch, worktree }` only from the readiness result.
+- [x] Return typed startup failure/cancellation when initialization fails before readiness; do not fabricate tracker/branch/worktree values.
+- [x] Declare `autoresearch` job kind through type augmentation.
+- [x] Use generic jobs control rather than private job tools.
+- [x] Require compatible jobs controller/tool composition.
+- [x] Map `target-reached`, `budget-limited`, and proven `blocked` to completed jobs.
+- [x] Map `baseline-blocked` and `round-failed` to failed jobs.
+- [x] Map plugin-internal cancellation to Harness job outcome status `killed` while preserving the plugin result variant `cancelled`.
+- [x] Ensure job `done` waits for controller/child-dispose/process/tracker/Git quiescence and resolves only after cleanup, not merely after cancellation is requested.
+- [x] Implement synchronous/idempotent job cancellation hook.
+- [x] Sever background lifetime from the outer tool call's `exec.signal` before releasing deferred controller execution.
+- [x] Pass the job-owned controller signal to `AutoresearchRunController`, child Agent cancellation, evaluator subprocesses, and Git subprocesses.
+- [x] Persist cancellation intent before aborting resources.
+- [x] Await `AgentHandle.dispose()`, entire owned process-tree termination, and worktree reconciliation.
+- [x] Atomically persist terminal cancellation/quiescent facts without deleting evidence.
+- [x] Release repository/run-tag active lock only after terminal persistence, as the final idempotent operation.
+- [x] Remove tool registration on plugin disposal/HMR.
+- [x] Remove prompt contribution on plugin disposal/HMR.
+- [x] Settle active controllers/children/evaluators/jobs on disposal/HMR.
+- [x] Add no redundant durable Harness session event.
 
 ## Bundle/composition
 
-- [ ] Retain stable patch row id `autoresearch`.
-- [ ] Retain module name `dsh-autoresearch`.
-- [ ] Retain complete Loader defaults in patch config.
-- [ ] Document/validate installed profile requires jobs registry plus `dsh-tool-jobs`.
-- [ ] Document/validate subprocess provider requirement.
-- [ ] Document/validate core Agent registry/runtime and child setup requirement; no subagent provider is required.
-- [ ] Ensure activation is opt-in through profile installation.
-- [ ] Ensure service ordering is expressed by injection, not YAML row order.
+- [x] Retain stable patch row id `autoresearch`.
+- [x] Retain module name `dsh-autoresearch`.
+- [x] Retain complete Loader defaults in patch config.
+- [x] Document/validate installed profile requires jobs registry plus `dsh-tool-jobs`.
+- [x] Document/validate subprocess provider requirement.
+- [x] Document/validate core Agent registry/runtime and child setup requirement; no subagent provider is required.
+- [x] Ensure activation is opt-in through profile installation.
+- [x] Ensure service ordering is expressed by injection, not YAML row order.
 
 ## Chunk 07 verification gate
 
-- [ ] Test foreground tool result.
-- [ ] Test background tool result waits for durable readiness facts.
-- [ ] Test LocalJobRegistry ordering: `run()` remains synchronous, controller work stays gated until returned job id is durably recorded, then starts under the job-owned signal.
+- [x] Test foreground tool result.
+- [x] Test background tool result waits for durable readiness facts.
+- [x] Test LocalJobRegistry ordering: `run()` remains synchronous, controller work stays gated until returned job id is durably recorded, then starts under the job-owned signal.
 - [ ] Test typed initialization failure/cancellation before readiness and no orphaned resources.
 - [ ] Test background job output consumption.
 - [ ] Test generic job list/output/kill compatibility.
 - [ ] Test jobs-controller absence fails clearly.
 - [ ] Test missing/incompatible core Agent registry/runtime or child setup capability fails clearly.
-- [ ] Test cancellation idempotence.
+- [x] Test cancellation idempotence.
 - [ ] Test a registered background job survives the outer tool call's `exec.signal` abort.
-- [ ] Test child creation derives `parentSession`/delegation/model route from `exec.agent`, background job start receives `owner: exec.agent`, and the tracker records the same authority identity.
-- [ ] Test fresh child durable cwd is the canonical isolated worktree and differs from the caller workspace.
-- [ ] Test plugin cancellation maps to Harness job status `killed`.
-- [ ] Test cancellation/job completion waits for mandatory Agent handle disposal and whole-process-tree quiescence.
+- [x] Test child creation derives `parentSession`/delegation/model route from `exec.agent`, background job start receives `owner: exec.agent`, and the tracker records the same authority identity.
+- [x] Test fresh child durable cwd is the canonical isolated worktree and differs from the caller workspace.
+- [x] Test plugin cancellation maps to Harness job status `killed`.
+- [x] Test cancellation/job completion waits for mandatory Agent handle disposal and whole-process-tree quiescence.
 - [ ] Test job status mapping for every terminal run status.
 - [ ] Test HMR/unload removes tool.
 - [ ] Test HMR/unload removes prompt.
 - [ ] Test HMR/unload settles active resources.
+- [x] Record production-cutover verification for `952267ba41689cf21c63092e37cb61c34ccd5e61`: `pnpm install --frozen-lockfile` passed; `pnpm run typecheck` passed; Vitest passed 8 files / 229 tests; `pnpm run build` passed; `pnpm pack` passed.
 
 ## Chunk 07 review gate
 
@@ -687,11 +688,11 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 
 ## Chunk 07 implementation commit gate
 
-- [ ] Commit tool/jobs/lifecycle/HMR wiring and focused tests.
+- [x] Commit tool/jobs/lifecycle/HMR wiring and focused tests in production cutover commit `952267ba41689cf21c63092e37cb61c34ccd5e61` (`feat: wire autoresearch controller lifecycle`).
 
 ## Chunk 07 tracker-accounting gate
 
-- [ ] Record Chunk 07 implementation commit full SHA after it exists.
+- [x] Record Chunk 07 implementation commit full SHA: `952267ba41689cf21c63092e37cb61c34ccd5e61`.
 - [ ] Commit the checklist update separately from the Chunk 07 implementation commit.
 
 # Chunk 08 — `08-add-real-dsh-composition-and-recovery-tests`
