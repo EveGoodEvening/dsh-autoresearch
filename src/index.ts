@@ -92,6 +92,7 @@ export function apply(ctx: Context, config: AutoresearchConfig = {}): void {
   requireServices(ctx)
   const resolved = resolveConfig(config)
   const active = new Set<AutoresearchRunController>()
+  const activeJobs = new Set<Promise<JobOutcome>>()
   const releasePrompt = ctx.systemPrompt.section({ name: 'tool:autoresearch', order: 116.25, text: GUIDANCE })
   const releaseTool = ctx.tools.register(defineTool({
     name: 'autoresearch',
@@ -159,6 +160,7 @@ export function apply(ctx: Context, config: AutoresearchConfig = {}): void {
                 }
               }
             })()
+            activeJobs.add(done)
             hooks = {
               cancel(value?: string) {
                 if (cancellationApplied) return
@@ -175,6 +177,11 @@ export function apply(ctx: Context, config: AutoresearchConfig = {}): void {
           },
         })
         jobId = String(id)
+        const startedHooks = hooks
+        if (startedHooks) void startedHooks.done.then(
+          () => setImmediate(() => activeJobs.delete(startedHooks.done)),
+          () => setImmediate(() => activeJobs.delete(startedHooks.done)),
+        )
         if (!controller) throw new Error('job registry did not start the autoresearch controller')
         await controller.prepare(jobId)
         registered = true
@@ -202,5 +209,6 @@ export function apply(ctx: Context, config: AutoresearchConfig = {}): void {
     releasePrompt()
     const settling = [...active].map(async controller => { controller.cancel('autoresearch plugin disposed'); await controller.dispose() })
     await Promise.allSettled(settling)
+    await Promise.allSettled([...activeJobs])
   }, 'autoresearch.lifecycle()')
 }

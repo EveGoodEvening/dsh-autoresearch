@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process'
 import { lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { setTimeout as delay } from 'node:timers/promises'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { SubprocessHandle, SubprocessOutcome, SubprocessOutputRead, SubprocessOutputReader, SubprocessSpawnSpec } from '@deepseek-ai/dsh-subprocess'
 import { createEvaluatorBoundary, freezeEvaluatorProvenance, parseFinalLineMetric, runEvaluator } from '../src/evaluator.ts'
@@ -370,7 +371,7 @@ describe('host-owned evaluator execution', () => {
     const result = await pending
     expect(result).toMatchObject({ kind: 'failed', code: mode === 'timeout' ? 'timeout' : 'cancelled', exit: { processTreeQuiescent: true } })
     expect(durable.events.at(-1)).toBe('outcome')
-    expect(() => process.kill(childPid, 0)).toThrow()
+    await expectProcessTerminated(childPid)
   }, 10_000)
 
   it('rejects lossy stdout as non-authoritative while persisting its bounded tail', async () => {
@@ -691,4 +692,33 @@ describe('host-owned evaluator execution', () => {
 
 function readFileExists(path: string): boolean {
   try { readFileSync(path); return true } catch { return false }
+}
+
+async function expectProcessTerminated(pid: number, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  let linuxState: string | undefined
+  do {
+    try {
+      process.kill(pid, 0)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ESRCH') return
+      throw error
+    }
+    linuxState = process.platform === 'linux' ? readLinuxProcessState(pid) : undefined
+    if (process.platform === 'linux' && linuxState === undefined) return
+    await delay(10)
+  } while (Date.now() < deadline)
+
+  if (linuxState === 'Z') return
+  throw new Error(`evaluator descendant ${pid} remained alive${linuxState === undefined ? '' : ` in Linux process state ${linuxState}`}`)
+}
+
+function readLinuxProcessState(pid: number): string | undefined {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
+    return stat.slice(stat.lastIndexOf(') ') + 2, stat.lastIndexOf(') ') + 3)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+    throw error
+  }
 }

@@ -1,11 +1,12 @@
 import { execFileSync, spawn } from 'node:child_process'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
+import { DatabaseSync } from 'node:sqlite'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { SubprocessHandle, SubprocessOutputReader, SubprocessOutcome, SubprocessSpawnSpec } from '@deepseek-ai/dsh-subprocess'
 import { DurableTracker } from '../src/tracker.ts'
-import { acquireRunLock, allocateRunWorktree, captureGitConfigBaseline, commitCandidate, discoverRepository, durableGitIdentity, GitBoundaryError, inspectRunGitState, makeRunGitIdentity, prepareCandidateTree, reconcileAcceptedHead, reconcileRejectedHead, recoverTerminalRunLock, releaseTerminalRunLock, removeRunWorktree, resolveGitExecutable, runGit, snapshotCandidate, validateCandidate, verifyCandidateTree, verifyExactWorktree, type GitContext } from '../src/git.ts'
+import { acquireControllerClaim, acquireRunLock, allocateRunWorktree, captureGitConfigBaseline, commitCandidate, discoverRepository, durableGitIdentity, GitBoundaryError, heartbeatControllerClaim, inspectRunGitState, makeRunGitIdentity, prepareCandidateTree, reconcileAcceptedHead, reconcileRejectedHead, recoverTerminalRunLock, releaseControllerClaim, releaseTerminalRunLock, removeRunWorktree, resolveGitExecutable, runGit, snapshotCandidate, validateCandidate, verifyCandidateTree, verifyExactWorktree, type GitContext } from '../src/git.ts'
 
 const roots: string[] = []
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
@@ -147,6 +148,32 @@ describe('host-owned Git boundary', () => {
     expect(existsSync(join(f.root, '.tracker', 'locks.sqlite'))).toBe(false)
   })
 
+  it('repairs authority-only acquisition, retries authority cleanup after local release, and fences controller claims', async () => {
+    const f = await createRun(fixture(), 'repair', 'run-repair')
+    const authorityPath = join(f.discovery.gitCommonDir, 'dsh-autoresearch-locks.sqlite')
+    const authority = new DatabaseSync(authorityPath)
+    f.tracker.database.prepare('DELETE FROM active_locks WHERE run_id = ?').run(f.identity.runId)
+    expect(authority.prepare('SELECT run_id FROM active_locks WHERE run_id = ?').get(f.identity.runId)?.['run_id']).toBe(f.identity.runId)
+    acquireRunLock(f.tracker, f.identity, f.discovery.repositoryId, 2)
+    expect(f.tracker.recoveryState(f.identity.runId).activeLock).toBeDefined()
+
+    const first = acquireControllerClaim(f.tracker, f.identity.runId, 'owner-a', 1_000, new Date('2026-01-01T00:00:00.000Z'))
+    expect(first.ownerId).toBe('owner-a')
+    expect(() => acquireControllerClaim(f.tracker, f.identity.runId, 'owner-b', 1_000, new Date('2026-01-01T00:00:00.500Z'))).toThrowError(expect.objectContaining({ code: 'run-controller-active' }))
+    expect(heartbeatControllerClaim(f.tracker, f.identity.runId, 'owner-a', 1_000, new Date('2026-01-01T00:00:00.750Z')).ownerId).toBe('owner-a')
+    expect(acquireControllerClaim(f.tracker, f.identity.runId, 'owner-b', 1_000, new Date('2026-01-01T00:00:02.000Z')).ownerId).toBe('owner-b')
+    expect(() => heartbeatControllerClaim(f.tracker, f.identity.runId, 'owner-a', 1_000)).toThrowError(expect.objectContaining({ code: 'run-controller-claim-lost' }))
+    expect(releaseControllerClaim(f.tracker, f.identity.runId, 'owner-a')).toBe(false)
+    expect(releaseControllerClaim(f.tracker, f.identity.runId, 'owner-b')).toBe(true)
+
+    f.tracker.transitionRun(f.identity.runId, 'cancelled', { terminalReason: 'done', quiescent: true })
+    expect(releaseTerminalRunLock(f.tracker, f.identity.runId)).toBe(true)
+    authority.prepare('INSERT INTO active_locks (repository_id, run_tag, run_id, acquired_at) VALUES (?, ?, ?, ?)').run(f.discovery.repositoryId, f.identity.runTag, f.identity.runId, new Date().toISOString())
+    expect(releaseTerminalRunLock(f.tracker, f.identity.runId)).toBe(false)
+    expect(authority.prepare('SELECT 1 FROM active_locks WHERE run_id = ?').get(f.identity.runId)).toBeUndefined()
+    authority.close()
+  })
+
   it('enforces staged, unstaged, untracked, rename, dependency, and protected policy', async () => {
     const f = await createRun(); writeFileSync(join(f.identity.worktree, 'package.json'), '{}\n'); execFileSync('git', ['-C', f.identity.worktree, 'add', 'package.json']); writeFileSync(join(f.identity.worktree, 'src.txt'), 'unstaged\n'); writeFileSync(join(f.identity.worktree, 'policy.txt'), 'untracked\n')
     const snapshot = await snapshotCandidate(f.ctx, 'git', f.identity.worktree, f.gitConfig, commandOptions); expect(snapshot.changed.find((item) => item.path === 'src.txt')?.unstaged).toBe(true)
@@ -238,9 +265,10 @@ describe('host-owned Git boundary', () => {
     }
   })
 
-  it('releases only terminal quiescent locks and cleanup preserves refs', async () => {
-    const f = await createRun(); expect(() => acquireRunLock(f.tracker, f.identity, f.discovery.repositoryId, 2)).toThrowError(GitBoundaryError); expect(() => releaseTerminalRunLock(f.tracker, f.identity.runId)).toThrow()
+  it('repairs same-run lock checkpoints, releases only terminal quiescent locks, and cleanup preserves refs', async () => {
+    const f = await createRun(); expect(() => acquireRunLock(f.tracker, f.identity, f.discovery.repositoryId, 2)).not.toThrow(); expect(() => releaseTerminalRunLock(f.tracker, f.identity.runId)).toThrow()
     f.tracker.transitionRun(f.identity.runId, 'cancelled', { terminalReason: 'test', quiescent: true }); expect(releaseTerminalRunLock(f.tracker, f.identity.runId)).toBe(true); expect(recoverTerminalRunLock(f.tracker, f.identity.runId)).toBe(false)
+    expect(releaseTerminalRunLock(f.tracker, f.identity.runId)).toBe(false)
     await removeRunWorktree(f.ctx, 'git', f.discovery, f.identity, commandOptions); expect(execFileSync('git', ['-C', f.root, 'worktree', 'list', '--porcelain']).toString()).not.toContain(f.identity.worktree); expect(ref(f.root, f.identity.acceptedRef)).toBe(f.discovery.startCommit)
   })
 

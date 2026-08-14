@@ -7,6 +7,16 @@ export const name = 'autoresearch-test-model'
 export const inject = ['llm']
 const globalState = globalThis as typeof globalThis & { __autoresearchModelCalls?: Array<{ provider: string; model: string; tools: string[] }> }
 export const calls = globalState.__autoresearchModelCalls ??= []
+let modelGate: PromiseWithResolvers<void> | undefined
+
+export function holdModel(): void {
+  modelGate ??= Promise.withResolvers<void>()
+}
+
+export function releaseModel(): void {
+  modelGate?.resolve()
+  modelGate = undefined
+}
 
 function proposalHandoff(options: GenerateOptions): { identity: { runId: string; experimentId: string; ordinal: number; nonce: string }; workspace: { worktree: string } } {
   const serialized = JSON.stringify(options.messages)
@@ -41,6 +51,7 @@ class BoundedAdapter extends LlmAdapter {
   async resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> { return { id: model, name: model, provider } }
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     calls.push({ provider: options.provider, model: options.model, tools: options.tools?.map(tool => tool.name) ?? [] })
+    await modelGate?.promise
     const serialized = JSON.stringify(options.messages)
     const handoff = proposalHandoff(options)
     const chunks = serialized.includes('"name":"read"')

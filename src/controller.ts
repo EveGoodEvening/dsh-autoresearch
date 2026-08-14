@@ -7,8 +7,8 @@ import { normalizeRunPolicy, type ResolvedConfig } from './config.js'
 import { createEvaluatorArtifactWriterFactory } from './evaluator-artifacts.js'
 import { createEvaluatorBoundary, freezeEvaluatorProvenance, revalidateEvaluatorBoundary, runEvaluator, type EvaluatorResult } from './evaluator.js'
 import {
-  acquireRunLock, allocateRunWorktree, checkoutCandidateForEvaluation, commitCandidate, discoverRepository, durableGitIdentity,
-  makeRunGitIdentity, reconcileAcceptedHead, reconcileRejectedHead, releaseTerminalRunLock,
+  acquireControllerClaim, acquireRunLock, allocateRunWorktree, checkoutCandidateForEvaluation, commitCandidate, discoverRepository, durableGitIdentity,
+  heartbeatControllerClaim, makeRunGitIdentity, reconcileAcceptedHead, reconcileRejectedHead, releaseControllerClaim, releaseTerminalRunLock,
   removeRunWorktree, resolveGitExecutable, restoreAcceptedWorktree, snapshotCandidate, validateCandidate,
   verifyExactWorktree, type CandidateSnapshot, type GitCommandOptions, type GitConfigBaseline,
   type RepositoryDiscovery, type RunGitIdentity,
@@ -28,7 +28,11 @@ interface Runtime {
   readonly runId: string; readonly policy: NormalizedRunPolicy; readonly discovery: RepositoryDiscovery
   readonly identity: RunGitIdentity; readonly tracker: DurableTracker; readonly gitExecutable: string
   readonly policySha256: string; readonly provenanceSha256: string; readonly gitOptions: Omit<GitCommandOptions, 'cwd' | 'signal'>
+  readonly claimOwner: string
 }
+const CONTROLLER_LEASE_MS = 30_000
+const CONTROLLER_HEARTBEAT_MS = 5_000
+
 
 /** Sole owner of one repository/worktree/evaluator state machine. Construction has no external effects. */
 export class AutoresearchRunController {
@@ -45,6 +49,9 @@ export class AutoresearchRunController {
   private cancellationRequested = false
   private cancellationPersisted = false
   private quiescenceFailure?: ProposalAgentError
+  private claimHeartbeat: NodeJS.Timeout | undefined
+  private claimFailure?: unknown
+
 
   constructor(private readonly ctx: Context, private readonly options: AutoresearchRunControllerOptions) {
     this.ready = new Promise((resolve, reject) => {
@@ -80,6 +87,7 @@ export class AutoresearchRunController {
     if (this.runPromise) await this.runPromise.catch(() => undefined)
     else if (this.preparePromise) {
       await this.preparePromise.catch(() => undefined)
+      if (this.runtime) this.releaseClaim(this.runtime)
       this.runtime?.tracker.close()
       this.runtime = undefined
       if (!this.readySettled) { this.readySettled = true; this.rejectReady(new Error('controller disposed before start')) }
@@ -108,6 +116,7 @@ export class AutoresearchRunController {
       if (runtime && this.aborter.signal.aborted) return await this.cancelled(runtime)
       throw error
     } finally {
+      if (runtime) this.releaseClaim(runtime)
       runtime?.tracker.close()
       if (this.runtime === runtime) this.runtime = undefined
     }
@@ -115,6 +124,7 @@ export class AutoresearchRunController {
 
   private async initialize(): Promise<Runtime> {
     let tracker: DurableTracker | undefined
+    let claimed: { runId: string; ownerId: string } | undefined
     try {
       let policy = normalizeRunPolicy(this.options.input, this.options.config, String(this.options.parent.session.header.cwd))
       const gitOptions = { timeoutMs: policy.timeoutMs, graceMs: this.options.config.terminationGraceMs, maxStdoutBytes: this.options.config.maxStdoutBytes, maxStderrBytes: this.options.config.maxStderrBytes }
@@ -139,16 +149,37 @@ export class AutoresearchRunController {
       const identity = makeRunGitIdentity(this.options.config, discovery, runTag, runId)
       if (!existing) tracker.createRun({ runId, repositoryId: discovery.repositoryId, repository: discovery.repository, gitCommonDir: discovery.gitCommonDir, callerCwd: discovery.callerCwd, startCommit: discovery.startCommit, runTag, branch: identity.branch, worktree: identity.worktree, agentId: String(this.options.parent.id), sessionId: String(this.options.parent.session.header.id), policy: identityPolicy, policySha256, provenance, provenanceSha256 })
       if (this.jobId !== undefined) tracker.checkpointRun(runId, { outcome: { kind: 'background-job-registered', jobId: this.jobId } })
-      const runtime = { runId, policy: identityPolicy, discovery, identity, tracker, gitExecutable, policySha256, provenanceSha256, gitOptions }
+      const claimOwner = randomUUID()
+      acquireControllerClaim(tracker, runId, claimOwner, CONTROLLER_LEASE_MS)
+      claimed = { runId, ownerId: claimOwner }
+      const runtime = { runId, policy: identityPolicy, discovery, identity, tracker, gitExecutable, policySha256, provenanceSha256, gitOptions, claimOwner }
+      this.startClaimHeartbeat(runtime)
       this.runtime = runtime
       if (this.cancellationRequested) this.persistCancellationIntent()
       tracker = undefined
       return runtime
     } catch (error) {
+      if (tracker && claimed) releaseControllerClaim(tracker, claimed.runId, claimed.ownerId)
       tracker?.close()
       throw error
     }
   }
+  private startClaimHeartbeat(runtime: Runtime): void {
+    this.claimHeartbeat = setInterval(() => {
+      try { heartbeatControllerClaim(runtime.tracker, runtime.runId, runtime.claimOwner, CONTROLLER_LEASE_MS) }
+      catch (error) { this.claimFailure = error; if (!this.aborter.signal.aborted) this.aborter.abort(error) }
+    }, CONTROLLER_HEARTBEAT_MS)
+    this.claimHeartbeat.unref()
+  }
+  private assertClaim(runtime: Runtime): void {
+    if (this.claimFailure) throw this.claimFailure
+    heartbeatControllerClaim(runtime.tracker, runtime.runId, runtime.claimOwner, CONTROLLER_LEASE_MS)
+  }
+  private releaseClaim(runtime: Runtime): void {
+    if (this.claimHeartbeat) { clearInterval(this.claimHeartbeat); this.claimHeartbeat = undefined }
+    releaseControllerClaim(runtime.tracker, runtime.runId, runtime.claimOwner)
+  }
+
   private persistCancellationIntent(): void {
     const runtime = this.runtime
     if (!runtime || this.cancellationPersisted) return
@@ -159,24 +190,26 @@ export class AutoresearchRunController {
   }
 
   private async drive(runtime: Runtime): Promise<AutoresearchRunResult> {
+    this.assertClaim(runtime)
     let directive = await reconcileRecovery(this.ctx, { ...runtime, signal: this.aborter.signal })
     while (true) {
+      this.assertClaim(runtime)
       if (directive.kind !== 'initialize' && !this.readySettled) {
         this.readySettled = true
         this.resolveReady({ runId: runtime.runId, tracker: runtime.tracker.path, branch: runtime.identity.branch, worktree: runtime.identity.worktree })
       }
       if (this.aborter.signal.aborted) return this.cancelled(runtime)
-      if (directive.kind === 'initialize') { await this.allocateAndStartBaseline(runtime, directive.reuseLock); directive = await reconcileRecovery(this.ctx, { ...runtime, signal: this.aborter.signal }); continue }
-      if (directive.kind === 'evaluate') { await this.evaluate(runtime, directive.experiment, directive.commit, directive.createExperiment, directive.attemptOrdinal); directive = await reconcileRecovery(this.ctx, { ...runtime, signal: this.aborter.signal }); continue }
+      if (directive.kind === 'initialize') { await this.allocateAndStartBaseline(runtime, directive.reuseLock); this.assertClaim(runtime); directive = await reconcileRecovery(this.ctx, { ...runtime, signal: this.aborter.signal }); continue }
+      if (directive.kind === 'evaluate') { await this.evaluate(runtime, directive.experiment, directive.commit, directive.createExperiment, directive.attemptOrdinal); this.assertClaim(runtime); directive = await reconcileRecovery(this.ctx, { ...runtime, signal: this.aborter.signal }); continue }
       if (directive.kind === 'finalize-evaluation') { await this.finalizeEvaluation(runtime, directive.experiment, directive.evaluation); directive = await reconcileRecovery(this.ctx, { ...runtime, signal: this.aborter.signal }); continue }
       if (directive.kind === 'settle-baseline') { this.settleBaseline(runtime, directive); directive = await reconcileRecovery(this.ctx, { ...runtime, signal: this.aborter.signal }); continue }
-      if (directive.kind === 'commit-candidate') { await this.commitRecoveredCandidate(runtime, directive.experiment, directive.snapshot, directive.validatedPaths); directive = await reconcileRecovery(this.ctx, { ...runtime, signal: this.aborter.signal }); continue }
-      if (directive.kind === 'reconcile-candidate') { await this.reconcileCandidate(runtime, directive); directive = await reconcileRecovery(this.ctx, { ...runtime, signal: this.aborter.signal }); continue }
+      if (directive.kind === 'commit-candidate') { await this.commitRecoveredCandidate(runtime, directive.experiment, directive.snapshot, directive.validatedPaths); this.assertClaim(runtime); directive = await reconcileRecovery(this.ctx, { ...runtime, signal: this.aborter.signal }); continue }
+      if (directive.kind === 'reconcile-candidate') { await this.reconcileCandidate(runtime, directive); this.assertClaim(runtime); directive = await reconcileRecovery(this.ctx, { ...runtime, signal: this.aborter.signal }); continue }
       if (directive.kind === 'ready') {
         if (runtime.policy.target !== undefined && isTargetReached(runtime.policy.metricDirection, directive.best.metric, runtime.policy.target)) return this.complete(runtime, 'target-reached', directive.best)
         if (directive.nextOrdinal > runtime.policy.maxExperiments) return this.complete(runtime, 'budget-limited', directive.best)
         await this.propose(runtime, directive.best, directive.nextOrdinal)
-        directive = await reconcileRecovery(this.ctx, { ...runtime, signal: this.aborter.signal }); continue
+        this.assertClaim(runtime); directive = await reconcileRecovery(this.ctx, { ...runtime, signal: this.aborter.signal }); continue
       }
       if (directive.kind === 'blocked') return this.block(runtime, directive)
       return this.returnTerminal(runtime, directive)
@@ -276,8 +309,10 @@ export class AutoresearchRunController {
   private failEvaluation(r: Runtime, experiment: RecoveredExperiment, evaluation: RecoveredEvaluation, code: string, message: string): void {
     const state: ExperimentDurableState = code === 'timeout' ? 'timed-out' : code === 'cancelled' ? 'cancelled' : code === 'provenance-mismatch' ? 'policy-violation' : 'crashed'
     r.tracker.commitTerminalExperiment(experiment.experimentId, state, experimentFacts(evaluation, { failureCode: code, failureMessage: message }))
-    if (experiment.kind === 'baseline') r.tracker.transitionRun(r.runId, evaluation.exit.processTreeQuiescent ? 'baseline-blocked' : 'blocked', { terminalReason: message, blockedCode: evaluation.exit.processTreeQuiescent ? code : 'attempt-uncertain', quiescent: evaluation.exit.processTreeQuiescent })
-    else r.tracker.transitionRun(r.runId, 'deciding', { outcome: { kind: 'candidate-evaluation-failed', code, message } })
+    if (experiment.kind === 'baseline') {
+      const runState = code === 'cancelled' && evaluation.exit.processTreeQuiescent ? 'cancelled' : evaluation.exit.processTreeQuiescent ? 'baseline-blocked' : 'blocked'
+      r.tracker.transitionRun(r.runId, runState, { terminalReason: message, blockedCode: evaluation.exit.processTreeQuiescent ? code : 'attempt-uncertain', quiescent: evaluation.exit.processTreeQuiescent })
+    } else r.tracker.transitionRun(r.runId, 'deciding', { outcome: { kind: 'candidate-evaluation-failed', code, message } })
   }
 
   private async reconcileCandidate(r: Runtime, directive: Extract<RecoveryDirective, { kind: 'reconcile-candidate' }>): Promise<void> {

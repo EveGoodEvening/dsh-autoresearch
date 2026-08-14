@@ -1,11 +1,12 @@
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { setTimeout as delay } from 'node:timers/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { LocalSubprocessRuntime } from '@deepseek-ai/dsh-subprocess-local'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { resolveConfig } from '../src/config.ts'
 import { AutoresearchRunController } from '../src/controller.ts'
 import { DurableTracker } from '../src/tracker.ts'
@@ -16,7 +17,7 @@ afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: 
 async function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'autoresearch-restart-')); roots.push(root)
   execFileSync('git', ['init', '-b', 'main', root]); execFileSync('git', ['-C', root, 'config', 'user.name', 'Restart Test']); execFileSync('git', ['-C', root, 'config', 'user.email', 'restart@example.invalid'])
-  mkdirSync(join(root, 'src')); writeFileSync(join(root, 'src', 'value.ts'), 'export const value = 1\n'); writeFileSync(join(root, 'evaluate.mjs'), readFileSync(join(import.meta.dirname, 'fixtures/restart/evaluator.mjs')))
+  mkdirSync(join(root, 'src')); writeFileSync(join(root, 'src', 'value.ts'), 'export const value = 1\n'); writeFileSync(join(root, 'evaluate.mjs'), readFileSync(join(import.meta.dirname, 'fixtures/restart/evaluator.mjs'))); writeFileSync(join(root, 'evaluate-descendant.mjs'), readFileSync(join(import.meta.dirname, 'fixtures/restart/evaluator-descendant.mjs')))
   execFileSync('git', ['-C', root, 'add', '.']); execFileSync('git', ['-C', root, 'commit', '-m', 'base'])
   const ctx = new Context(); const subprocess = ctx.plugin(LocalSubprocessRuntime, {}); await subprocess
   const parent = { id: 'restart-parent', session: { header: { id: 'restart-session', cwd: root } }, ctx } as unknown as Agent
@@ -24,10 +25,11 @@ async function fixture() {
 }
 
 interface RestartFixture { root: string; ctx: Context; parent: Agent; dispose(): Promise<void> }
-function controller(f: RestartFixture, tag: string, maxActiveRunsPerRepository = 2, resumeRunId?: string, hang = false) {
+function controller(f: RestartFixture, tag: string, maxActiveRunsPerRepository = 2, resumeRunId?: string, hang = false, descendantMarker?: string) {
   const input = {
     repository: f.root, ...(resumeRunId ? { resume_run_id: resumeRunId } : { run_tag: tag }), objective: 'exercise restart', mutable_globs: ['src/**'],
-    evaluation: hang ? { command: process.execPath, args: ['-e', 'setInterval(() => {}, 1000)'] } : { command: process.execPath, args: ['evaluate.mjs'] }, metric_name: 'score', metric_direction: 'minimize' as const, max_experiments: 1, mode: 'foreground' as const,
+    evaluation: descendantMarker ? { command: process.execPath, args: ['evaluate-descendant.mjs'] } : hang ? { command: process.execPath, args: ['-e', 'setInterval(() => {}, 1000)'] } : { command: process.execPath, args: ['evaluate.mjs'] },
+    ...(descendantMarker ? { environment: { AUTORESEARCH_MARKER: descendantMarker } } : {}), metric_name: 'score', metric_direction: 'minimize' as const, max_experiments: 1, mode: 'foreground' as const,
   }
   return new AutoresearchRunController(f.ctx, { config: resolveConfig({ stateRoot: '.restart-state', maxActiveRunsPerRepository, cleanupWorktreesOnSuccess: false, retainWorktrees: true, exportTsv: false }), input, parent: f.parent, signal: new AbortController().signal })
 }
@@ -49,16 +51,84 @@ describe('controller restart and repository concurrency integration', () => {
     } finally { await f.dispose() }
   })
 
-  it('resumes through the public controller after allocation with the same durable identity and one baseline attempt', async () => {
+  it('requires explicit controller release before resuming the same durable lineage exactly once', async () => {
     const f = await fixture()
     try {
       const interrupted = controller(f, 'resume', 1); const ready = await interrupted.prepare()
+      const competing = controller(f, '', 1, ready.runId)
+      await expect(competing.run()).rejects.toMatchObject({ code: 'run-controller-active' })
+      await interrupted.dispose()
       const resumed = controller(f, '', 1, ready.runId); const result = await resumed.run(); const resumedReady = await resumed.ready
       expect(resumedReady).toEqual(ready); expect(result.runId).toBe(ready.runId); expect(result.counts.attempts).toBe(1)
       const tracker = DurableTracker.open(ready.tracker)
       expect(tracker.database.prepare('SELECT COUNT(*) AS count FROM experiments WHERE run_id = ?').get(ready.runId)?.['count']).toBe(1)
       expect(tracker.database.prepare('SELECT COUNT(*) AS count FROM attempts WHERE run_id = ?').get(ready.runId)?.['count']).toBe(1)
-      tracker.close(); await interrupted.dispose()
+      tracker.close()
     } finally { await f.dispose() }
   })
+  it('resumes after a public controller interruption following actual lock and worktree allocation', async () => {
+    const f = await fixture()
+    const original = DurableTracker.prototype.transitionRun
+    let injected = false
+    const fault = vi.spyOn(DurableTracker.prototype, 'transitionRun').mockImplementation(function (runId, to, facts, at) {
+      const transition = original.call(this, runId, to, facts, at)
+      if (!injected && to === 'baseline-running') { injected = true; throw new Error('fault after allocation') }
+      return transition
+    })
+    try {
+      const interrupted = controller(f, 'allocated', 1); const identity = await interrupted.prepare()
+      await expect(interrupted.run()).rejects.toThrow('fault after allocation')
+      fault.mockRestore()
+      expect(execFileSync('git', ['-C', f.root, 'worktree', 'list', '--porcelain']).toString()).toContain(identity.worktree)
+      const resumed = controller(f, '', 1, identity.runId); const result = await resumed.run()
+      expect(result.runId).toBe(identity.runId)
+      const tracker = DurableTracker.open(identity.tracker)
+      expect(tracker.database.prepare('SELECT COUNT(*) AS count FROM attempts WHERE run_id = ?').get(identity.runId)?.['count']).toBe(1)
+      tracker.close()
+    } finally { fault.mockRestore(); await f.dispose() }
+  })
+
+  it('cancels a real evaluator descendant tree and resumes the terminal lineage without duplicate attempts', async () => {
+    const f = await fixture(); const marker = join(f.root, 'descendant.json')
+    try {
+      const interrupted = controller(f, 'descendant', 1, undefined, false, marker); const running = interrupted.run(); const ready = await interrupted.ready
+      for (let i = 0; i < 100 && !existsSync(marker); i++) await delay(10)
+      const pids = JSON.parse(readFileSync(marker, 'utf8')) as { parent: number; descendant: number }
+      interrupted.cancel('operator cancellation')
+      const cancelled = await running
+      expect(cancelled).toMatchObject({ runId: ready.runId, status: 'cancelled', quiescent: true, counts: { attempts: 1 } })
+      for (const pid of [pids.parent, pids.descendant]) expect(() => process.kill(pid, 0)).toThrow()
+      const resumed = controller(f, '', 1, ready.runId, false, marker); const terminal = await resumed.run()
+      expect(terminal).toMatchObject({ runId: ready.runId, status: 'cancelled', counts: { attempts: 1 } })
+      const tracker = DurableTracker.open(ready.tracker)
+      expect(tracker.database.prepare('SELECT process_tree_quiescent FROM attempts WHERE run_id = ?').get(ready.runId)).toEqual({ process_tree_quiescent: 1 })
+      tracker.close()
+    } finally { await f.dispose() }
+  })
+  it('reruns exactly once after a proven-quiescent attempt with no durable outcome', async () => {
+    const f = await fixture(); const original = DurableTracker.prototype.recordAttemptOutcome; let injected = false
+    const fault = vi.spyOn(DurableTracker.prototype, 'recordAttemptOutcome').mockImplementation(function (attemptId, facts) {
+      if (!injected) {
+        injected = true
+        this.database.prepare('UPDATE attempts SET process_tree_quiescent = 1 WHERE attempt_id = ?').run(attemptId)
+        throw new Error('fault after quiescence before outcome')
+      }
+      return original.call(this, attemptId, facts)
+    })
+    try {
+      const interrupted = controller(f, 'incomplete', 1); const identity = await interrupted.prepare()
+      await expect(interrupted.run()).rejects.toThrow('fault after quiescence before outcome')
+      fault.mockRestore()
+      const resumed = controller(f, '', 1, identity.runId); const result = await resumed.run()
+      expect(result.runId).toBe(identity.runId)
+      const tracker = DurableTracker.open(identity.tracker)
+      expect(tracker.database.prepare('SELECT ordinal, process_tree_quiescent, exited_at FROM attempts WHERE run_id = ? ORDER BY ordinal').all(identity.runId)).toEqual([
+        { ordinal: 1, process_tree_quiescent: 1, exited_at: null },
+        expect.objectContaining({ ordinal: 2, process_tree_quiescent: 1 }),
+      ])
+      tracker.close()
+    } finally { fault.mockRestore(); await f.dispose() }
+  })
+
+
 })

@@ -1,19 +1,21 @@
 import { execFile } from 'node:child_process'
-import { mkdir, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { afterEach, describe, expect, it } from 'vitest'
 import { composeHarness, assembledPrompt, type RealHarness } from './fixtures/harness-composition.ts'
-import { calls } from './fixtures/loader/model-provider.ts'
+import { calls, holdModel, releaseModel } from './fixtures/loader/model-provider.ts'
 
 const run = promisify(execFile)
 const active: RealHarness[] = []
 const evaluator = new URL('./fixtures/loader/evaluator.mjs', import.meta.url).pathname
+const holdingEvaluator = new URL('./fixtures/loader/evaluator-hold.mjs', import.meta.url).pathname
 
 afterEach(async () => {
   calls.length = 0
+  releaseModel()
   await Promise.allSettled(active.splice(0).map(harness => harness.dispose()))
 })
 
@@ -53,6 +55,30 @@ function request(cwd: string, mode: 'background' | 'foreground' = 'background') 
     max_experiments: 1,
     timeout_ms: 10_000,
     mode,
+  }
+}
+async function waitUntil(predicate: () => boolean | Promise<boolean>, message: string): Promise<void> {
+  const deadline = Date.now() + 10_000
+  while (!(await predicate())) {
+    if (Date.now() >= deadline) throw new Error(message)
+    const { promise, resolve } = Promise.withResolvers<void>()
+    setTimeout(resolve, 10)
+    await promise
+  }
+}
+
+async function evaluatorPid(marker: string): Promise<number> {
+  let text = ''
+  await waitUntil(async () => {
+    try { text = await readFile(marker, 'utf8'); return true } catch { return false }
+  }, 'evaluator did not publish its pid')
+  return Number(text.trim())
+}
+
+function processExists(pid: number): boolean {
+  try { process.kill(pid, 0); return true } catch (error) {
+    const processError = error as NodeJS.ErrnoException
+    return processError.code !== 'ESRCH'
   }
 }
 
@@ -114,35 +140,58 @@ describe('real Loader/profile production composition', () => {
     }
   }, 30_000)
 
-  it('kills a published production run through generic controls and unloads only after quiescence', async () => {
+  it('terminates an active production evaluator and its job before HMR returns', async () => {
     const harness = await composeHarness()
     active.push(harness)
     const cwd = await repository(harness.root)
     const parent = await parentAgent(harness, cwd)
+    const marker = join(harness.root, 'evaluator.pid')
     try {
-      const started = await execute(harness, 'autoresearch', { ...request(cwd), max_experiments: 20 }, parent.agent)
-      const jobId = (started.value as { jobId: string }).jobId
-      const killed = await execute(harness, 'job_kill', { job_id: jobId, reason: 'loader lifecycle test' }, parent.agent)
-      expect(killed.isError).toBe(false)
-      await harness.setAutoresearchEnabled(false)
-      const settled = await harness.ctx.jobs.wait(jobId as never, 20_000, parent.agent)
-      expect(settled.status).toBe('killed')
-      expect(harness.ctx.tools.get('autoresearch')).toBeUndefined()
+      const execution = execute(harness, 'autoresearch', {
+        ...request(cwd),
+        evaluation: { command: process.execPath, args: [holdingEvaluator, marker] },
+      }, parent.agent)
+      const pid = await evaluatorPid(marker)
+      expect(processExists(pid)).toBe(true)
+      expect(harness.ctx.jobs.list(parent.agent)).toEqual([expect.objectContaining({ kind: 'autoresearch', status: 'running' })])
+
+      await harness.reloadAutoresearch()
+      await execution
+
+      await waitUntil(() => !processExists(pid), 'evaluator process survived HMR unload')
+      expect(harness.ctx.jobs.list(parent.agent).every(job => job.status !== 'running' && job.status !== 'stopping')).toBe(true)
       expect(harness.ctx.agents.list().map(agent => agent.id)).toEqual([parent.agent.id])
     } finally {
       await parent.dispose()
     }
   }, 30_000)
 
-  it('supports dispose-reapply HMR without duplicate tool or prompt registrations', async () => {
+  it('HMR reloads production autoresearch only after controller, child, evaluator, and job quiescence, then reapplies unique registrations', async () => {
     const harness = await composeHarness()
     active.push(harness)
-    await harness.setAutoresearchEnabled(false)
-    expect(harness.ctx.tools.get('autoresearch')).toBeUndefined()
-    expect(await assembledPrompt(harness.ctx)).not.toContain('Use autoresearch only')
-    await harness.setAutoresearchEnabled(true)
-    expect(harness.ctx.tools.schemas().filter(tool => tool.name === 'autoresearch')).toHaveLength(1)
-    expect((await assembledPrompt(harness.ctx)).match(/Use autoresearch only/g)).toHaveLength(1)
+    const cwd = await repository(harness.root)
+    const parent = await parentAgent(harness, cwd)
+    holdModel()
+    try {
+      const started = await execute(harness, 'autoresearch', { ...request(cwd), max_experiments: 20 }, parent.agent)
+      expect(started.isError).toBe(false)
+      if (!started.value || typeof started.value !== 'object' || !('jobId' in started.value) || typeof started.value.jobId !== 'string') throw new Error(JSON.stringify(started.value))
+      const jobId = started.value.jobId
+      await waitUntil(() => calls.length > 0 && harness.ctx.agents.list().length > 1, 'autoresearch child did not become active before HMR')
+      expect(harness.ctx.jobs.get(jobId as never, parent.agent)).toMatchObject({ status: 'running' })
+
+      await harness.reloadAutoresearch()
+      releaseModel()
+
+      const settled = await harness.ctx.jobs.wait(jobId as never, 20_000, parent.agent)
+      expect(['failed', 'killed']).toContain(settled.status)
+      expect(harness.ctx.agents.list().map(agent => agent.id)).toEqual([parent.agent.id])
+      expect(harness.ctx.tools.schemas().filter(tool => tool.name === 'autoresearch')).toHaveLength(1)
+      expect((await assembledPrompt(harness.ctx)).match(/Use autoresearch only/g)).toHaveLength(1)
+    } finally {
+      releaseModel()
+      await parent.dispose()
+    }
   }, 30_000)
 })
 

@@ -102,28 +102,55 @@ export function durableGitIdentity(tracker: DurableTracker, runId: string): Dura
   const run = tracker.getRun(runId); if (!run) throw new GitBoundaryError('git-run-missing', `Unknown durable run ${runId}`)
   return { runId, repositoryId: String(run['repository_id']), startCommit: String(run['start_commit']), branch: String(run['branch']), worktree: String(run['worktree']) }
 }
+export interface ControllerClaim { readonly ownerId: string; readonly expiresAt: string }
+
+export function acquireControllerClaim(tracker: DurableTracker, runId: string, ownerId: string, leaseMs: number, now = new Date()): ControllerClaim {
+  if (!Number.isSafeInteger(leaseMs) || leaseMs <= 0) throw new TypeError('controller claim lease must be a positive integer')
+  const authority = openLockAuthority(tracker, runId); const expiresAt = new Date(now.getTime() + leaseMs).toISOString()
+  try {
+    authority.exec('BEGIN IMMEDIATE')
+    const claim = authority.prepare('SELECT owner_id, expires_at FROM controller_claims WHERE run_id = ?').get(runId)
+    if (claim && claim['owner_id'] !== ownerId && Date.parse(String(claim['expires_at'])) > now.getTime()) throw new GitBoundaryError('run-controller-active', 'Another controller instance owns this run')
+    authority.prepare('INSERT INTO controller_claims (run_id, owner_id, acquired_at, heartbeat_at, expires_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(run_id) DO UPDATE SET owner_id=excluded.owner_id, acquired_at=excluded.acquired_at, heartbeat_at=excluded.heartbeat_at, expires_at=excluded.expires_at').run(runId, ownerId, now.toISOString(), now.toISOString(), expiresAt)
+    authority.exec('COMMIT')
+    return { ownerId, expiresAt }
+  } catch (error) { try { authority.exec('ROLLBACK') } catch {} throw error } finally { authority.close() }
+}
+
+export function heartbeatControllerClaim(tracker: DurableTracker, runId: string, ownerId: string, leaseMs: number, now = new Date()): ControllerClaim {
+  const authority = openLockAuthority(tracker, runId); const expiresAt = new Date(now.getTime() + leaseMs).toISOString()
+  try {
+    const changed = authority.prepare('UPDATE controller_claims SET heartbeat_at = ?, expires_at = ? WHERE run_id = ? AND owner_id = ?').run(now.toISOString(), expiresAt, runId, ownerId).changes
+    if (changed !== 1) throw new GitBoundaryError('run-controller-claim-lost', 'Controller instance no longer owns this run')
+    return { ownerId, expiresAt }
+  } finally { authority.close() }
+}
+
+export function releaseControllerClaim(tracker: DurableTracker, runId: string, ownerId: string): boolean {
+  const authority = openLockAuthority(tracker, runId)
+  try { return authority.prepare('DELETE FROM controller_claims WHERE run_id = ? AND owner_id = ?').run(runId, ownerId).changes === 1 } finally { authority.close() }
+}
+
 
 export function acquireRunLock(tracker: DurableTracker, identity: RunGitIdentity, repositoryId: string, maxActiveRunsPerRepository: number): void {
   const run = tracker.getRun(identity.runId)
   if (!run || run['repository_id'] !== repositoryId || run['run_tag'] !== identity.runTag) throw new GitBoundaryError('run-lock-identity', 'Active lock identity must match the durable run')
   const authority = openLockAuthority(tracker, identity.runId)
-  let reserved = false
   try {
     authority.exec('BEGIN IMMEDIATE')
     const owner = authority.prepare('SELECT run_id FROM active_locks WHERE repository_id = ? AND run_tag = ?').get(repositoryId, identity.runTag)
-    if (owner) throw new GitBoundaryError('run-tag-active', 'The repository/run-tag is already active')
-    const active = Number(authority.prepare('SELECT COUNT(*) AS count FROM active_locks WHERE repository_id = ?').get(repositoryId)?.['count'] ?? 0)
-    if (active >= maxActiveRunsPerRepository) throw new GitBoundaryError('repository-active-limit', 'Repository active-run limit reached')
-    authority.prepare('INSERT INTO active_locks (repository_id, run_tag, run_id, acquired_at) VALUES (?, ?, ?, ?)').run(repositoryId, identity.runTag, identity.runId, new Date().toISOString())
-    reserved = true
+    if (owner && owner['run_id'] !== identity.runId) throw new GitBoundaryError('run-tag-active', 'The repository/run-tag is already active')
+    if (!owner) {
+      const active = Number(authority.prepare('SELECT COUNT(*) AS count FROM active_locks WHERE repository_id = ?').get(repositoryId)?.['count'] ?? 0)
+      if (active >= maxActiveRunsPerRepository) throw new GitBoundaryError('repository-active-limit', 'Repository active-run limit reached')
+      authority.prepare('INSERT INTO active_locks (repository_id, run_tag, run_id, acquired_at) VALUES (?, ?, ?, ?)').run(repositoryId, identity.runTag, identity.runId, new Date().toISOString())
+    }
     authority.exec('COMMIT')
-    tracker.acquireActiveLock(identity.runId, repositoryId, identity.runTag)
-  } catch (error) {
-    try { authority.exec('ROLLBACK') } catch {}
-    if (reserved) authority.prepare('DELETE FROM active_locks WHERE run_id = ?').run(identity.runId)
-    throw error
-  } finally { authority.close() }
+  } catch (error) { try { authority.exec('ROLLBACK') } catch {} throw error } finally { authority.close() }
+  try { tracker.acquireActiveLock(identity.runId, repositoryId, identity.runTag) }
+  catch (error) { releaseAuthorityLock(tracker, identity.runId); throw error }
 }
+
 
 export async function allocateRunWorktree(ctx: GitContext, executable: string, discovery: RepositoryDiscovery, identity: RunGitIdentity, durable: DurableGitIdentity, options: Omit<GitCommandOptions, 'cwd'>, resume = false): Promise<void> {
   assertDurableIdentity(discovery, identity, durable)
@@ -265,7 +292,7 @@ export async function restoreAcceptedWorktree(ctx: GitContext, executable: strin
 }
 export function releaseTerminalRunLock(tracker: DurableTracker, runId: string): boolean {
   const released = tracker.releaseActiveLock(runId)
-  if (released) releaseAuthorityLock(tracker, runId)
+  releaseAuthorityLock(tracker, runId)
   return released
 }
 export function recoverTerminalRunLock(tracker: DurableTracker, runId: string): boolean { return tracker.recoveryState(runId).safeToReleaseTerminalLock ? releaseTerminalRunLock(tracker, runId) : false }
@@ -276,7 +303,7 @@ function openLockAuthority(tracker: DurableTracker, runId: string): DatabaseSync
   if (!isAbsolute(gitCommonDir)) throw new GitBoundaryError('run-lock-identity', 'Shared lock authority requires a canonical Git common directory')
   const path = join(gitCommonDir, 'dsh-autoresearch-locks.sqlite')
   const database = new DatabaseSync(path, { timeout: 5_000 })
-  database.exec('PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000; CREATE TABLE IF NOT EXISTS active_locks (repository_id TEXT NOT NULL, run_tag TEXT NOT NULL, run_id TEXT NOT NULL UNIQUE, acquired_at TEXT NOT NULL, PRIMARY KEY (repository_id, run_tag)) STRICT')
+  database.exec('PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000; CREATE TABLE IF NOT EXISTS active_locks (repository_id TEXT NOT NULL, run_tag TEXT NOT NULL, run_id TEXT NOT NULL UNIQUE, acquired_at TEXT NOT NULL, PRIMARY KEY (repository_id, run_tag)) STRICT; CREATE TABLE IF NOT EXISTS controller_claims (run_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, acquired_at TEXT NOT NULL, heartbeat_at TEXT NOT NULL, expires_at TEXT NOT NULL) STRICT')
   return database
 }
 
