@@ -49,7 +49,10 @@ interface HarnessFixture {
   readonly order: string[]
   readonly dispose: ReturnType<typeof vi.fn>
   readonly childId: { value?: ReturnType<typeof SessionId> }
-  behavior: 'valid' | 'missing' | 'unknown' | 'duplicate'
+  behavior: 'valid' | 'missing' | 'unknown' | 'duplicate' | 'stale' | 'wrong' | 'oversized' | 'normalized'
+  disposeError?: Error
+  liveJob?: boolean
+  keepRegistered?: boolean
 }
 
 function fixture(): HarnessFixture {
@@ -61,7 +64,7 @@ function fixture(): HarnessFixture {
   const resultListeners: ResultListener[] = []
   const order: string[] = []
   const live = new Map<string, Agent>()
-  const dispose = vi.fn(async () => { order.push('dispose'); if (childId.value !== undefined) live.delete(childId.value) })
+  const dispose = vi.fn(async () => { order.push('dispose'); if (harness.disposeError) throw harness.disposeError; if (!harness.keepRegistered && childId.value !== undefined) live.delete(childId.value) })
   const childId: { value?: SessionId } = {}
   const harness = { behavior: 'valid' as HarnessFixture['behavior'] } as HarnessFixture
 
@@ -130,6 +133,10 @@ function fixture(): HarnessFixture {
             blockerClaim: null,
           }
           if (harness.behavior === 'unknown') report.metric = 0
+          if (harness.behavior === 'stale') report.runId = 'stale-run'
+          if (harness.behavior === 'wrong') report.ordinal = handoff.identity.ordinal + 1
+          if (harness.behavior === 'oversized') report.implementationSummary = 'x'.repeat(40_000)
+          if (harness.behavior === 'normalized') report.hypothesis = ' not-normalized'
           const execute = async () => {
             try {
               const value = await tool.execute(report, { concludeTurn: vi.fn() } as never)
@@ -152,7 +159,7 @@ function fixture(): HarnessFixture {
   const ctx = Object.assign(parentCtx as unknown as Record<string, unknown>, {
     agents,
     subprocess,
-    jobs: { list: () => [] as JobSnapshot[] },
+    jobs: { list: () => harness.liveJob ? [{ status: 'running' }] as JobSnapshot[] : [] as JobSnapshot[] },
   }) as unknown as Context
   Object.assign(harness, { ctx, parent, createOptions, childTools, restrictions, presentations, sections, order, dispose, childId })
   return harness
@@ -236,5 +243,54 @@ describe('proposal-agent adapter', () => {
     const foreign = { ...f.parent, ctx: {} as Context } as Agent
     await expect(requestProposal(f.ctx, request(foreign, vi.fn()))).rejects.toMatchObject({ code: 'capability-unavailable' })
     expect(f.createOptions).toHaveLength(0)
+  })
+
+  it('inherits the initiating route and omits optional maxTokens when neither layer supplies it', async () => {
+    const f = fixture()
+    const parent = { ...f.parent, options: { provider: 'inherited-provider', model: 'inherited-model', subagentDepth: 2 } } as Agent
+    const input = request(parent, vi.fn())
+    await requestProposal(f.ctx, { ...input, config: { maxHandoffChars: input.config.maxHandoffChars } })
+    expect(f.createOptions[0]).toMatchObject({ agentOptions: { provider: 'inherited-provider', model: 'inherited-model', subagentDepth: 3 } })
+    expect(f.createOptions[0]?.agentOptions).not.toHaveProperty('maxTokens')
+  })
+
+  it.each([
+    ['stale', 'report-stale'],
+    ['wrong', 'report-wrong-experiment'],
+    ['oversized', 'report-too-large'],
+    ['normalized', 'report-malformed'],
+  ] as const)('classifies %s report identity and size failures and disposes once', async (behavior, code) => {
+    const f = fixture(); f.behavior = behavior
+    await expect(requestProposal(f.ctx, request(f.parent, vi.fn()))).rejects.toMatchObject({ code })
+    expect(f.dispose).toHaveBeenCalledTimes(1)
+  })
+
+  it('rejects an oversized handoff before Git capture or child creation', async () => {
+    const f = fixture(); const input = request(f.parent, vi.fn())
+    await expect(requestProposal(f.ctx, { ...input, config: { ...input.config, maxHandoffChars: 16 } })).rejects.toMatchObject({ code: 'handoff-too-large' })
+    expect(f.createOptions).toHaveLength(0)
+  })
+
+  it.each([
+    ['dispose failure', (f: HarnessFixture) => { f.disposeError = new Error('dispose rejected') }, 'dispose-failed'],
+    ['registered child', (f: HarnessFixture) => { f.keepRegistered = true }, 'not-quiescent'],
+    ['live child job', (f: HarnessFixture) => { f.liveJob = true }, 'not-quiescent'],
+  ] as const)('refuses quiescence after %s and invokes disposal exactly once', async (_label, arrange, code) => {
+    const f = fixture(); arrange(f)
+    await expect(requestProposal(f.ctx, request(f.parent, vi.fn()))).rejects.toMatchObject({ code })
+    expect(f.dispose).toHaveBeenCalledTimes(1)
+  })
+
+  it('cancels during child execution and awaits the same disposal exactly once', async () => {
+    const f = fixture(); const aborter = new AbortController(); const input = request(f.parent, vi.fn())
+    const originalCreate = (f.ctx.agents as unknown as { create: (options: CreateAgentOptions) => Promise<AgentHandle> }).create.bind(f.ctx.agents)
+    ;(f.ctx.agents as unknown as { create: (options: CreateAgentOptions) => Promise<AgentHandle> }).create = async options => {
+      const handle = await originalCreate(options)
+      const idle = handle.agent.whenIdle.bind(handle.agent)
+      handle.agent.whenIdle = async () => { aborter.abort(new Error('stop')); await idle() }
+      return handle
+    }
+    await expect(requestProposal(f.ctx, { ...input, signal: aborter.signal })).rejects.toMatchObject({ code: 'cancelled' })
+    expect(f.dispose).toHaveBeenCalledTimes(1)
   })
 })

@@ -177,6 +177,9 @@ function reportTool(execute: ToolDefinition['execute']): ToolDefinition {
   }
 }
 
+// SubagentStartRequest cannot establish this isolation boundary: it has no per-run
+// cwd/session-meta setup hook, agentOptions cannot carry cwd, and mentioning a path
+// in a prompt does not bind the child process or durable session to that worktree.
 /** Create, drive, drain, and dispose one isolated proposal child. */
 export async function requestProposal(ctx: Context, request: ProposalAgentRequest): Promise<ProposalAgentResult> {
   if (request.parent.ctx !== ctx) throw fail('capability-unavailable', 'Proposal parent and controller must share one authoritative Context')
@@ -281,6 +284,7 @@ export async function requestProposal(ctx: Context, request: ProposalAgentReques
     try { await releaseOwner() } catch (error) { operationError = fail('dispose-failed', 'Proposal child disposal failed', error) }
   }
 
+  if (operationError instanceof ProposalAgentError && operationError.code === 'dispose-failed') throw operationError
   if (handle !== undefined) {
     if (ctx.agents.get(sessionId) !== undefined) throw fail('not-quiescent', 'Disposed proposal child remains registered')
     const liveJobs = ctx.jobs.list(handle.agent).filter((job: JobSnapshot) => job.status === 'running' || job.status === 'stopping')
