@@ -5,7 +5,7 @@
 - `[x]` means verified in the current worktree or completed research/planning evidence.
 - `[ ]` means not present or not verified in the current worktree.
 - Archived implementation activity was historical evidence only until the authoritative snapshot was recovered. Chunk 01 is now closed by implementation commit `3ca85a17c03d15488269b3dbc339e3ec135d98c3`, tracker-accounting commit `4095697a6b7256937f535d739ca09678b47e333d`, review-fix commit `6524bdf`, and a clean independent correctness/accounting/security re-review after `6524bdf` with zero findings.
-- **Current dependency-ready chunk: `03-define-discriminated-contract-and-config`.** Chunk 02 is closed by implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4`, tracker-accounting commit `fa4bf06ef24b590a81f883037b940f18d97c5cfc`, review-fix commit `7671499`, focused clean-generated-state verification, and clean independent package/accounting re-reviews. Chunk 03 implementation is recorded in commits `9b18630` and `e22d99a`; focused typecheck, 3-file/26-test Vitest, and build gates passed; tracker-accounting commit `99babc5dc3432be7c078fd6e792c97164ebfb19b` is complete. The Chunk 03 review gate remains pending.
+- **Current dependency-ready chunk: `04-create-durable-tracker`.** Chunk 02 is closed by implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4`, tracker-accounting commit `fa4bf06ef24b590a81f883037b940f18d97c5cfc`, review-fix commit `7671499`, focused clean-generated-state verification, and clean independent package/accounting re-reviews. Chunk 03 is closed by implementation commits `9b18630` and `e22d99a`, tracker-accounting commit `99babc5dc3432be7c078fd6e792c97164ebfb19b`, review-fix commit `5e990acb1df3bcf8b7e2612c91f38443d364d2db`, passing post-fix frozen-install/typecheck/3-file-54-test/build/pack gates, and a clean independent correctness/security/accounting re-review.
 
 ## Established research and planning state
 
@@ -171,7 +171,7 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 - [x] Complete independent accounting re-review; the remaining Chunk 02 accounting finding is addressed by the obsolete historical assertion and replacement post-commit evidence above.
 - [x] Close Chunk 02 only after its implementation, tracker-accounting, review-fix, focused verification, package re-review, and accounting re-review evidence is recorded.
 
-# Chunk 03 — `03-define-discriminated-contract-and-config`
+# Chunk 03 — `03-define-discriminated-contract-and-config` (CLOSED)
 
 ## Types and canonical results
 
@@ -242,7 +242,7 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 - [x] Materialize complete explicit defaults in the patch row.
 - [x] Define the canonical public patch/tool schema; removal of temporary workflow-specific runtime compatibility is explicitly deferred to the Chunk 06 clean cutover.
 
-- [x] Record Chunk 03 implementation verification: `pnpm run typecheck` passed; Vitest passed 3 files / 26 tests, including every new contract, configuration, and rendering invariant; `pnpm run build` passed.
+- [x] Record Chunk 03 pre-review implementation verification: `pnpm run typecheck` passed; Vitest passed 3 files / 26 tests for the then-current contract, configuration, and rendering invariants; `pnpm run build` passed. This was pre-review evidence, not complete post-review closure evidence.
 - [x] Record the intentional intermediate compatibility state: temporary internal legacy runtime compatibility remains solely to keep the workflow runtime green until the Chunk 06 clean cutover; its later removal is tracked as a distinct Chunk 06 item and is not a Chunk 03 failure.
 
 ## Chunk 03 verification gate
@@ -265,10 +265,10 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 
 ## Chunk 03 review gate
 
-- [ ] Review unions for impossible states.
-- [ ] Review public JSON for losslessness and Code Mode usability.
-- [ ] Review config authority: evaluator policy is host input, never child output.
-- [ ] Review module boundaries and remove duplicated old contract code.
+- [x] Review unions for impossible states.
+- [x] Review public JSON for losslessness and Code Mode usability.
+- [x] Review config authority: evaluator policy is host input, never child output.
+- [x] Review module boundaries and remove duplicated old contract code.
 
 ## Chunk 03 implementation commit gate
 
@@ -279,6 +279,13 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 
 - [x] Record Chunk 03 implementation commits: `9b18630` and `e22d99a`.
 - [x] Commit the checklist update separately from the Chunk 03 implementation commit as tracker-accounting commit `99babc5dc3432be7c078fd6e792c97164ebfb19b`.
+
+## Chunk 03 review closure
+
+- [x] Record review-fix commit `5e990acb1df3bcf8b7e2612c91f38443d364d2db`.
+- [x] Record post-fix gates: frozen install passed; typecheck passed; Vitest passed 3 files / 54 tests; build passed; pack passed.
+- [x] Complete an independent correctness, security, and accounting re-review after `5e990acb1df3bcf8b7e2612c91f38443d364d2db`; the re-review returned clean with zero findings.
+- [x] Close Chunk 03 only after its implementation, tracker-accounting, review-fix, post-fix verification, and clean re-review evidence is recorded.
 
 # Chunk 04 — `04-create-durable-tracker`
 
