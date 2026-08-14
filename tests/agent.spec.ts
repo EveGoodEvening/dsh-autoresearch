@@ -53,6 +53,9 @@ interface HarnessFixture {
   disposeError?: Error
   liveJob?: boolean
   keepRegistered?: boolean
+  ownerCleanup?: () => Promise<void>
+  unloadDuringIdle?: boolean
+  readonly liveCount: () => number
 }
 
 function fixture(): HarnessFixture {
@@ -82,7 +85,9 @@ function fixture(): HarnessFixture {
     effect(execute: () => () => Promise<void>) {
       const cleanup = execute()
       let released = false
-      return async () => { if (released) return; released = true; await cleanup() }
+      const ownerCleanup = async () => { if (released) return; released = true; await cleanup() }
+      harness.ownerCleanup = ownerCleanup
+      return ownerCleanup
     },
   } as unknown as Context
   const parent = { id: parentSession.header.id, options: { provider: 'parent-provider', model: 'parent-model', maxTokens: 777, subagentDepth: 2 }, session: parentSession, ctx: parentCtx } as unknown as Agent
@@ -121,6 +126,7 @@ function fixture(): HarnessFixture {
         cancel: vi.fn(),
         followup(message: { content: Array<{ type: string; text?: string }> }) { prompt = message.content[0]?.text ?? ''; order.push('followup') },
         async whenIdle() {
+          if (harness.unloadDuringIdle) await harness.ownerCleanup?.()
           order.push('whenIdle')
           const tool = childTools.get(PROPOSAL_REPORT_TOOL)
           if (tool === undefined || harness.behavior === 'missing') return
@@ -161,7 +167,7 @@ function fixture(): HarnessFixture {
     subprocess,
     jobs: { list: () => harness.liveJob ? [{ status: 'running' }] as JobSnapshot[] : [] as JobSnapshot[] },
   }) as unknown as Context
-  Object.assign(harness, { ctx, parent, createOptions, childTools, restrictions, presentations, sections, order, dispose, childId })
+  Object.assign(harness, { ctx, parent, createOptions, childTools, restrictions, presentations, sections, order, dispose, childId, liveCount: () => live.size })
   return harness
 }
 
@@ -293,4 +299,12 @@ describe('proposal-agent adapter', () => {
     await expect(requestProposal(f.ctx, { ...input, signal: aborter.signal })).rejects.toMatchObject({ code: 'cancelled' })
     expect(f.dispose).toHaveBeenCalledTimes(1)
   })
+  it('awaits owner-effect unload disposal exactly once and leaves no registered child or live job', async () => {
+    const f = fixture(); f.unloadDuringIdle = true
+    await expect(requestProposal(f.ctx, request(f.parent, vi.fn()))).resolves.toMatchObject({ hypothesis: 'Change the hot path' })
+    expect(f.dispose).toHaveBeenCalledTimes(1)
+    expect(f.liveCount()).toBe(0)
+    expect(f.ctx.jobs.list()).toEqual([])
+  })
+
 })

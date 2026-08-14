@@ -155,11 +155,12 @@ interface EvaluationStep { stdout?: string; stderr?: string; exitCode?: number; 
 class ControllerSubprocess {
   readonly specs: SubprocessSpawnSpec[] = []
   evaluatorSpawns = 0
-  constructor(private readonly evaluations: EvaluationStep[]) {}
+  constructor(private readonly evaluations: EvaluationStep[], private readonly onEvaluatorSpawn?: () => void) {}
   async resolveExecutable(command: string): Promise<string> { return command === 'git' ? execFileSync('which', ['git']).toString().trim() : command }
   spawn(spec: SubprocessSpawnSpec): SubprocessHandle {
     this.specs.push(spec)
     if (spec.argv[0] === 'fake-evaluator') {
+      this.onEvaluatorSpawn?.()
       const step = this.evaluations[this.evaluatorSpawns++] ?? { stdout: '{"score":999}\n' }
       step.edit?.(spec.cwd)
       const script = step.hang ? 'setInterval(() => {}, 1000)' : step.signal ? `process.kill(process.pid, ${JSON.stringify(step.signal)})` : `process.stdout.write(${JSON.stringify(step.stdout ?? '')});process.stderr.write(${JSON.stringify(step.stderr ?? '')});process.exit(${step.exitCode ?? 0})`
@@ -178,27 +179,28 @@ class ControllerSubprocess {
   }
 }
 
-interface ControllerFixture { root: string; ctx: Context; parent: Agent; subprocess: ControllerSubprocess; creates: CreateAgentOptions[]; order: string[]; trackerPath: () => string }
-function controllerFixture(evaluations: EvaluationStep[], edits: Array<(worktree: string, ordinal: number) => void> = []): ControllerFixture {
+interface ControllerFixture { root: string; ctx: Context; parent: Agent; subprocess: ControllerSubprocess; creates: CreateAgentOptions[]; order: string[]; trackerPath: () => string; liveCount: () => number }
+interface ProposalLifecycle { afterReport?: (worktree: string) => Promise<void> | void; dispose?: () => Promise<void> | void }
+function controllerFixture(evaluations: EvaluationStep[], edits: Array<(worktree: string, ordinal: number) => void> = [], lifecycle: ProposalLifecycle = {}): ControllerFixture {
   const root = mkdtempSync(join(tmpdir(), 'autoresearch-controller-e2e-'))
   execFileSync('git', ['init', '-b', 'main', root]); execFileSync('git', ['-C', root, 'config', 'user.name', 'Test']); execFileSync('git', ['-C', root, 'config', 'user.email', 'test@example.invalid'])
   mkdirSync(join(root, 'src')); writeFileSync(join(root, 'src', 'code.ts'), 'export const n = 1\n'); writeFileSync(join(root, 'evaluate.mjs'), '// frozen evaluator identity\n')
   execFileSync('git', ['-C', root, 'add', '.']); execFileSync('git', ['-C', root, 'commit', '-m', 'base'])
-  const subprocess = new ControllerSubprocess(evaluations); const creates: CreateAgentOptions[] = []; const order: string[] = []; const live = new Map<string, Agent>(); let lastTracker = ''
+  const creates: CreateAgentOptions[] = []; const order: string[] = []; const subprocess = new ControllerSubprocess(evaluations, () => order.push('evaluator-spawn')); const live = new Map<string, Agent>(); let lastTracker = ''
   const parentCtx = { get(name: string) { if (name === 'agentPresets') return { composedPreset: () => 'preset' }; if (name === 'sandboxPolicy') return { overrideOf: () => 'workspace-write' }; if (name === 'approval') return {}; return undefined }, effect(execute: () => () => Promise<void>) { const cleanup = execute(); let released = false; return async () => { if (!released) { released = true; await cleanup() } } } } as unknown as Context
   const parentAgent = { id: SessionId('parent'), options: { provider: 'provider', model: 'model', maxTokens: 123 }, session: { header: { id: SessionId('parent-session'), cwd: root, delegationDepth: 0 }, append: vi.fn() }, ctx: parentCtx } as unknown as Agent
   const agents = {
     async create(options: CreateAgentOptions): Promise<AgentHandle> {
       creates.push(options); order.push(`child-${creates.length}-create`); const tools = new Map<string, ToolDefinition>(); const listeners: Array<(execution: { name: string }, result: Readonly<ToolExecutionResult>) => void> = []
       const childCtx = { agent: undefined as Agent | undefined, get: (name: string) => name === 'agentPresets' ? { composeFrom: vi.fn() } : undefined, tools: { restrict: () => () => undefined, presentAs: () => () => undefined, register: (tool: ToolDefinition) => { tools.set(tool.name, tool); return () => undefined }, guard: () => () => undefined }, systemPrompt: { context: () => () => undefined, section: () => () => undefined }, on: (name: string, listener: (execution: { name: string }, result: Readonly<ToolExecutionResult>) => void) => { if (name === 'tools/result') listeners.push(listener); return () => undefined } } as unknown as Context
-      let prompt = ''; const child = { id: options.sessionId, options: options.agentOptions ?? {}, session: { header: { id: options.sessionId, ...options.meta }, append: vi.fn() }, ctx: childCtx, status: 'idle', cancel: vi.fn(), followup(message: { content: Array<{ text?: string }> }) { prompt = message.content[0]?.text ?? '' }, async whenIdle() { const payload = JSON.parse(prompt.slice(prompt.indexOf('{'))) as { identity: { runId: string; experimentId: string; ordinal: number; nonce: string }; workspace: { worktree: string } }; edits[payload.identity.ordinal - 1]?.(payload.workspace.worktree, payload.identity.ordinal); const tool = tools.get('autoresearch_report')!; const value = await tool.execute({ ...payload.identity, hypothesis: 'candidate', intendedEdits: ['src/code.ts'], implementationSummary: 'edited', blockerClaim: 'child-only claim' }, { concludeTurn: vi.fn() } as never); for (const listener of listeners) listener({ name: 'autoresearch_report' }, { isError: false, value, content: [] } as unknown as ToolExecutionResult) } } as unknown as Agent
+      let prompt = ''; const child = { id: options.sessionId, options: options.agentOptions ?? {}, session: { header: { id: options.sessionId, ...options.meta }, append: vi.fn() }, ctx: childCtx, status: 'idle', cancel: vi.fn(), followup(message: { content: Array<{ text?: string }> }) { prompt = message.content[0]?.text ?? '' }, async whenIdle() { const payload = JSON.parse(prompt.slice(prompt.indexOf('{'))) as { identity: { runId: string; experimentId: string; ordinal: number; nonce: string }; workspace: { worktree: string } }; edits[payload.identity.ordinal - 1]?.(payload.workspace.worktree, payload.identity.ordinal); const tool = tools.get('autoresearch_report')!; const value = await tool.execute({ ...payload.identity, hypothesis: 'candidate', intendedEdits: ['src/code.ts'], implementationSummary: 'changed', blockerClaim: 'child cannot authorize this blocker' }, { concludeTurn: vi.fn() } as never); listeners.forEach(listener => listener({ name: 'autoresearch_report' }, { isError: false, value } as ToolExecutionResult)); await lifecycle.afterReport?.(payload.workspace.worktree) } } as unknown as Agent
       childCtx.agent = child; await options.setup?.(childCtx); live.set(String(options.sessionId), child)
-      return { agent: child, dispose: async () => { order.push(`child-${creates.length}-dispose`); live.delete(String(options.sessionId)) } }
+      return { agent: child, dispose: async () => { order.push(`child-${creates.length}-dispose-start`); await lifecycle.dispose?.(); live.delete(String(options.sessionId)); order.push(`child-${creates.length}-dispose-end`) } }
     }, get(id: SessionId) { return live.get(String(id)) },
   }
   const ctx = Object.assign(parentCtx as unknown as Record<string, unknown>, { subprocess, agents, jobs: { list: () => [] as JobSnapshot[] } }) as unknown as Context
   parentAgent.ctx = ctx
-  return { root, ctx, parent: parentAgent, subprocess, creates, order, trackerPath: () => lastTracker }
+  return { root, ctx, parent: parentAgent, subprocess, creates, order, trackerPath: () => lastTracker, liveCount: () => live.size }
 }
 
 async function runControllerCase(f: ControllerFixture, overrides: Partial<typeof input> = {}) {
@@ -227,7 +229,46 @@ describe('controller real Git/SQLite outcomes', () => {
 
   it('persists a terminal experiment and artifacts before the next child and releases only after terminal run persistence', async () => {
     const f = controllerFixture([{ stdout: '{"score":10}\n' }, { stdout: '{"score":9}\n' }, { stdout: '{"score":8}\n' }], [(worktree, ordinal) => writeFileSync(join(worktree, 'src', 'code.ts'), `export const n = ${ordinal + 1}\n`), (worktree, ordinal) => writeFileSync(join(worktree, 'src', 'code.ts'), `export const n = ${ordinal + 1}\n`)])
-    try { const { result, tracker } = await runControllerCase(f, { max_experiments: 2 }); expect(result).toMatchObject({ status: 'budget-limited', counts: { experimentsStarted: 2, experimentsCompleted: 2, attempts: 3 } }); const experiments = tracker.database.prepare("SELECT state FROM experiments WHERE kind='candidate' ORDER BY ordinal").all(); expect(experiments).toEqual([{ state: 'accepted' }, { state: 'accepted' }]); expect(tracker.database.prepare('SELECT released_at FROM active_locks').get()?.['released_at']).not.toBeNull(); expect(f.order).toEqual(['child-1-create', 'child-1-dispose', 'child-2-create', 'child-2-dispose']); tracker.close() } finally { rmSync(f.root, { recursive: true, force: true }) }
+    try { const { result, tracker } = await runControllerCase(f, { max_experiments: 2 }); expect(result).toMatchObject({ status: 'budget-limited', counts: { experimentsStarted: 2, experimentsCompleted: 2, attempts: 3 } }); const experiments = tracker.database.prepare("SELECT state FROM experiments WHERE kind='candidate' ORDER BY ordinal").all(); expect(experiments).toEqual([{ state: 'accepted' }, { state: 'accepted' }]); expect(tracker.database.prepare('SELECT released_at FROM active_locks').get()?.['released_at']).not.toBeNull(); expect(f.order.filter(item => item.includes('child'))).toEqual(['child-1-create', 'child-1-dispose-start', 'child-1-dispose-end', 'child-2-create', 'child-2-dispose-start', 'child-2-dispose-end']); tracker.close() } finally { rmSync(f.root, { recursive: true, force: true }) }
+  })
+
+  it('awaits proposal disposal once on controller failure and leaves no registration or job', async () => {
+    const f = controllerFixture([{ stdout: '{"score":10}\n' }], [(worktree) => writeFileSync(join(worktree, 'package.json'), '{}\n')])
+    try {
+      const { result, tracker } = await runControllerCase(f, { mutable_globs: ['**'], max_experiments: 1 })
+      expect(result.status).toBe('round-failed')
+      expect(f.order.filter(item => item.includes('dispose'))).toEqual(['child-1-dispose-start', 'child-1-dispose-end'])
+      expect(f.liveCount()).toBe(0)
+      expect(f.ctx.jobs.list()).toEqual([])
+      expect(tracker.database.prepare('SELECT released_at FROM active_locks').get()?.['released_at']).not.toBeNull()
+      tracker.close()
+    } finally { rmSync(f.root, { recursive: true, force: true }) }
+  })
+
+  it('does not spawn an evaluator until a child-owned late mutation and proposal disposal are quiescent', async () => {
+    let lateMutation: Promise<void> | undefined
+    const f = controllerFixture(
+      [{ stdout: '{"score":10}\n' }, { stdout: '{"score":9}\n' }],
+      [(worktree) => writeFileSync(join(worktree, 'src', 'code.ts'), 'export const n = 2\n')],
+      {
+        afterReport(worktree) {
+          const mutation = Promise.withResolvers<void>()
+          lateMutation = mutation.promise
+          setTimeout(() => { writeFileSync(join(worktree, 'src', 'code.ts'), 'export const n = 3\n'); f.order.push('late-mutation'); mutation.resolve() }, 20)
+        },
+        async dispose() { await lateMutation },
+      },
+    )
+    try {
+      const { result, tracker } = await runControllerCase(f, { max_experiments: 1 })
+      expect(result.status).toBe('budget-limited')
+      const disposalEnd = f.order.indexOf('child-1-dispose-end')
+      expect(f.order.indexOf('late-mutation')).toBeGreaterThan(f.order.indexOf('child-1-dispose-start'))
+      expect(disposalEnd).toBeLessThan(f.order.lastIndexOf('evaluator-spawn'))
+      expect(f.liveCount()).toBe(0)
+      expect(tracker.database.prepare('SELECT released_at FROM active_locks').get()?.['released_at']).not.toBeNull()
+      tracker.close()
+    } finally { rmSync(f.root, { recursive: true, force: true }) }
   })
 
   it.each([{ stdout: '', exitCode: 9 }, { stdout: '{"score":1}\n', stderr: 'failure', exitCode: 7 }, { stdout: 'not-json\n' }])('classifies baseline evaluator failure with durable artifacts and no child', async step => {

@@ -156,6 +156,29 @@ describe('recovery nonterminal state matrix with real Git/SQLite', () => {
     const before = f.subprocess.specs.length; const first = await reconcileRecovery(f.ctx, f.request); const second = await reconcileRecovery(f.ctx, f.request); expect(first).toMatchObject({ kind: 'blocked', code: 'attempt-uncertain', lock: 'retain' }); expect(second).toEqual(first); expect(f.subprocess.specs.slice(before).every(spec => spec.argv[0] === f.request.gitExecutable)).toBe(true); expect(f.tracker.database.prepare('SELECT COUNT(*) AS n FROM attempts').get()?.['n']).toBe(1); f.tracker.close()
   })
 
+  it('reruns one proven-quiescent no-outcome evaluator attempt exactly once and never duplicates after recovery advances', async () => {
+    const f = await realFixture()
+    f.tracker.transitionRun(f.request.runId, 'baseline-running')
+    f.tracker.createExperiment({ experimentId: 'baseline', runId: f.request.runId, ordinal: 0, kind: 'baseline', parentCommit: f.request.discovery.startCommit, command: 'node', args: [] })
+    f.tracker.transitionExperiment('baseline', 'running')
+    f.tracker.createAttemptIntent({ attemptId: 'attempt-1', runId: f.request.runId, experimentId: 'baseline', ordinal: 1 }, { provenanceSha256: HASH })
+    f.tracker.recordAttemptObserved('attempt-1', { processTreeQuiescent: true })
+
+    const rerun = await reconcileRecovery(f.ctx, f.request)
+    expect(rerun).toMatchObject({ kind: 'evaluate', experiment: { experimentId: 'baseline' }, attemptOrdinal: 2, rerun: true })
+    f.tracker.createAttemptIntent({ attemptId: 'attempt-2', runId: f.request.runId, experimentId: 'baseline', ordinal: 2 }, { provenanceSha256: HASH })
+
+    const firstAfterSpawn = await reconcileRecovery(f.ctx, f.request)
+    const repeatedAfterSpawn = await reconcileRecovery(f.ctx, f.request)
+    expect(firstAfterSpawn).toMatchObject({ kind: 'blocked', code: 'attempt-uncertain', lock: 'retain' })
+    expect(repeatedAfterSpawn).toEqual(firstAfterSpawn)
+    expect(f.tracker.database.prepare('SELECT attempt_id, ordinal FROM attempts ORDER BY ordinal').all()).toEqual([
+      { attempt_id: 'attempt-1', ordinal: 1 },
+      { attempt_id: 'attempt-2', ordinal: 2 },
+    ])
+    f.tracker.close()
+  })
+
   it('blocks a completed zero-artifact attempt as artifact-incomplete and never schedules a rerun', async () => {
     const f = await realFixture(); f.tracker.transitionRun(f.request.runId, 'baseline-running')
     f.tracker.createExperiment({ experimentId: 'baseline', runId: f.request.runId, ordinal: 0, kind: 'baseline', parentCommit: f.request.discovery.startCommit, command: 'node', args: [] }); f.tracker.transitionExperiment('baseline', 'running')
