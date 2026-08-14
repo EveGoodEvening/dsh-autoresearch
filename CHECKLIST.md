@@ -421,7 +421,7 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 
 ## Chunk 05 verification gate
 
-- [x] Final post-fix gate passed: `pnpm run typecheck`, focused Vitest suites (`6` files / `138` tests), and `pnpm run build`.
+- [x] Two consecutive final gates passed; each gate ran `pnpm run typecheck`, focused Vitest suites (`6` files / `143` tests), and `pnpm run build`.
 - [x] Test clean temporary Git repository setup and read-only discovery before tracker/mutation.
 - [x] Test dirty caller work preservation, immutable run-id branch/worktree identities, active same-tag exclusion, terminal tag reuse, and independent run-tag worktrees.
 - [x] Test same-run collision verification and full-SHA lineage.
@@ -440,8 +440,9 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 - [x] Reassign the unavailable fd-bound/string-cwd stability guarantee, proposal-resource quiescence, pre-child/baseline ordering, late-writer prevention, durable reconciliation authorization, and final lock-release ordering to Chunk 06.
 - [x] Review mutable/protected policy across staged/unstaged/untracked paths.
 - [x] Review candidate commit/audit evidence retention across rejection and failure; keep controller restart sequencing as a separate Chunk 06 review.
-- [ ] Complete a final clean independent Git command/caller-worktree/config-execution review after `185cbe2`.
-- [ ] Complete a final clean independent evaluator shell/secret/provenance/filesystem/artifact/process review after `185cbe2`.
+- [x] Complete a final clean independent Git command/caller-worktree/config-execution review through `5ba42d51f97116d31f816bb279dc97c134128ed9`.
+- [x] Complete a final clean independent evaluator/security shell/secret/provenance/filesystem/artifact/process review through `294d3c5e7d65995478d41bc61b22dcb6359de901`.
+- [x] Complete a clean review of the tracker concurrency fix with no unresolved finding.
 
 ## Chunk 05 implementation and review-fix commits
 
@@ -450,12 +451,15 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 - [x] Record prior review-fix commit `118f345cb1e994d0f9e7540e8c5dd4a04b4ed932` (`fix(boundaries): harden recovery and process isolation`).
 - [x] Record implementation/review-fix commit `dffb00ebcab22a07f8c8c22e0f58bb2a706fd7a6` (`fix(boundaries): complete restart-safe host controls`).
 - [x] Record final review-fix commit `185cbe2d0159522099e2965590158cee62d8d97b` (`fix(boundaries): enforce trusted Git and evaluator state`).
+- [x] Record threat-model wording commit `3e2af56c331fad84aed99a7be0357622bddfb8b3` (`docs: record host boundary threat model`).
+- [x] Record Git review-fix commit `5ba42d51f97116d31f816bb279dc97c134128ed9` (`fix(boundaries): close candidate and provenance gaps`).
+- [x] Record evaluator/security and tracker-concurrency review-fix commit `294d3c5e7d65995478d41bc61b22dcb6359de901` (`fix: stabilize secure autoresearch boundaries`).
 
 ## Chunk 05 closure and accounting
 
-- [ ] Complete final clean Git/evaluator re-reviews and record zero unresolved Chunk 05 findings.
-- [ ] Commit this final Chunk 05 tracker/accounting update separately and record its full SHA.
-- [ ] Close Chunk 05 and advance the dependency-ready status to Chunk 06 only after the clean reviews and accounting commit are recorded.
+- [x] Complete final clean Git and evaluator/security re-reviews, complete the tracker concurrency fix review, and record zero unresolved Chunk 05 findings.
+- [ ] Commit this final Chunk 05 tracker/accounting update separately and record its full SHA; this item remains open because this edit's commit does not yet exist.
+- [ ] Close the Chunk 05 heading and advance Chunk 06 to dependency-ready only after the separate closure commit is recorded; until then every Chunk 06 dependency remains unchecked and Chunk 06 is not dependency-ready.
 
 # Chunk 06 — `06-implement-recoverable-controller`
 
