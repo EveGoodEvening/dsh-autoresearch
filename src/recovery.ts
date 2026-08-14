@@ -125,8 +125,10 @@ function evaluationDirective(request: RecoveryRequest, experiment: RecoveredExpe
   const commit = experiment.candidateCommit ?? experiment.parentCommit
   if (text(experimentRow['state']) === 'baseline-pending') return { kind: 'evaluate', runId: request.runId, experiment, commit, createExperiment: false, attemptOrdinal: 1, rerun: false }
   if (!latest) return { kind: 'evaluate', runId: request.runId, experiment, commit, createExperiment: false, attemptOrdinal: 1, rerun: false }
+  const attemptId = text(latest['attempt_id'])
+  if (spawnProvenance(latest) !== request.provenanceSha256) return blocked(request, 'provenance-mismatch', `attempt ${attemptId} spawn provenance differs from the durable run provenance`, 'retain')
   if (latest['process_tree_quiescent'] !== 1) {
-    const evidence = [`attempt ${text(latest['attempt_id'])} lacks durable whole-process-tree quiescence`]
+    const evidence = [`attempt ${attemptId} lacks durable whole-process-tree quiescence`]
     request.tracker.checkpointRecoverableBlocked(request.runId, { code: 'attempt-uncertain', evidence })
     return blocked(request, 'attempt-uncertain', evidence[0]!, 'retain')
   }
@@ -137,6 +139,8 @@ function evaluationDirective(request: RecoveryRequest, experiment: RecoveredExpe
     const evidence = error instanceof RecoveryEvidenceError ? error : new RecoveryEvidenceError('artifact-incomplete', `durable evaluator evidence could not be decoded: ${error instanceof Error ? error.message : String(error)}`)
     return blocked(request, evidence.code, evidence.message, 'retain')
   }
+  const artifacts = request.tracker.database.prepare('SELECT 1 FROM artifacts WHERE attempt_id = ? LIMIT 1').get(attemptId)
+  if (artifacts) return blocked(request, 'artifact-incomplete', `attempt ${attemptId} has artifacts without a durable outcome`, 'retain')
   return { kind: 'evaluate', runId: request.runId, experiment, commit, createExperiment: false, attemptOrdinal: integer(latest['ordinal']) + 1, rerun: true }
 }
 
@@ -178,13 +182,23 @@ function reconstructEvaluation(request: RecoveryRequest, experiment: RecoveredEx
 }
 
 function baselineSettlement(request: RecoveryRequest, experiment: RecoveredExperiment, row: Row): RecoveryDirective {
+  const evaluation = terminalEvaluation(request, experiment, row)
+  if (evaluation instanceof RecoveryEvidenceError) return blocked(request, evaluation.code, evaluation.message, 'retain')
   const state = text(row['state'])
   const metric = number(row['metric'])
-  if (state === 'accepted' && metric !== undefined) return { kind: 'settle-baseline', runId: request.runId, experiment, outcome: { kind: 'accept', metric } }
+  if (state === 'accepted' && metric !== undefined && evaluation.kind === 'measured' && evaluation.metric === metric) return { kind: 'settle-baseline', runId: request.runId, experiment, outcome: { kind: 'accept', metric } }
   const terminal = terminalExperimentState(row)
-  if (!terminal) return blocked(request, 'state-ambiguous', 'terminal baseline lacks an accepted metric or failure state', 'retain')
-  const uncertain = request.tracker.database.prepare('SELECT 1 FROM attempts WHERE experiment_id = ? AND process_tree_quiescent IS NOT 1 LIMIT 1').get(experiment.experimentId)
-  return { kind: 'settle-baseline', runId: request.runId, experiment, outcome: { kind: 'fail', state: terminal, code: text(row['failure_code']) || terminal, message: text(row['failure_message']) || terminal, quiescent: !uncertain } }
+  if (!terminal || evaluation.kind !== 'failed') return blocked(request, 'state-ambiguous', 'terminal baseline does not match its durable evaluator outcome', 'retain')
+  return { kind: 'settle-baseline', runId: request.runId, experiment, outcome: { kind: 'fail', state: terminal, code: evaluation.code, message: evaluation.message, quiescent: evaluation.exit.processTreeQuiescent } }
+}
+
+function terminalEvaluation(request: RecoveryRequest, experiment: RecoveredExperiment, row: Row): RecoveredEvaluation | RecoveryEvidenceError {
+  const attempts = request.tracker.database.prepare('SELECT * FROM attempts WHERE run_id = ? AND experiment_id = ? ORDER BY ordinal').all(request.runId, experiment.experimentId) as Row[]
+  const latest = attempts.at(-1)
+  if (!latest) return new RecoveryEvidenceError('attempt-uncertain', `terminal experiment ${experiment.experimentId} has no durable evaluator attempt`)
+  if (latest['process_tree_quiescent'] !== 1) return new RecoveryEvidenceError('attempt-uncertain', `attempt ${text(latest['attempt_id'])} lacks durable whole-process-tree quiescence`)
+  try { return reconstructEvaluation(request, experiment, latest) ?? new RecoveryEvidenceError('attempt-uncertain', `attempt ${text(latest['attempt_id'])} has no durable outcome`) }
+  catch (error) { return error instanceof RecoveryEvidenceError ? error : new RecoveryEvidenceError('artifact-incomplete', `durable evaluator evidence could not be decoded: ${error instanceof Error ? error.message : String(error)}`) }
 }
 
 function decidingDirective(request: RecoveryRequest, run: Row, experiment: RecoveredExperiment, row: Row, attempts: Row[]): RecoveryDirective {
@@ -193,6 +207,13 @@ function decidingDirective(request: RecoveryRequest, run: Row, experiment: Recov
     const message = `attempt ${text(latest['attempt_id'])} lacks durable whole-process-tree quiescence`
     request.tracker.checkpointRecoverableBlocked(request.runId, { code: 'attempt-uncertain', evidence: [message] })
     return blocked(request, 'attempt-uncertain', message, 'retain')
+  }
+  const durableMetric = number(row['metric'])
+  if (isExperimentTerminal(text(row['state'])) || durableMetric !== undefined) {
+    const evaluation = terminalEvaluation(request, experiment, row)
+    if (evaluation instanceof RecoveryEvidenceError) return blocked(request, evaluation.code, evaluation.message, 'retain')
+    if (durableMetric !== undefined && (evaluation.kind !== 'measured' || evaluation.metric !== durableMetric)) return blocked(request, 'state-ambiguous', 'candidate metric does not match its durable evaluator outcome', 'retain')
+    if (durableMetric === undefined && evaluation.kind !== 'failed') return blocked(request, 'state-ambiguous', 'terminal candidate failure does not match its durable evaluator outcome', 'retain')
   }
   if (!experiment.candidateCommit) return blocked(request, 'commit-missing', 'deciding candidate has no candidate commit', 'retain')
   const best = decodeBest(run)

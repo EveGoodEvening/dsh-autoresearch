@@ -118,13 +118,38 @@ function normalizedText(value: string, label: string): string {
   return value
 }
 
+function assertTransparentJson(value: unknown, label = 'report'): void {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value))) return
+  if (Array.isArray(value)) {
+    const descriptors = Object.getOwnPropertyDescriptors(value)
+    for (let index = 0; index < value.length; index += 1) {
+      const descriptor = descriptors[String(index)]
+      if (!descriptor || !descriptor.enumerable || !('value' in descriptor)) throw fail('report-malformed', `${label} contains hidden or computed array input`)
+      assertTransparentJson(descriptor.value, `${label}[${index}]`)
+    }
+    if (Reflect.ownKeys(value).some(key => key !== 'length' && !(typeof key === 'string' && /^(0|[1-9][0-9]*)$/u.test(key)))) throw fail('report-malformed', `${label} contains hidden array properties`)
+    return
+  }
+  if (typeof value !== 'object' || (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null)) throw fail('report-malformed', `${label} must contain only plain JSON values`)
+  for (const key of Reflect.ownKeys(value)) {
+    if (typeof key !== 'string') throw fail('report-malformed', `${label} contains hidden symbol input`)
+    const descriptor = Object.getOwnPropertyDescriptor(value, key)!
+    if (!descriptor.enumerable || !('value' in descriptor)) throw fail('report-malformed', `${label}.${key} contains hidden or computed input`)
+    assertTransparentJson(descriptor.value, `${label}.${key}`)
+  }
+}
+
 function decodeReport(value: unknown, request: ProposalAgentRequest, nonce: string, maxChars: number): WireReport {
+  assertTransparentJson(value)
   let serialized: string
   try { serialized = JSON.stringify(value) } catch (error) { throw fail('report-malformed', 'Proposal report must be JSON serializable', error) }
+  if (serialized === undefined) throw fail('report-malformed', 'Proposal report must be a JSON object')
   if (serialized.length > maxChars) throw fail('report-too-large', `Proposal report exceeds ${maxChars} serialized characters`)
-  const violations = validateJsonSchemaValue(REPORT_SCHEMA, value, '')
+  let canonical: unknown
+  try { canonical = JSON.parse(serialized) } catch (error) { throw fail('report-malformed', 'Proposal report must have one stable JSON representation', error) }
+  const violations = validateJsonSchemaValue(REPORT_SCHEMA, canonical, '')
   if (violations.length > 0) throw fail('report-malformed', `Malformed proposal report: ${violations.join('; ')}`)
-  const report = value as WireReport
+  const report = canonical as WireReport
   if (report.nonce !== nonce || report.runId !== request.runId) throw fail('report-stale', 'Proposal report does not belong to this run and nonce')
   if (report.experimentId !== request.experimentId || report.ordinal !== request.ordinal) throw fail('report-wrong-experiment', 'Proposal report does not belong to this experiment ordinal')
   normalizedText(report.hypothesis, 'hypothesis')
