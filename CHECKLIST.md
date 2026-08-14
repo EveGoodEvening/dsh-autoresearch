@@ -705,30 +705,30 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 ## Real Harness composition
 
 - [x] Replace the fixed-report workflow integration test and replace/remove the four workflow-based unit tests in `tests/autoresearch.spec.ts`; the obsolete workflow integration file is absent and the remaining unit coverage targets production wiring and input validation.
-- [x] Compose real Loader/app agent stack in process through Cordis plugin fibers.
-- [x] Include tools registry.
-- [x] Include system-prompt registry.
-- [x] Include jobs registry and generic jobs tools.
-- [x] Include subprocess provider.
-- [x] Include core Agent registry/runtime capable of `ctx.agents.create` and child-scoped setup.
-- [ ] Mock only model proposal content.
-- [x] Observe tool registration through real composition.
+- [x] Compose the real Loader/app agent stack in process through profile loading, overlay composition, Cordis plugin fibers, and `boot()`.
+- [x] Include the real tools registry.
+- [x] Include the real system-prompt registry.
+- [x] Include the real jobs registry and generic jobs tools.
+- [x] Include the real local subprocess provider.
+- [x] Include the real core Agent registry/runtime capable of `ctx.agents.create`, parent ownership, child-scoped setup, and child disposal.
+- [x] Mock only model proposal content; Loader, profile composition, ToolRuntime, Agent creation/setup/disposal, evaluator subprocess, jobs, Git, and filesystem boundaries remain production paths.
+- [x] Observe `autoresearch` tool registration through real composition and execute it through ToolRuntime with the initiating `agent`.
 - [x] Observe prompt guidance through real composition.
-- [ ] Exercise host filesystem/Git validation.
-- [x] Exercise real evaluator fixture through the local subprocess provider.
-- [x] Exercise background publication/collection/cancellation through the actual local jobs registry and generic list/output/kill tools.
-- [ ] Verify persisted transcript/tool/job lifecycle.
-- [x] Verify HMR removal through real composition by disposing the plugin fiber and observing tool and prompt removal.
+- [x] Exercise host filesystem/Git validation against a temporary real Git repository and verify the caller checkout remains clean on `main` under concurrent controllers.
+- [x] Exercise the evaluator fixture through the real local subprocess provider.
+- [x] Exercise background publication, owner-scoped collection, foreign-session rejection, completion, and cancellation through the actual local jobs registry and generic list/output/kill tools.
+- [x] Verify the real parent session owns the job, the child session records its parent and run worktree, production Agent setup is used, and the child Agent is removed after settlement.
+- [x] Verify plugin disposal/HMR removes tool and prompt registrations, cancellation settles the published job as killed before unload completes, active child Agents are disposed, and reapply creates no duplicate registrations.
 
 ## Bundle/profile and failure composition
 
-- [x] Parse `cordis.patch.yml` through Harness schema.
-- [x] Verify stable id/module/config.
-- [ ] Boot keyless assembled profile snapshot.
-- [ ] Verify missing `dsh-tool-jobs` fails clearly.
-- [x] Verify missing subprocess provider fails clearly.
-- [x] Verify missing/incompatible Agent registry/runtime or child setup capability fails clearly.
-- [x] Verify no missing-service path hangs; missing and incompatible required services fail synchronously.
+- [x] Parse the shipped `cordis.patch.yml` through the real Harness profile/overlay loader and entry composer.
+- [x] Verify the stable `autoresearch` id, `dsh-autoresearch` module name, configured defaults, and profile layer.
+- [x] Boot the shipped base profile keylessly, prove autoresearch is absent without its bundle, and boot the assembled opt-in profile with the installed autoresearch layer and test model provider.
+- [x] Verify missing `dsh-tool-jobs` fails clearly even when the jobs registry is present.
+- [x] Verify missing tools, system-prompt, jobs, subprocess, or Agent providers fail clearly.
+- [x] Verify required profile providers include Agent, jobs, subprocess, system-prompt, tools, and tool-jobs, and the installed test model provider is visible through the real LLM registry.
+- [x] Verify no tested missing-service path hangs; every omitted required service fails synchronously.
 
 ## Recovery/concurrency integration
 
@@ -736,42 +736,45 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 - [ ] Test deliberate interruption during candidate evaluation where entire prior evaluator process-tree quiescence is proven and safe rerun occurs once.
 - [x] Test restart without proof that every prior evaluator descendant is quiescent blocks without PID signalling or duplicate execution, including the parent-dead/descendant-uncertain case.
 - [ ] Test deliberate interruption during decision.
-- [ ] Test safely reconcilable resume completes without duplicate candidate.
-- [x] Test same repository/run-tag active exclusion.
-- [x] Test later same-tag reuse with retained prior run-id-bearing worktree.
-- [x] Test two independent run tags concurrently.
+- [x] Test restart after durable allocation through the public controller: resume by run id preserves the same run/tracker/branch/worktree identity and completes with exactly one baseline experiment and one evaluator attempt.
+- [x] Test same repository/run-tag active exclusion through the shared SQLite authority.
+- [x] Test repository active-capacity exclusion through that same shared SQLite authority.
+- [x] Test later same-tag reuse after terminal cancellation releases the active lock, with a new immutable run id while prior run-id-bearing state remains distinct.
+- [x] Test two independent run tags concurrently through separate controller instances sharing one repository tracker.
 - [x] Verify separate immutable run-id-bearing worktrees/branches.
 - [x] Verify no caller HEAD/index/ledger interference.
 - [ ] Verify serialized promotion/tracker updates.
-- [ ] Test plugin/HMR disposal with active child/evaluator and mandatory Agent handle disposal plus whole-process-tree quiescence.
+- [x] Test production cancellation plus plugin/HMR disposal with an active run: generic kill settles the job, unload waits for controller/evaluator quiescence, and the child Agent handle is disposed before completion.
 
 ## Chunk 08 verification gate
 
-- [x] Observe actual Loader exposes `autoresearch` tool.
+- [x] Observe actual Loader exposes `autoresearch` and the generic job controls.
 - [x] Observe actual Loader contributes guidance.
-- [ ] Observe temporary repository tracker/Git/evaluator/job facts end to end.
+- [x] Observe production `autoresearch` execution facts end to end across ToolRuntime initiating-Agent ownership, child Agent setup, real Git worktree identity, local subprocess evaluation, durable background job publication/output, and terminal child cleanup; direct tracker-row inspection remains covered by the restart integration test rather than claimed here.
 - [x] Observe concurrent run isolation through independent active run tags and immutable run-id-bearing Git identities.
-- [x] Observe same-tag collision block.
-- [ ] Observe interrupted run resumes successfully.
+- [x] Observe same-tag collision and repository-capacity blocks from one shared tracker authority.
+- [x] Observe controller restart after allocation resumes successfully by run id without duplicating the baseline experiment or evaluator attempt.
 - [ ] Run focused per-file coverage expected by project policy.
 
-- [x] Record post-implementation gates: frozen install passed; typecheck passed; Vitest passed 9 files / 252 tests; build passed; pack passed.
+- [x] Record final post-`896d440aeeb50697b8159724779ddb1b30115f81` gates: `pnpm install --frozen-lockfile` passed; `pnpm run typecheck` passed; Vitest passed 10 files / 255 tests; `pnpm run build` passed; `pnpm pack` passed.
 
 ## Chunk 08 review gate
 
-- [ ] Review tests assert observable contracts rather than source/plumbing.
-- [ ] Review only model proposal content is mocked.
-- [ ] Review fixtures use real Git/subprocess/SQLite boundaries.
-- [ ] Review all terminal and recovery paths clean resources deterministically.
+- [ ] Complete the independent final review that tests assert observable contracts rather than source/plumbing.
+- [ ] Complete the independent final review that only model proposal content is mocked.
+- [ ] Complete the independent final review that fixtures use real Git/subprocess/SQLite boundaries.
+- [ ] Complete the independent final review that all terminal and recovery paths clean resources deterministically.
+- [ ] Close Chunk 08 after the independent final review and accounting are complete.
 
 ## Chunk 08 implementation commit gate
 
-- [x] Commit real DSH composition/recovery/concurrency tests and required defect fixes as `3b5b819bb66ca3cc34fe561c84b8bdec324d9eb6` (`test(integration): add real dsh composition coverage`).
+- [x] Record earlier real DSH composition/recovery/concurrency implementation commit `3b5b819bb66ca3cc34fe561c84b8bdec324d9eb6` (`test(integration): add real dsh composition coverage`).
+- [x] Record final Loader/composition/restart implementation and test commit `896d440aeeb50697b8159724779ddb1b30115f81` (`test(integration): complete loader and restart coverage`).
 
 ## Chunk 08 tracker-accounting gate
 
-- [x] Record Chunk 08 implementation commit full SHA: `3b5b819bb66ca3cc34fe561c84b8bdec324d9eb6`.
-- [ ] Commit the checklist update separately from the Chunk 08 implementation commit.
+- [x] Record separate earlier Chunk 08 checklist-accounting commit `87735c734264d20ccf74db0296619b9cfb48ae29` (`docs: record real composition verification`) as complete and separate from implementation commits.
+- [ ] Commit this final post-`896d440aeeb50697b8159724779ddb1b30115f81` checklist update separately as a new accounting-only commit.
 
 # Chunk 09 — `09-complete-docs-and-release-gate`
 
