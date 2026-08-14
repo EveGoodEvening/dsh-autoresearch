@@ -4,8 +4,8 @@
 
 - `[x]` means verified in the current worktree or completed research/planning evidence.
 - `[ ]` means not present or not verified in the current worktree.
-- Archived implementation activity is historical evidence only. The current branch has no implementation commit and no recovered source files, so no implementation item is checked merely because the archived session once created or tested it.
-- **Before the planning-only commit, the orchestrator must create and record durable direct refs under `refs/recovery/autoresearch/*` for all 12 authoritative blobs, verify every ref resolves to the exact expected hash and object type `blob`, and set repository-local `gc.auto=0` only as defense in depth. Commit `PLAN.md` and `CHECKLIST.md` next. Current recovery chunk: `01-recover-authoritative-snapshot`.** Chunk 01 re-verifies the recorded refs/hashes/types, then commits exactly the 12 recovered blobs separately; post-commit SHA/provenance is recorded in a separate tracker-accounting commit. Do not begin Chunk 02 until both commits land.
+- Archived implementation activity was historical evidence only until the authoritative snapshot was recovered. Chunk 01 is now closed by implementation commit `3ca85a17c03d15488269b3dbc339e3ec135d98c3`, tracker-accounting commit `4095697a6b7256937f535d739ca09678b47e333d`, review-fix commit `6524bdf`, and a clean independent correctness/accounting/security re-review after `6524bdf` with zero findings.
+- **Current dependency-ready chunk: `02-fix-publishability-and-package-contract`.** Do not begin a later chunk until Chunk 02's implementation and separate tracker-accounting commits land.
 
 ## Established research and planning state
 
@@ -20,7 +20,7 @@
 - [x] Recover the 12 implementation files into the current worktree.
 - [x] Create the exact 12-path recovery implementation commit `3ca85a17c03d15488269b3dbc339e3ec135d98c3` (`feat: recover autoresearch plugin snapshot`).
 
-# Chunk 01 — `01-recover-authoritative-snapshot` (CURRENT)
+# Chunk 01 — `01-recover-authoritative-snapshot` (CLOSED)
 
 ## Recovery prerequisites
 
@@ -94,7 +94,13 @@
 - [x] Confirm the recovery implementation commit contains exactly the 12 authoritative blobs and no Chunk 02 or accounting work.
 - [x] Commit that checklist/provenance update as separate tracker-accounting commit `4095697a6b7256937f535d739ca09678b47e333d` (`docs: record recovered snapshot verification`).
 
-# Chunk 02 — `02-fix-publishability-and-package-contract`
+## Recovery review closure
+
+- [x] Record review-fix commit `6524bdf` applied after the recovery implementation and tracker-accounting commits.
+- [x] Complete an independent correctness, accounting, and security re-review after `6524bdf`; the re-review returned clean with zero findings.
+- [x] Close Chunk 01 with implementation blob commit `3ca85a17c03d15488269b3dbc339e3ec135d98c3`, tracker-accounting commit `4095697a6b7256937f535d739ca09678b47e333d`, and review-fix commit `6524bdf` recorded.
+
+# Chunk 02 — `02-fix-publishability-and-package-contract` (CURRENT — NEXT DEPENDENCY-READY)
 
 ## Package/dependency work
 
