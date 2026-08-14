@@ -5,7 +5,7 @@
 - `[x]` means verified in the current worktree or completed research/planning evidence.
 - `[ ]` means not present or not verified in the current worktree.
 - Archived implementation activity was historical evidence only until the authoritative snapshot was recovered. Chunk 01 is now closed by implementation commit `3ca85a17c03d15488269b3dbc339e3ec135d98c3`, tracker-accounting commit `4095697a6b7256937f535d739ca09678b47e333d`, review-fix commit `6524bdf`, and a clean independent correctness/accounting/security re-review after `6524bdf` with zero findings.
-- **Current dependency-ready chunk: `02-fix-publishability-and-package-contract`.** Do not begin a later chunk until Chunk 02's implementation and separate tracker-accounting commits land.
+- **Current dependency-ready chunk: `02-fix-publishability-and-package-contract`.** Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` has landed; keep Chunk 02 current until its separate tracker-accounting commit and review gates close it. Do not begin a later chunk.
 
 ## Established research and planning state
 
@@ -100,49 +100,49 @@
 - [x] Complete an independent correctness, accounting, and security re-review after `6524bdf`; the re-review returned clean with zero findings.
 - [x] Close Chunk 01 with implementation blob commit `3ca85a17c03d15488269b3dbc339e3ec135d98c3`, tracker-accounting commit `4095697a6b7256937f535d739ca09678b47e333d`, and review-fix commit `6524bdf` recorded.
 
-# Chunk 02 — `02-fix-publishability-and-package-contract` (CURRENT — NEXT DEPENDENCY-READY)
+# Chunk 02 — `02-fix-publishability-and-package-contract` (CURRENT — IMPLEMENTED, ACCOUNTING/REVIEW OPEN)
 
 ## Package/dependency work
 
-- [ ] Review public `@deepseek-ai/schemastery` compatibility beginning at `^3.18.1`.
-- [ ] Replace the runtime repository-local Schemastery `link:` with the reviewed public range.
-- [ ] Regenerate `pnpm-lock.yaml` from registry metadata.
-- [ ] Add `@deepseek-ai/dsh-subprocess` as peer dependency.
-- [ ] Add/mirror `@deepseek-ai/dsh-subprocess` as development dependency for source development.
-- [ ] Add `@deepseek-ai/dsh-tool-jobs` as a peer dependency.
-- [ ] Add/mirror `@deepseek-ai/dsh-tool-jobs` as a development dependency for source development.
-- [ ] Confirm the public core Agent registry/runtime dependency identity that provides `ctx.agents.create`; do not add a subagent provider dependency or unpublished source import.
-- [ ] Verify Cordis and DSH service identities remain peer dependencies rather than bundled private copies.
-- [ ] Retain Node engine `^22.19.0 || >=24.0.0` unless API verification proves a necessary change.
+- [x] Confirm registry compatibility for public `@deepseek-ai/schemastery` beginning at `^3.18.1`; the frozen registry-backed install resolved `3.18.1`.
+- [x] Replace the runtime repository-local Schemastery `link:` with the public `^3.18.1` range.
+- [x] Regenerate `pnpm-lock.yaml` from registry metadata.
+- [x] Add `@deepseek-ai/dsh-subprocess` as peer dependency.
+- [x] Add/mirror `@deepseek-ai/dsh-subprocess` as development dependency for source development.
+- [x] Add `@deepseek-ai/dsh-tool-jobs` as a peer dependency.
+- [x] Add/mirror `@deepseek-ai/dsh-tool-jobs` as a development dependency for source development.
+- [x] Confirm the public core Agent registry/runtime dependency identity that provides `ctx.agents.create` and add publishable `@deepseek-ai/dsh-agent` peer/development ranges; no unpublished source import was added.
+- [x] Keep Cordis and DSH service identities as publishable peer dependencies mirrored for development rather than bundled private copies. The current-runtime workflow/subagent dependencies remain temporarily as publishable peer/development dependencies to keep the intermediate tree green and are removed at the controller cutover.
+- [x] Retain Node engine `^22.19.0 || >=24.0.0`.
 
 ## Publication contract
 
-- [ ] Add/review repository metadata.
-- [ ] Add/review homepage metadata.
-- [ ] Add/review bugs metadata.
-- [ ] Add/review keywords.
-- [ ] Add/review `publishConfig`.
-- [ ] Retain license metadata and include `LICENSE`.
-- [ ] Add `src/invariant.ts` or the project-conventional invariant source required for `./invariant`.
-- [ ] Export built package root from `lib`.
-- [ ] Export `./invariant` from built `lib`.
-- [ ] Export `./package.json`.
-- [ ] Include `cordis.patch.yml`, README, LICENSE, and required built files in explicit `files` allowlist.
-- [ ] Retain `"dsh":{"bundle":{"patch":"./cordis.patch.yml"}}`.
-- [ ] Ensure scripts are tarball-safe and do not assume Harness source checkout.
-- [ ] Ensure packed/install-time behavior does not depend on unapproved build scripts.
+- [x] Add/review repository metadata.
+- [x] Add/review homepage metadata.
+- [x] Add/review bugs metadata.
+- [x] Add/review keywords.
+- [x] Add/review `publishConfig`.
+- [x] Retain license metadata and include `LICENSE`.
+- [x] Add `src/invariant.ts` as the package-owned invariant companion source required for `./invariant`.
+- [x] Export built package root from `lib`.
+- [x] Export `./invariant` from built `lib`.
+- [x] Export `./package.json`.
+- [x] Include `cordis.patch.yml`, README, LICENSE, and required built files in the explicit `files` allowlist.
+- [x] Retain `"dsh":{"bundle":{"patch":"./cordis.patch.yml"}}`.
+- [x] Ensure scripts are tarball-safe and do not assume a Harness source checkout; remove the pack/install-time `prepare` build.
+- [x] Ensure packed/install-time behavior does not depend on unapproved build scripts; fresh external tarball installation succeeded without a Harness checkout.
 
 ## Chunk 02 verification gate
 
-- [ ] Perform a clean registry-backed install.
-- [ ] Build package outputs needed for packing.
-- [ ] Run actual package pack.
-- [ ] Inspect packed `package.json` for zero runtime `link:` values.
-- [ ] Inspect packed `package.json` for zero runtime `workspace:` values.
-- [ ] Inspect tarball contents for root export, `./invariant`, patch, README, LICENSE, and package metadata.
-- [ ] Install tarball into a separate consumer fixture with no Harness source checkout.
-- [ ] Import package root in the consumer fixture.
-- [ ] Import `./invariant` in the consumer fixture.
+- [x] Perform a clean frozen registry-backed install; it succeeded with a registry-resolvable lock.
+- [x] Build package outputs needed for packing; typecheck passed, 2 files / 5 tests passed, and the standalone build passed.
+- [x] Run actual package pack; `pnpm pack` produced `dsh-autoresearch-0.1.0.tgz`.
+- [x] Inspect the packed package contract for zero runtime `link:` values.
+- [x] Inspect the packed package contract for zero runtime `workspace:` values.
+- [x] Inspect tarball contents for the built `./invariant` declaration, declaration map, JavaScript, and source map; the packed contract also retains the root/package exports and explicit patch, README, and LICENSE allowlist.
+- [x] Install the tarball into a fresh external temporary consumer with no Harness source checkout; `pnpm add dsh-autoresearch-0.1.0.tgz` succeeded and resolved registry packages including `@deepseek-ai/schemastery@3.18.1` and DSH `0.1.0-rc.6` packages.
+- [x] Import package root in the fresh external consumer fixture; Node ESM imported `dsh-autoresearch` successfully and printed `imports-ok`.
+- [x] Import `./invariant` in the fresh external consumer fixture; Node ESM imported `dsh-autoresearch/invariant` successfully and printed `imports-ok`.
 
 ## Chunk 02 review gate
 
@@ -154,11 +154,11 @@
 ## Chunk 02 implementation commit gate
 
 - [ ] Confirm every Chunk 02 required pre-commit item is complete.
-- [ ] Commit publishability/package contract separately from recovery and redesign.
+- [x] Commit publishability/package contract separately from recovery and redesign as `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` (`fix(package): make autoresearch plugin publishable`).
 
 ## Chunk 02 tracker-accounting gate
 
-- [ ] Record Chunk 02 implementation commit full SHA after it exists.
+- [x] Record Chunk 02 implementation commit full SHA after it exists: `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4`.
 - [ ] Commit the checklist update separately from the Chunk 02 implementation commit.
 
 # Chunk 03 — `03-define-discriminated-contract-and-config`
