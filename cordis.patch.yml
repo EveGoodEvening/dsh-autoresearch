@@ -2,9 +2,22 @@
     - id: autoresearch
       name: dsh-autoresearch
       config:
-        subagentProvider: spawn
+        gitExecutable: git
+        stateRoot: dsh-autoresearch
+        branchPrefix: autoresearch/
+        defaultMaxExperiments: 20
         maxExperiments: 100
         maxHandoffChars: 16384
         maxResultChars: 16384
-        resultsFile: autoresearch-results.tsv
-        branchPrefix: autoresearch/
+        maxStdoutBytes: 1048576
+        maxStderrBytes: 1048576
+        defaultTimeoutMs: 900000
+        maxTimeoutMs: 3600000
+        terminationGraceMs: 5000
+        maxActiveRunsPerRepository: 1
+        artifactRetentionDays: 30
+        retainFailedArtifacts: true
+        retainWorktrees: true
+        cleanupWorktreesOnSuccess: false
+        exportTsv: true
+        tsvRetentionDays: 30

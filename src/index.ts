@@ -1,5 +1,11 @@
 import type { Context } from '@deepseek-ai/cordis'
-import z from '@deepseek-ai/schemastery'
+import { Config, resolveConfig as resolveDeploymentConfig } from './config.js'
+import type { Config as AutoresearchConfig } from './config.js'
+export { Config, DEFAULT_CONFIG, normalizeRunPolicy } from './config.js'
+export { boundText, renderExperimentResult, renderRunResult, renderToolResult } from './render.js'
+export { AUTORESEARCH_TOOL_OUTPUT_SCHEMA, AUTORESEARCH_TOOL_PARAMETERS, decodeExperimentResult, decodeRunResult, isTargetReached } from './types.js'
+export type * from './types.js'
+export type { Config as AutoresearchConfig, ResolvedConfig as AutoresearchResolvedConfig } from './config.js'
 import type { JobOutcome } from '@deepseek-ai/dsh-jobs'
 import type { SubagentProvider } from '@deepseek-ai/dsh-subagent'
 import type {} from '@deepseek-ai/dsh-system-prompt'
@@ -16,31 +22,6 @@ declare module '@deepseek-ai/dsh-jobs' {
 export const name = 'autoresearch'
 export const inject = ['jobs', 'subagents', 'systemPrompt', 'tools', 'workflowEngine']
 
-/** Deployment policy for autonomous research runs. */
-export interface Config {
-  /** Fresh structured-output provider used for every experiment. */
-  subagentProvider?: string
-  /** Default and deployment ceiling for one run's experiment count. */
-  maxExperiments?: number
-  /** Maximum serialized characters in one experiment report. */
-  maxHandoffChars?: number
-  /** Maximum characters in a terminal model-facing result. */
-  maxResultChars?: number
-  /** Untracked TSV path used as the durable experiment ledger. */
-  resultsFile?: string
-  /** Prefix used for fresh research branches. */
-  branchPrefix?: string
-}
-
-/** Schemastery configuration for the autoresearch plugin. */
-export const Config: z<Config> = z.object({
-  subagentProvider: z.string().default('spawn'),
-  maxExperiments: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(100),
-  maxHandoffChars: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(16_384),
-  maxResultChars: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(16_384),
-  resultsFile: z.string().default('autoresearch-results.tsv'),
-  branchPrefix: z.string().default('autoresearch/'),
-})
 
 interface ResolvedConfig {
   readonly subagentProvider: string
@@ -329,17 +310,16 @@ function relativeResearchPath(value: unknown, label: string): string {
   return path
 }
 
-function resolveConfig(config: Config): ResolvedConfig {
-  const subagentProvider = normalizedText(config.subagentProvider ?? 'spawn', 'subagentProvider')
-  const maxExperiments = positiveSafeInteger(config.maxExperiments ?? 100, 'maxExperiments')
-  const maxHandoffChars = positiveSafeInteger(config.maxHandoffChars ?? 16_384, 'maxHandoffChars')
-  const maxResultChars = positiveSafeInteger(config.maxResultChars ?? 16_384, 'maxResultChars')
-  const resultsFile = relativeResearchPath(config.resultsFile ?? 'autoresearch-results.tsv', 'resultsFile')
-  const branchPrefix = normalizedText(config.branchPrefix ?? 'autoresearch/', 'branchPrefix')
-  if (!branchPrefix.endsWith('/') || /[\s~^:?*[\\\r\n]/u.test(branchPrefix) || branchPrefix.includes('..')) {
-    throw new TypeError('branchPrefix must be a normalized Git branch prefix ending in /')
+function resolveConfig(config: AutoresearchConfig): ResolvedConfig {
+  const deployment = resolveDeploymentConfig(config)
+  return {
+    subagentProvider: normalizedText(config.subagentProvider ?? 'spawn', 'subagentProvider'),
+    maxExperiments: deployment.maxExperiments,
+    maxHandoffChars: deployment.maxHandoffChars,
+    maxResultChars: deployment.maxResultChars,
+    resultsFile: relativeResearchPath(config.resultsFile ?? 'autoresearch-results.tsv', 'resultsFile'),
+    branchPrefix: deployment.branchPrefix,
   }
-  return { subagentProvider, maxExperiments, maxHandoffChars, maxResultChars, resultsFile, branchPrefix }
 }
 
 function requireFreshProvider(ctx: Context, providerName: string): SubagentProvider {
@@ -606,7 +586,7 @@ function presentCall(args: ToolArgs): ToolCallView {
 
 
 /** Register the autoresearch tool, background producer, and model policy. */
-export function apply(ctx: Context, config: Config): void {
+export function apply(ctx: Context, config: AutoresearchConfig): void {
   const resolved = resolveConfig(config)
   ctx.systemPrompt.section({ name: 'tool:autoresearch', order: 116.25, text: GUIDANCE })
   ctx.tools.register(defineTool({
