@@ -5,7 +5,7 @@
 - `[x]` means verified in the current worktree or completed research/planning evidence.
 - `[ ]` means not present or not verified in the current worktree.
 - Archived implementation activity was historical evidence only until the authoritative snapshot was recovered. Chunk 01 is now closed by implementation commit `3ca85a17c03d15488269b3dbc339e3ec135d98c3`, tracker-accounting commit `4095697a6b7256937f535d739ca09678b47e333d`, review-fix commit `6524bdf`, and a clean independent correctness/accounting/security re-review after `6524bdf` with zero findings.
-- **Current dependency-ready chunk: `09-complete-docs-and-release-gate`.** Chunk 02 is closed by implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4`, tracker-accounting commit `fa4bf06ef24b590a81f883037b940f18d97c5cfc`, review-fix commit `7671499`, focused clean-generated-state verification, and clean independent package/accounting re-reviews. Chunk 03 is closed by implementation commits `9b18630` and `e22d99a`, tracker-accounting commit `99babc5dc3432be7c078fd6e792c97164ebfb19b`, review-fix commit `5e990acb1df3bcf8b7e2612c91f38443d364d2db`, passing post-fix frozen-install/typecheck/3-file-54-test/build/pack gates, and a clean independent correctness/security/accounting re-review. Chunk 04 is closed by implementation commit `cfc2e45366961c10b97b6fab63ffea9abfb3b5dd`, tracker-accounting commit `a1fca4c61fbf241b716a8e423a12788d16e3c71d`, review-fix commits `c9ba821923cd233c8c3112a7b3cdd2b8d311ec36`, `5ada9cd`, and `e7fb2e6`, passing final typecheck/4-file-79-test/build gates, completed correctness/security/concurrency/accounting reviews, a frozen tracker API, and a clean final re-review. Chunk 05 is closed by its recorded implementation/review-fix commits, final clean Git/evaluator/security/tracker-concurrency reviews, and final tracker/accounting commit `89f50fba279e8c2156394763f1357bd9377996b7`. Chunk 06 is closed through final fix `e613e549e0fb4f40f0921ecd585c25d2dd6a9a03`, passing final typecheck/9-file-229-test/build gates, clean independent controller/recovery/security/accounting reviews, post-`3e9e44c57c94ad9fcbff411d0cec485a580e9832` accounting commit `bc09f43278c2ecc41acde60d3b2cd204d5eff466`, and zero unresolved Chunk 06 findings. Chunk 07 is closed by production cutover commit `952267ba41689cf21c63092e37cb61c34ccd5e61`, lifecycle hardening commit `8b17077feaf3f9458120d1b2acf4ec6978000733`, durable startup completion commit `7a66971a5f01e8b0fd50abe807b6e9bc7037690e`, accounting commit `19edce27785f016a02614fe9b3d447343d1ecac7`, passing final verification, and a clean final independent implementation/security/accounting review. Chunk 08 is closed by its recorded implementation/test commits through `a591dca237580e4cf3e5cbfc550a36334ddc643b`, accounting commit `ff3a136c8f270d781d2a3ce8722ee1e641234139`, passing final verification, and clean definitive implementation and accounting reviews with zero findings. Chunk 09 is current and dependency-ready; all Chunk 09 documentation, release, review, implementation, and accounting items remain unchecked.
+- **Current phase: final split review and unchecked-item classification before release.** Chunk 02 is closed by implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4`, tracker-accounting commit `fa4bf06ef24b590a81f883037b940f18d97c5cfc`, review-fix commit `7671499`, focused clean-generated-state verification, and clean independent package/accounting re-reviews. Chunk 03 is closed by implementation commits `9b18630` and `e22d99a`, tracker-accounting commit `99babc5dc3432be7c078fd6e792c97164ebfb19b`, review-fix commit `5e990acb1df3bcf8b7e2612c91f38443d364d2db`, passing post-fix frozen-install/typecheck/3-file-54-test/build/pack gates, and a clean independent correctness/security/accounting re-review. Chunk 04 is closed by implementation commit `cfc2e45366961c10b97b6fab63ffea9abfb3b5dd`, tracker-accounting commit `a1fca4c61fbf241b716a8e423a12788d16e3c71d`, review-fix commits `c9ba821923cd233c8c3112a7b3cdd2b8d311ec36`, `5ada9cd`, and `e7fb2e6`, passing final typecheck/4-file-79-test/build gates, completed correctness/security/concurrency/accounting reviews, a frozen tracker API, and a clean final re-review. Chunk 05 is closed by its recorded implementation/review-fix commits, final clean Git/evaluator/security/tracker-concurrency reviews, and final tracker/accounting commit `89f50fba279e8c2156394763f1357bd9377996b7`. Chunk 06 is closed through final fix `e613e549e0fb4f40f0921ecd585c25d2dd6a9a03`, passing final typecheck/9-file-229-test/build gates, clean independent controller/recovery/security/accounting reviews, post-`3e9e44c57c94ad9fcbff411d0cec485a580e9832` accounting commit `bc09f43278c2ecc41acde60d3b2cd204d5eff466`, and zero unresolved Chunk 06 findings. Chunk 07 is closed by production cutover commit `952267ba41689cf21c63092e37cb61c34ccd5e61`, lifecycle hardening commit `8b17077feaf3f9458120d1b2acf4ec6978000733`, durable startup completion commit `7a66971a5f01e8b0fd50abe807b6e9bc7037690e`, accounting commit `19edce27785f016a02614fe9b3d447343d1ecac7`, passing final verification, and a clean final independent implementation/security/accounting review. Chunk 08 is closed by its recorded implementation/test commits through `a591dca237580e4cf3e5cbfc550a36334ddc643b`, accounting commit `ff3a136c8f270d781d2a3ce8722ee1e641234139`, passing final verification, and clean definitive implementation and accounting reviews with zero findings. Chunk 09 is closed by documentation/release implementation commit `b978619b89ce589f4a3eb95d9509d78e4f7f4309`, installed release-scenario commit `a8e2f7209d5764011dea001240e6bdfa327b4058`, clean-cutover fix commit `aee26142acfa4530c43d34d57705b0803fe5415f`, its recorded prior accounting commits, passing final release gates, and a clean independent documentation/security/package/clean-cutover review. The new Chunk 09 closure-accounting commit and all final split-review, classification, and release-accounting items remain unchecked.
 
 ## Established research and planning state
 
@@ -32,7 +32,7 @@
 - [x] Confirm no implementation source path already exists with conflicting content.
 - [x] Confirm only planning artifacts are present before materialization.
 - [x] Confirm planning-only commit `e7e896d8bebc51d4f2f9139d645c686d5a60bf2b` contains `PLAN.md` and `CHECKLIST.md` and no recovered implementation path.
-- [ ] If `git fsck --full` reports `missing tree 4b825dc642cb6eb9a060e54bf8d69288fbee4904` for this unborn repository, record it as the benign empty-tree warning rather than a missing recovery blob.
+- [~] If `git fsck --full` reports `missing tree 4b825dc642cb6eb9a060e54bf8d69288fbee4904` for this unborn repository, record it as the benign empty-tree warning rather than a missing recovery blob. — OBSOLETE: the repository is no longer unborn, and exact protected-ref/blob verification plus the completed recovery commit superseded this conditional warning path.
 - [x] Create `src/` and `tests/` directories only as required for recovered files.
 
 ## Materialize exact blobs
@@ -69,7 +69,7 @@
 - [x] Verify `src/index.ts` hashes to `3bb484965e3e80df22c644bd48478cdc3a6cc739`.
 - [x] Verify the recovered tracked/staged set for Chunk 01 is exactly the 12 expected paths; `PLAN.md` and `CHECKLIST.md` already belong to the separate planning-only commit and must not enter the recovery commit.
 - [x] Run the recovered frozen install once using the recovered source-tree link dependencies when their targets are available. `pnpm install --frozen-lockfile` succeeded using local Harness links and ran the package build.
-- [ ] If a recovered local-link target is unavailable, record the frozen-install failure as expected provenance and defer the registry-resolvable dependency repair to Chunk 02; do not modify the recovery snapshot.
+- [~] If a recovered local-link target is unavailable, record the frozen-install failure as expected provenance and defer the registry-resolvable dependency repair to Chunk 02; do not modify the recovery snapshot. — OBSOLETE: the recovered local-link targets were available, the frozen install succeeded, and Chunk 02 completed the registry-resolvable dependency repair.
 - [x] Run the recovered typecheck once when the recovered install succeeds. `pnpm run typecheck` passed.
 - [x] Run the recovered five-test suite (four unit tests plus one integration test) once when the recovered install succeeds. `pnpm run test` passed 2 files / 5 tests.
 - [x] Run the recovered build once when the recovered install succeeds. `pnpm run build` passed.
@@ -585,7 +585,7 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 - [x] Complete an independent controller review of intent/outcome ordering around side effects; clean with zero findings after final fix `e613e549e0fb4f40f0921ecd585c25d2dd6a9a03`.
 - [x] Complete an independent security review of acceptance/target logic and strict host authority; clean with zero findings after final fix `e613e549e0fb4f40f0921ecd585c25d2dd6a9a03`.
 - [x] Complete an independent recovery review for idempotence and evidence preservation; clean with zero findings after final fix `e613e549e0fb4f40f0921ecd585c25d2dd6a9a03`.
-- [ ] Chunk 07/09 clean-cutover dependency: review removal of obsolete workflow code, runtime dependencies, compatibility schema, comments, and shipped README/current composition guidance after Chunk 09 documentation migration.
+- [x] Chunk 07/09 clean-cutover dependency: review removal of obsolete workflow code, runtime dependencies, compatibility schema, comments, and shipped README/current composition guidance after Chunk 09 documentation migration; completed cleanly after `aee26142acfa4530c43d34d57705b0803fe5415f` with no obsolete authority path or alias remaining.
 
 ## Chunk 06 implementation commit gate
 
@@ -788,7 +788,7 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 - [x] Record post-`a591dca237580e4cf3e5cbfc550a36334ddc643b` accounting-only commit `ff3a136c8f270d781d2a3ce8722ee1e641234139` as complete and separate from implementation work; the definitive accounting review was clean with zero findings.
 - [x] Record Chunk 08 closure-accounting commit `454de4c5b31dd0dfdc8f81d9fd917b940e623126` (`docs: close real composition chunk`) as complete and separate from implementation and prior accounting commits.
 
-# Chunk 09 — `09-complete-docs-and-release-gate`
+# Chunk 09 — `09-complete-docs-and-release-gate` (CLOSED)
 
 ## Documentation
 
@@ -838,7 +838,7 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 - [x] Run `dsh --profile <name> --dump-config` and observe the `autoresearch` row/defaults.
 - [x] Load and apply the plugin from the installed profile artifact, not the source tree; post-`37660dd87544b0aba04cb9a98f45e039c2f95858` smoke evidence recorded `profileBoot.sourceTreeResolved=false`, tool registration `autoresearch`, and prompt registration `tool:autoresearch`. This corrects the earlier installed-profile overmark, which had proved installation/config dump but not actual installed-module `apply()`.
 - [x] Execute temporary-repository smoke run through the installed profile; structured scenario evidence reported every required item `840` and `845`–`857` with `ok:true`.
-- [x] Record final post-`37660dd87544b0aba04cb9a98f45e039c2f95858` release-fix gates: `pnpm install --frozen-lockfile` passed; `pnpm run typecheck` passed; Vitest passed 11 files with 1 skipped / 276 tests with 5 skipped; `pnpm run test:coverage` passed the focused per-file thresholds (`agent.ts` S86/B78/F85/L95, `controller.ts` S83/B65/F91/L92, `git.ts` S88/B76/F96/L97, `index.ts` S84/B75/F62/L93, `recovery.ts` S79/B71/F91/L91); `pnpm run build` passed; clean `pnpm pack` rebuilt through `prepack` and produced `dsh-autoresearch-0.1.0.tgz` with exactly 56 allowlisted entries; `pnpm run release:smoke -- ./dsh-autoresearch-0.1.0.tgz` emitted structured JSON success with `ok:true`, the tarball/profile identity, 56 package files, installed-profile `apply()` evidence, and passing scenario evidence for items `840` and `845`–`857`. The isolated smoke did not modify an inherited external `DSH_HOME`; the clean packed manifest contained no runtime/self `link:`, `file:`, or `workspace:` references or source-tree paths; a separate consumer typechecked root and `./invariant` imports with the complete declaration graph resolving and no source-only `.ts` declaration specifiers.
+- [x] Record final post-`aee26142acfa4530c43d34d57705b0803fe5415f` release gates: `pnpm install --frozen-lockfile` passed; `pnpm run typecheck` passed; Vitest passed 11 files with 1 skipped / 278 tests with 5 skipped; `pnpm run test:coverage` passed the focused per-file thresholds (`agent.ts` S86/B78/F85/L95, `controller.ts` S83/B65/F91/L92, `git.ts` S88/B76/F96/L97, `index.ts` S84/B75/F62/L93, `recovery.ts` S79/B71/F91/L91); `pnpm run build` passed; clean `pnpm pack` rebuilt through `prepack` and produced `dsh-autoresearch-0.1.0.tgz` with exactly 56 allowlisted entries; `pnpm run release:smoke -- ./dsh-autoresearch-0.1.0.tgz` emitted structured JSON success with `ok:true`, the tarball/profile identity, 56 package files, installed-profile `apply()` evidence, and passing scenario evidence for items `840` and `845`–`857`. The isolated smoke did not modify an inherited external `DSH_HOME`; the clean packed manifest contained no runtime/self `link:`, `file:`, or `workspace:` references or source-tree paths; a separate consumer typechecked root and `./invariant` imports with the complete declaration graph resolving and no source-only `.ts` declaration specifiers.
 
 ## Final smoke observations
 
@@ -858,22 +858,25 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 
 ## Chunk 09 review gate
 
-- [ ] Review documentation examples against actual schemas/defaults.
-- [ ] Review security/recovery statements against verified behavior.
-- [ ] Review packed artifact independently of source tree.
-- [ ] Review no implementation/reference still describes workflowEngine as authority.
-- [ ] Review no obsolete aliases/shims/dependencies/comments remain.
+- [x] Review documentation examples against actual schemas/defaults; clean with zero findings.
+- [x] Review security/recovery statements against verified behavior; clean with zero findings.
+- [x] Review packed artifact independently of source tree; clean with zero findings.
+- [x] Review no implementation/reference still describes workflowEngine as authority; clean after `aee26142acfa4530c43d34d57705b0803fe5415f`.
+- [x] Review no obsolete aliases/shims/dependencies/comments remain; clean after `aee26142acfa4530c43d34d57705b0803fe5415f`.
 
 ## Chunk 09 implementation commit gate
 
 - [x] Commit documentation, metadata finalization, and release fixtures in `b978619b89ce589f4a3eb95d9509d78e4f7f4309` (`docs(release): complete autoresearch release guidance`).
+- [x] Record installed release-scenario commit `a8e2f7209d5764011dea001240e6bdfa327b4058` (`docs: record installed release scenarios`).
+- [x] Record clean-cutover fix commit `aee26142acfa4530c43d34d57705b0803fe5415f` (`fix(config): remove legacy workflow aliases`).
 
 ## Chunk 09 tracker-accounting gate
 
 - [x] Record Chunk 09 implementation commit `b978619b89ce589f4a3eb95d9509d78e4f7f4309`.
 - [x] Confirm Chunk 09 implementation plus all Chunk 01–08 implementation commits and their separate tracker-accounting commits are reviewable; the not-yet-created Chunk 09 accounting commit is not required to confirm itself.
 - [x] Record Chunk 09 checklist-accounting commit `5615c97554820dbd20c64b6abed8374958bc87da` (`docs: record release candidate verification`) as complete and separate from implementation and release-fix commit `37660dd87544b0aba04cb9a98f45e039c2f95858`.
-- [ ] Complete final independent Chunk 09 review and closure, then record this new post-release-fix accounting update in a separate commit.
+- [x] Complete final independent Chunk 09 documentation, security/recovery, packed-artifact, authority-cutover, and obsolete-surface reviews; the final review was clean with zero findings, and Chunk 09 is closed.
+- [ ] Record this new post-`a8e2f7209d5764011dea001240e6bdfa327b4058`/`aee26142acfa4530c43d34d57705b0803fe5415f` closure-accounting update in a separate commit.
 
 # Final split review
 
