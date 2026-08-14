@@ -838,7 +838,7 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 - [x] Run `dsh --profile <name> --dump-config` and observe the `autoresearch` row/defaults.
 - [x] Load and apply the plugin from the installed profile artifact, not the source tree; post-`37660dd87544b0aba04cb9a98f45e039c2f95858` smoke evidence recorded `profileBoot.sourceTreeResolved=false`, tool registration `autoresearch`, and prompt registration `tool:autoresearch`. This corrects the earlier installed-profile overmark, which had proved installation/config dump but not actual installed-module `apply()`.
 - [x] Execute temporary-repository smoke run through the installed profile; structured scenario evidence reported every required item `840` and `845`–`857` with `ok:true`.
-- [x] Record final post-`aee26142acfa4530c43d34d57705b0803fe5415f` release gates: `pnpm install --frozen-lockfile` passed; `pnpm run typecheck` passed; Vitest passed 11 files with 1 skipped / 278 tests with 5 skipped; `pnpm run test:coverage` passed the focused per-file thresholds (`agent.ts` S86/B78/F85/L95, `controller.ts` S83/B65/F91/L92, `git.ts` S88/B76/F96/L97, `index.ts` S84/B75/F62/L93, `recovery.ts` S79/B71/F91/L91); `pnpm run build` passed; clean `pnpm pack` rebuilt through `prepack` and produced `dsh-autoresearch-0.1.0.tgz` with exactly 56 allowlisted entries; `pnpm run release:smoke -- ./dsh-autoresearch-0.1.0.tgz` emitted structured JSON success with `ok:true`, the tarball/profile identity, 56 package files, installed-profile `apply()` evidence, and passing scenario evidence for items `840` and `845`–`857`. The isolated smoke did not modify an inherited external `DSH_HOME`; the clean packed manifest contained no runtime/self `link:`, `file:`, or `workspace:` references or source-tree paths; a separate consumer typechecked root and `./invariant` imports with the complete declaration graph resolving and no source-only `.ts` declaration specifiers.
+- [x] Record final post-fix release gates after implementation fix `09ab3095fd23e9a5a54333f1ccf52b94bd5f772a` (`fix: close final durability and release evidence gaps`): `pnpm install --frozen-lockfile` passed; `pnpm run typecheck` passed; Vitest passed 11 files with 1 skipped / 280 tests with 6 skipped; `pnpm run test:coverage` passed the focused per-file thresholds; `pnpm run build` passed; clean `pnpm pack` rebuilt through `prepack` with the allowlisted manifest/content and no runtime or self local-link closure; and `pnpm run release:smoke -- ./dsh-autoresearch-0.1.0.tgz` emitted structured success with `ok:true`.
 
 ## Final smoke observations
 
@@ -869,46 +869,36 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 - [x] Commit documentation, metadata finalization, and release fixtures in `b978619b89ce589f4a3eb95d9509d78e4f7f4309` (`docs(release): complete autoresearch release guidance`).
 - [x] Record installed release-scenario commit `a8e2f7209d5764011dea001240e6bdfa327b4058` (`docs: record installed release scenarios`).
 - [x] Record clean-cutover fix commit `aee26142acfa4530c43d34d57705b0803fe5415f` (`fix(config): remove legacy workflow aliases`).
+- [x] Record final implementation fix commit `09ab3095fd23e9a5a54333f1ccf52b94bd5f772a` (`fix: close final durability and release evidence gaps`).
 
 ## Chunk 09 tracker-accounting gate
 
 - [x] Record Chunk 09 implementation commit `b978619b89ce589f4a3eb95d9509d78e4f7f4309`.
 - [x] Confirm Chunk 09 implementation plus all Chunk 01–08 implementation commits and their separate tracker-accounting commits are reviewable; the not-yet-created Chunk 09 accounting commit is not required to confirm itself.
 - [x] Record Chunk 09 checklist-accounting commit `5615c97554820dbd20c64b6abed8374958bc87da` (`docs: record release candidate verification`) as complete and separate from implementation and release-fix commit `37660dd87544b0aba04cb9a98f45e039c2f95858`.
-- [x] Complete final independent Chunk 09 documentation, security/recovery, packed-artifact, authority-cutover, and obsolete-surface reviews; the final review was clean with zero findings, and Chunk 09 is closed.
-- [ ] Record this new post-`a8e2f7209d5764011dea001240e6bdfa327b4058`/`aee26142acfa4530c43d34d57705b0803fe5415f` closure-accounting update in a separate commit.
+- [x] Complete the final independent Chunk 09 documentation, security/recovery, packed-artifact, authority-cutover, obsolete-surface, and split-slice reviews; the final foundation, runtime, and integration-release reviews were clean with zero findings, all actionable findings were resolved by `09ab3095fd23e9a5a54333f1ccf52b94bd5f772a`, and Chunk 09 closure evidence is complete.
+- [ ] Record this new post-`09ab3095fd23e9a5a54333f1ccf52b94bd5f772a` closure-accounting update in a separate commit.
 
 # Final split review
 
-## Review A — Safety, correctness, and recovery
+## Review A — Foundation
 
-- [ ] Re-review caller-worktree non-mutation.
-- [ ] Re-review worktree/branch/lock concurrency.
-- [ ] Re-review mutable/protected path enforcement.
-- [ ] Re-review evaluator shell/env/provenance/timeout/process-tree safety.
-- [ ] Re-review strict metric/acceptance/target behavior.
-- [ ] Re-review transactional intent/outcome ordering.
-- [ ] Re-review recovery from every nonterminal state.
-- [ ] Re-review cancellation/HMR quiescence.
-- [ ] Re-review rejected/failed evidence retention.
-- [ ] Confirm child reports cannot become authoritative state.
+- [x] Complete the final foundation slice review covering durable tracker invariants, transactional intent/outcome ordering, worktree/branch/lock concurrency, path enforcement, evaluator safety, strict decisions, and recovery; clean with zero findings after `09ab3095fd23e9a5a54333f1ccf52b94bd5f772a`.
+- [x] Resolve every actionable foundation-review finding; the post-fix re-review reported zero remaining findings.
 
-## Review B — DSH integration, packaging, and documentation
+## Review B — Runtime
 
-- [ ] Re-review named Cordis exports and exact injected services.
-- [ ] Re-review tool/systemPrompt/agents/subprocess/jobs seams.
-- [ ] Re-review generic jobs control and status mapping.
-- [ ] Re-review stable patch id/module/complete defaults.
-- [ ] Re-review profile prerequisites and failure messages.
-- [ ] Re-review peer/dev dependency identities.
-- [ ] Re-review packed manifest/content and consumer install.
-- [ ] Re-review README/config/examples against actual behavior.
-- [ ] Confirm AgentLoop was not modified.
-- [ ] Confirm no redundant durable Harness event was introduced.
+- [x] Complete the final runtime slice review covering controller authority, child-report non-authority, cancellation/HMR quiescence, evidence retention, Cordis exports/injection, and tool/systemPrompt/agents/subprocess/jobs seams; clean with zero findings after `09ab3095fd23e9a5a54333f1ccf52b94bd5f772a`.
+- [x] Resolve every actionable runtime-review finding; the post-fix re-review reported zero remaining findings.
+
+## Review C — Integration and release
+
+- [x] Complete the final integration-release slice review covering generic jobs behavior, patch/profile composition, dependency identities, packed artifact and consumer installation, README/config examples, AgentLoop non-modification, and absence of redundant durable Harness events; clean with zero findings after `09ab3095fd23e9a5a54333f1ccf52b94bd5f772a`.
+- [x] Resolve every actionable integration-release-review finding; the post-fix re-review reported zero remaining findings.
 
 # Unchecked-item classification before release
 
-After both final reviews above are performed and every review checkbox is checked, inspect only remaining unchecked implementation/evidence items in Chunks 01–09. Final-review checkboxes and the instructions in this section are outside the classification candidate set.
+After all three final reviews above are performed and every review checkbox is checked, inspect only remaining unchecked implementation/evidence items in Chunks 01–09. Final-review checkboxes and the instructions in this section are outside the classification candidate set.
 
 For each candidate that remains `[ ]`, replace it with exactly one auditable classification form:
 
