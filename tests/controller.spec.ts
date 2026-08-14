@@ -283,9 +283,15 @@ describe('controller real Git/SQLite outcomes', () => {
     } finally { rmSync(f.root, { recursive: true, force: true }) }
   })
 
-  it.each([{ stdout: '', exitCode: 9 }, { stdout: '{"score":1}\n', stderr: 'failure', exitCode: 7 }, { stdout: 'not-json\n' }])('classifies baseline evaluator failure with durable artifacts and no child', async step => {
+  it.each([{ stdout: '', exitCode: 9 }, { stdout: '{"score":1}\n', stderr: 'failure', exitCode: 7 }, { stdout: 'not-json\n' }])('classifies baseline evaluator failure with only canonical durable artifacts and no child', async step => {
     const f = controllerFixture([step])
-    try { const { result, tracker } = await runControllerCase(f); expect(result.status).toBe('baseline-blocked'); expect(f.creates).toHaveLength(0); expect(tracker.database.prepare('SELECT state FROM experiments').get()?.['state']).toBe('crashed'); expect(tracker.database.prepare('SELECT COUNT(*) AS n FROM artifacts').get()?.['n']).toBe(2); tracker.close() } finally { rmSync(f.root, { recursive: true, force: true }) }
+    try {
+      const { result, tracker } = await runControllerCase(f); expect(result.status).toBe('baseline-blocked'); expect(f.creates).toHaveLength(0); expect(tracker.database.prepare('SELECT state FROM experiments').get()?.['state']).toBe('crashed')
+      // decodeRunResult has already validated this discriminated baseline-blocked result.
+      const terminal = result as { artifacts: Array<{ artifactId: string; kind: string }>; exit: { stdout: { artifactId: string }; stderr: { artifactId: string } } }
+      const refs = terminal.artifacts
+      expect(refs.map(item => item.kind).sort()).toEqual(['stderr', 'stdout']); expect(new Set(refs.map(item => item.artifactId)).size).toBe(2); expect(refs).toContainEqual(expect.objectContaining(terminal.exit.stdout)); expect(refs).toContainEqual(expect.objectContaining(terminal.exit.stderr)); expect(tracker.database.prepare('SELECT COUNT(*) AS n FROM artifacts').get()?.['n']).toBe(2); tracker.close()
+    } finally { rmSync(f.root, { recursive: true, force: true }) }
   })
 
   it('persists baseline signal artifacts with zero child allocation and zero candidate budget', async () => {

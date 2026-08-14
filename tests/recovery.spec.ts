@@ -1,5 +1,6 @@
 import { execFileSync, spawn } from 'node:child_process'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
@@ -32,6 +33,18 @@ function fixture() {
 
 function createRun(tracker: DurableTracker, request: RecoveryRequest): void {
   tracker.createRun({ runId: request.runId, repositoryId: request.discovery.repositoryId, repository: request.discovery.repository, gitCommonDir: request.discovery.gitCommonDir, callerCwd: request.discovery.callerCwd, startCommit: request.discovery.startCommit, runTag: request.identity.runTag, branch: request.identity.branch, worktree: request.identity.worktree, policy: request.policy, policySha256: request.policySha256, provenance: {}, provenanceSha256: request.provenanceSha256 })
+}
+
+function persistOutcome(tracker: DurableTracker, request: RecoveryRequest, experimentId: string, attemptId: string, ordinal: number, stdout = '{"score":7}\n', stderr = '', failed = false): void {
+  tracker.createAttemptIntent({ attemptId, runId: request.runId, experimentId, ordinal }, { provenanceSha256: request.provenanceSha256 })
+  const directory = join(tracker.layout.root, 'artifacts', request.runId, experimentId, attemptId)
+  mkdirSync(directory, { recursive: true, mode: 0o700 })
+  const artifacts = ([['stdout', stdout], ['stderr', stderr]] as const).map(([kind, content]) => {
+    const path = join(directory, `${kind}.log`); writeFileSync(path, content, { mode: 0o600 }); chmodSync(path, 0o600)
+    const bytes = Buffer.from(content)
+    return { artifactId: `${attemptId}-${kind}`, runId: request.runId, experimentId, attemptId, kind, location: `artifact:sha256:${createHash('sha256').update(path).digest('hex')}`, sizeBytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'), owner: 'evaluator', retention: 'retain', metadata: { truncated: false } }
+  })
+  tracker.recordAttemptOutcome(attemptId, { facts: { exitedAt: new Date().toISOString(), exitCode: failed ? 1 : 0, signal: null, timedOut: false, processTreeQuiescent: true, ...(failed ? { failureCode: 'exit', failureMessage: 'baseline failed' } : {}) }, artifacts })
 }
 
 const unusedContext = {} as Parameters<typeof reconcileRecovery>[0]
@@ -71,15 +84,44 @@ describe('recovery reconciler', () => {
     f.tracker.close()
   })
 
-  it.each(['completed', 'baseline-blocked', 'blocked', 'round-failed', 'cancelled'] as const)('classifies terminal %s and releases only a retained safe lock', async state => {
+  it.each(['blocked', 'round-failed', 'cancelled'] as const)('classifies evaluator-free terminal %s by explicit contract', async state => {
     const { tracker, request } = fixture(); createRun(tracker, request)
     tracker.acquireActiveLock(request.runId, request.discovery.repositoryId, request.identity.runTag)
-    if (state === 'completed' || state === 'round-failed') tracker.transitionRun(request.runId, 'baseline-running')
-    tracker.transitionRun(request.runId, state, state === 'completed' ? { best: { metric: 1, commit: SHA, experimentId: 'baseline' } } : { terminalReason: state, blockedCode: state })
-    await expect(reconcileRecovery(unusedContext, request)).resolves.toEqual({ kind: 'terminal', runId: request.runId, state, lock: 'release' })
+    if (state === 'round-failed') tracker.transitionRun(request.runId, 'baseline-running')
+    tracker.transitionRun(request.runId, state, { terminalReason: state, blockedCode: state })
+    await expect(reconcileRecovery(unusedContext, request)).resolves.toEqual({ kind: 'terminal', runId: request.runId, state, lock: 'release', artifacts: [] })
     tracker.releaseActiveLock(request.runId)
-    await expect(reconcileRecovery(unusedContext, request)).resolves.toEqual({ kind: 'terminal', runId: request.runId, state, lock: 'already-released' })
+    await expect(reconcileRecovery(unusedContext, request)).resolves.toEqual({ kind: 'terminal', runId: request.runId, state, lock: 'already-released', artifacts: [] })
     tracker.close()
+  })
+
+  it('validates a terminal failed baseline before releasing its lock and is idempotent', async () => {
+    const { tracker, request } = fixture(); createRun(tracker, request); tracker.acquireActiveLock(request.runId, request.discovery.repositoryId, request.identity.runTag)
+    tracker.transitionRun(request.runId, 'baseline-running'); tracker.createExperiment({ experimentId: 'baseline', runId: request.runId, ordinal: 0, kind: 'baseline', parentCommit: SHA, command: 'node', args: [] }); tracker.transitionExperiment('baseline', 'running')
+    persistOutcome(tracker, request, 'baseline', 'attempt-1', 1, '', 'failed\n', true); tracker.commitTerminalExperiment('baseline', 'crashed', { failureCode: 'exit', failureMessage: 'baseline failed' }); tracker.transitionRun(request.runId, 'baseline-blocked', { terminalReason: 'baseline failed', blockedCode: 'exit', quiescent: true })
+    const first = await reconcileRecovery(unusedContext, request); const second = await reconcileRecovery(unusedContext, request)
+    expect(first).toMatchObject({ kind: 'terminal', state: 'baseline-blocked', lock: 'release', artifacts: [{ kind: 'stderr' }, { kind: 'stdout' }] }); expect(second).toEqual(first)
+    tracker.close()
+  })
+
+  it.each(['missing', 'tampered', 'extraneous'] as const)('retains the terminal lock for %s canonical artifact evidence', async fault => {
+    const { tracker, request } = fixture(); createRun(tracker, request); tracker.acquireActiveLock(request.runId, request.discovery.repositoryId, request.identity.runTag)
+    tracker.transitionRun(request.runId, 'baseline-running'); tracker.createExperiment({ experimentId: 'baseline', runId: request.runId, ordinal: 0, kind: 'baseline', parentCommit: SHA, command: 'node', args: [] }); tracker.transitionExperiment('baseline', 'running')
+    persistOutcome(tracker, request, 'baseline', 'attempt-1', 1, '', 'failed\n', true); tracker.commitTerminalExperiment('baseline', 'crashed', { failureCode: 'exit', failureMessage: 'baseline failed' }); tracker.transitionRun(request.runId, 'baseline-blocked', { terminalReason: 'baseline failed', blockedCode: 'exit', quiescent: true })
+    if (fault === 'missing') rmSync(join(tracker.layout.root, 'artifacts', request.runId, 'baseline', 'attempt-1', 'stdout.log'))
+    if (fault === 'tampered') writeFileSync(join(tracker.layout.root, 'artifacts', request.runId, 'baseline', 'attempt-1', 'stdout.log'), 'tampered', { mode: 0o600 })
+    if (fault === 'extraneous') tracker.database.exec("PRAGMA foreign_keys=OFF; INSERT INTO artifacts VALUES ('extra','run-1',NULL,NULL,'trace','artifact:sha256:" + 'd'.repeat(64) + "',0,'" + 'e'.repeat(64) + "','host','retain','{}','2026-01-01T00:00:00.000Z'); PRAGMA foreign_keys=ON")
+    await expect(reconcileRecovery(unusedContext, request)).resolves.toMatchObject({ kind: 'blocked', code: 'artifact-incomplete', lock: 'retain' })
+    expect(tracker.recoveryState(request.runId).activeLock).toBeDefined(); tracker.close()
+  })
+
+  it('replays idempotently after evaluator outcome and terminal experiment persistence', async () => {
+    const f = await realFixture(); const { tracker, request } = f
+    tracker.transitionRun(request.runId, 'baseline-running'); tracker.createExperiment({ experimentId: 'baseline', runId: request.runId, ordinal: 0, kind: 'baseline', parentCommit: request.discovery.startCommit, command: 'node', args: [] }); tracker.transitionExperiment('baseline', 'running')
+    persistOutcome(tracker, request, 'baseline', 'attempt-1', 1); tracker.commitTerminalExperiment('baseline', 'accepted', { metric: 7, decision: 'accept' })
+    const first = await reconcileRecovery(f.ctx, request); const replay = await reconcileRecovery(f.ctx, request)
+    expect(first).toEqual({ kind: 'settle-baseline', runId: request.runId, experiment: { experimentId: 'baseline', ordinal: 0, kind: 'baseline', parentCommit: request.discovery.startCommit }, outcome: { kind: 'accept', metric: 7 } }); expect(replay).toEqual(first)
+    expect(tracker.database.prepare('SELECT COUNT(*) AS n FROM attempts').get()?.['n']).toBe(1); expect(tracker.getRun(request.runId)?.['state']).toBe('baseline-running'); tracker.close()
   })
 
   it('retains a proposal-uncertain terminal lock from the durable run fact across repeated recovery', async () => {
@@ -90,7 +132,7 @@ describe('recovery reconciler', () => {
     expect(tracker.recoveryState(request.runId)).toMatchObject({ processDisposition: 'uncertain', safeToReleaseTerminalLock: false })
     const first = await reconcileRecovery(unusedContext, request)
     const second = await reconcileRecovery(unusedContext, request)
-    expect(first).toEqual({ kind: 'terminal', runId: request.runId, state: 'blocked', lock: 'retain' })
+    expect(first).toEqual({ kind: 'terminal', runId: request.runId, state: 'blocked', lock: 'retain', artifacts: [] })
     expect(second).toEqual(first)
     expect(() => tracker.releaseActiveLock(request.runId)).toThrow(/safe-to-release/)
     tracker.close()

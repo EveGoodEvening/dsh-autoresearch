@@ -23,7 +23,7 @@ export type RecoveryDirective =
   | { readonly kind: 'finalize-evaluation'; readonly runId: RunId; readonly experiment: RecoveredExperiment; readonly evaluation: RecoveredEvaluation }
   | { readonly kind: 'reconcile-candidate'; readonly runId: RunId; readonly experiment: RecoveredExperiment; readonly candidateCommit: FullCommitSha; readonly expectedAcceptedCommit: FullCommitSha; readonly outcome: ({ readonly kind: 'accept' | 'reject'; readonly metric: number } | { readonly kind: 'cleanup'; readonly terminalExperimentState: 'crashed' | 'timed-out' | 'policy-violation' | 'cancelled' }) }
   | { readonly kind: 'blocked'; readonly runId: RunId; readonly code: RecoveryBlockCode; readonly evidence: readonly BlockerEvidence[]; readonly lock: 'retain' | 'release-after-persist' }
-  | { readonly kind: 'terminal'; readonly runId: RunId; readonly state: 'completed' | 'baseline-blocked' | 'blocked' | 'round-failed' | 'cancelled'; readonly lock: 'release' | 'retain' | 'already-released' }
+  | { readonly kind: 'terminal'; readonly runId: RunId; readonly state: 'completed' | 'baseline-blocked' | 'blocked' | 'round-failed' | 'cancelled'; readonly lock: 'release' | 'retain' | 'already-released'; readonly artifacts: readonly ArtifactRecord[] }
 
 const SHA = /^[0-9a-f]{40}$/u
 const HASH = /^[0-9a-f]{64}$/u
@@ -233,8 +233,64 @@ function decidingDirective(request: RecoveryRequest, run: Row, experiment: Recov
 
 function terminalDirective(request: RecoveryRequest, state: RunDurableState, recovery: RecoveryState): RecoveryDirective {
   const terminal = state as 'completed' | 'baseline-blocked' | 'blocked' | 'round-failed' | 'cancelled'
-  if (!recovery.activeLock) return { kind: 'terminal', runId: request.runId, state: terminal, lock: 'already-released' }
-  return { kind: 'terminal', runId: request.runId, state: terminal, lock: recovery.safeToReleaseTerminalLock ? 'release' : 'retain' }
+  const evidence = validateTerminalEvidence(request, terminal)
+  if (evidence instanceof RecoveryEvidenceError) return blocked(request, evidence.code, evidence.message, 'retain')
+  const lock = !recovery.activeLock ? 'already-released' : recovery.safeToReleaseTerminalLock ? 'release' : 'retain'
+  return { kind: 'terminal', runId: request.runId, state: terminal, lock, artifacts: evidence }
+}
+
+function validateTerminalEvidence(request: RecoveryRequest, state: 'completed' | 'baseline-blocked' | 'blocked' | 'round-failed' | 'cancelled'): readonly ArtifactRecord[] | RecoveryEvidenceError {
+  const experiments = request.tracker.database.prepare('SELECT * FROM experiments WHERE run_id = ? ORDER BY ordinal').all(request.runId) as Row[]
+  const attempts = request.tracker.database.prepare('SELECT * FROM attempts WHERE run_id = ? ORDER BY experiment_id, ordinal').all(request.runId) as Row[]
+  const decoded: ArtifactRecord[] = []
+  const validatedAttemptIds = new Set<string>()
+  try {
+    for (const attempt of attempts) {
+      const attemptId = text(attempt['attempt_id'])
+      if (spawnProvenance(attempt) !== request.provenanceSha256) throw new RecoveryEvidenceError('provenance-mismatch', `attempt ${attemptId} spawn provenance differs from the durable run provenance`)
+      if (attempt['process_tree_quiescent'] !== 1) throw new RecoveryEvidenceError('attempt-uncertain', `attempt ${attemptId} lacks durable whole-process-tree quiescence`)
+      if (!attempt['exited_at']) {
+        const stray = request.tracker.database.prepare('SELECT 1 FROM artifacts WHERE attempt_id = ? LIMIT 1').get(attemptId)
+        if (stray) throw new RecoveryEvidenceError('artifact-incomplete', `attempt ${attemptId} has artifacts without a durable outcome`)
+        continue
+      }
+      const experimentRow = experiments.find(row => text(row['experiment_id']) === text(attempt['experiment_id']))
+      if (!experimentRow) throw new RecoveryEvidenceError('state-ambiguous', `attempt ${attemptId} has no durable experiment`)
+      const evaluation = reconstructEvaluation(request, decodeExperiment(experimentRow), attempt)
+      if (!evaluation) throw new RecoveryEvidenceError('attempt-uncertain', `attempt ${attemptId} has no durable outcome`)
+      decoded.push(...evaluation.artifacts)
+      validatedAttemptIds.add(attemptId)
+    }
+    const allArtifacts = request.tracker.database.prepare('SELECT attempt_id FROM artifacts WHERE run_id = ?').all(request.runId) as Row[]
+    if (allArtifacts.length !== decoded.length || allArtifacts.some(row => !validatedAttemptIds.has(text(row['attempt_id'])))) throw new RecoveryEvidenceError('artifact-incomplete', 'terminal run contains unexpected or non-evaluator artifact rows')
+    const evaluatedExperiments = new Set((request.tracker.database.prepare("SELECT DISTINCT experiment_id FROM transitions WHERE run_id = ? AND scope = 'experiment' AND from_state = 'running' AND to_state NOT IN ('running','baseline-pending')").all(request.runId) as Row[]).map(row => text(row['experiment_id'])))
+    for (const experimentId of evaluatedExperiments) {
+      const latest = attempts.filter(row => text(row['experiment_id']) === experimentId).at(-1)
+      if (!latest || !latest['exited_at']) throw new RecoveryEvidenceError('attempt-uncertain', `terminal evaluated experiment ${experimentId} lacks a completed evaluator attempt`)
+    }
+    if (state === 'baseline-blocked') {
+      const baseline = experiments.find(row => text(row['kind']) === 'baseline')
+      if (!baseline || !isExperimentTerminal(text(baseline['state']))) throw new RecoveryEvidenceError('state-ambiguous', 'baseline-blocked run lacks a terminal baseline experiment')
+      const own = attempts.filter(row => text(row['experiment_id']) === text(baseline['experiment_id']))
+      const latest = own.at(-1)
+      if (!latest || !latest['exited_at']) throw new RecoveryEvidenceError('attempt-uncertain', 'baseline-blocked run lacks a completed baseline evaluator attempt')
+      const outcome = reconstructEvaluation(request, decodeExperiment(baseline), latest)
+      if (!outcome || outcome.kind !== 'failed') throw new RecoveryEvidenceError('state-ambiguous', 'baseline-blocked run does not match a failed baseline evaluator outcome')
+    }
+    if (state === 'completed') {
+      const run = request.tracker.getRun(request.runId)!
+      const best = decodeBest(run)
+      const experiment = best && experiments.find(row => text(row['experiment_id']) === best.experimentId)
+      if (!best || !experiment || text(experiment['state']) !== 'accepted' || number(experiment['metric']) !== best.metric) throw new RecoveryEvidenceError('state-ambiguous', 'completed run lacks a canonical accepted best experiment')
+      const latest = attempts.filter(row => text(row['experiment_id']) === best.experimentId).at(-1)
+      if (!latest || !latest['exited_at']) throw new RecoveryEvidenceError('attempt-uncertain', 'completed run lacks durable evaluator evidence for its best experiment')
+      const outcome = reconstructEvaluation(request, decodeExperiment(experiment), latest)
+      if (!outcome || outcome.kind !== 'measured' || outcome.metric !== best.metric) throw new RecoveryEvidenceError('state-ambiguous', 'completed best result does not match its evaluator outcome')
+    }
+    return decoded
+  } catch (error) {
+    return error instanceof RecoveryEvidenceError ? error : new RecoveryEvidenceError('artifact-incomplete', `terminal evaluator evidence could not be decoded: ${error instanceof Error ? error.message : String(error)}`)
+  }
 }
 
 function decodeExperiment(row: Row): RecoveredExperiment {

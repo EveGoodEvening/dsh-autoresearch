@@ -258,7 +258,7 @@ export class AutoresearchRunController {
     if (this.quiescenceFailure) return this.block(r, { kind: 'blocked', runId: r.runId, code: 'attempt-uncertain', evidence: [{ code: this.quiescenceFailure.code, message: this.quiescenceFailure.message, artifacts: [] }], lock: 'retain' })
     if (!row) throw new Error(this.cancelReason)
     const lastState = String(row['state']) as RunDurableState
-    if (['completed','baseline-blocked','blocked','round-failed','cancelled'].includes(lastState)) return this.returnTerminal(r, { kind: 'terminal', runId: r.runId, state: lastState as never, lock: 'release' })
+    if (['completed','baseline-blocked','blocked','round-failed','cancelled'].includes(lastState)) return this.returnTerminal(r, { kind: 'terminal', runId: r.runId, state: lastState as never, lock: 'release', artifacts: [] })
     r.tracker.checkpointRun(r.runId, { intent: { kind: 'cancellation', reason: this.cancelReason } })
     const unresolved = r.tracker.recoveryState(r.runId).unresolvedExperiment
     const best = optionalBest(r.tracker, r.runId)
@@ -270,11 +270,12 @@ export class AutoresearchRunController {
 
   private async returnTerminal(r: Runtime, directive: Extract<RecoveryDirective, { kind: 'terminal' }>): Promise<AutoresearchRunResult> {
     const row = r.tracker.getRun(r.runId)!
-    const facts = common(r)
+    const validatedArtifacts = directive.artifacts.map(publicArtifact)
+    const facts = common(r, validatedArtifacts)
     const best = optionalBest(r.tracker, r.runId)
     let value: Record<string, unknown>
     if (directive.state === 'completed') value = { ...facts, status: r.policy.target !== undefined && best && isTargetReached(r.policy.metricDirection, best.metric, r.policy.target) ? 'target-reached' : 'budget-limited', ...(r.policy.target !== undefined && best && isTargetReached(r.policy.metricDirection, best.metric, r.policy.target) ? { target: r.policy.target } : {}), best }
-    else if (directive.state === 'baseline-blocked') value = baselineBlocked(r)
+    else if (directive.state === 'baseline-blocked') value = baselineBlocked(r, validatedArtifacts)
     else if (directive.state === 'cancelled') value = { ...facts, status: 'cancelled', lastState: 'initializing', reason: String(row['terminal_reason'] ?? 'cancelled'), quiescent: true, ...(best ? { best } : {}) }
     else if (directive.state === 'blocked' && best) value = { ...facts, status: 'blocked', best, evidence: evidenceFromRun(row) }
     else value = { ...facts, status: 'round-failed', reason: String(row['terminal_reason'] ?? directive.state), evidence: evidenceFromRun(row), ...(best ? { best } : {}) }
@@ -303,9 +304,18 @@ function optionalBest(tracker: DurableTracker, runId: string): BestResult | unde
 function durableBest(tracker: DurableTracker, runId: string): BestResult { const best = optionalBest(tracker, runId); if (!best) throw new Error('durable best result is missing'); return best }
 function history(tracker: DurableTracker, runId: string): ProposalHistoryEntry[] { return (tracker.database.prepare('SELECT * FROM experiments WHERE run_id = ? AND kind = ? ORDER BY ordinal DESC LIMIT 20').all(runId, 'candidate') as Record<string, unknown>[]).reverse().map(row => ({ ordinal: Number(row['ordinal']), experimentId: String(row['experiment_id']), state: String(row['state']) as ExperimentDurableState, ...(row['candidate_commit'] ? { candidateCommit: String(row['candidate_commit']) } : {}), ...(row['metric'] === null ? {} : { metric: Number(row['metric']) }), ...(row['decision'] ? { decision: String(row['decision']) as 'accept'|'reject' } : {}), ...(row['failure_code'] ? { failureCode: String(row['failure_code']) } : {}) })) }
 function counts(tracker: DurableTracker, runId: string): ResultCounts { const candidates = Number(tracker.database.prepare("SELECT COUNT(*) AS n FROM experiments WHERE run_id = ? AND kind = 'candidate'").get(runId)?.['n'] ?? 0); const completed = Number(tracker.database.prepare("SELECT COUNT(*) AS n FROM experiments WHERE run_id = ? AND kind = 'candidate' AND state NOT IN ('baseline-pending','running')").get(runId)?.['n'] ?? 0); const attempts = Number(tracker.database.prepare('SELECT COUNT(*) AS n FROM attempts WHERE run_id = ?').get(runId)?.['n'] ?? 0); return { experimentsStarted: candidates, experimentsCompleted: completed, attempts } }
+interface PublicArtifact { readonly artifactId: string; readonly kind: string; readonly location: string; readonly sizeBytes: number; readonly sha256: string }
+function publicArtifact(row: Pick<ArtifactRecord, 'artifactId' | 'kind' | 'location' | 'sizeBytes' | 'sha256'>): PublicArtifact { return { artifactId: row.artifactId, kind: row.kind, location: row.location, sizeBytes: row.sizeBytes, sha256: row.sha256 } }
 function artifacts(tracker: DurableTracker, runId: string) { return (tracker.database.prepare('SELECT artifact_id, kind, location, size_bytes, sha256 FROM artifacts WHERE run_id = ? ORDER BY created_at, artifact_id').all(runId) as Record<string, unknown>[]).map(row => ({ artifactId: String(row['artifact_id']), kind: String(row['kind']), location: String(row['location']), sizeBytes: Number(row['size_bytes']), sha256: String(row['sha256']) })) }
-function common(r: Runtime) { return { runId: r.runId, tracker: r.tracker.path, counts: counts(r.tracker, r.runId), artifacts: artifacts(r.tracker, r.runId) } }
+function common(r: Runtime, validatedArtifacts = artifacts(r.tracker, r.runId)) { return { runId: r.runId, tracker: r.tracker.path, counts: counts(r.tracker, r.runId), artifacts: validatedArtifacts } }
 function errorEvidence(error: unknown): { code: string; message: string } { return { code: error instanceof ProposalAgentError ? error.code : String((error as { code?: unknown }).code ?? 'round-failed'), message: error instanceof Error ? error.message : String(error) } }
 function evidenceFromRun(row: Record<string, unknown>): BlockerEvidence[] { return [{ code: String(row['blocked_code'] ?? 'terminal'), message: String(row['terminal_reason'] ?? 'run terminated'), artifacts: [] }] }
-function baselineBlocked(r: Runtime): Record<string, unknown> { const attempt = r.tracker.database.prepare("SELECT * FROM attempts WHERE run_id = ? ORDER BY created_at LIMIT 1").get(r.runId)!; const refs = artifacts(r.tracker, r.runId); return { ...common(r), status: 'baseline-blocked', baselineAttemptId: String(attempt['attempt_id']), reason: String(attempt['failure_message'] ?? 'baseline evaluation failed'), exit: { exitCode: attempt['exit_code'] === null ? null : Number(attempt['exit_code']), signal: attempt['signal'] === null ? null : String(attempt['signal']), timedOut: attempt['timed_out'] === 1, stdout: refs.find(item => item.kind === 'stdout')!, stderr: refs.find(item => item.kind === 'stderr')! } }
+function baselineBlocked(r: Runtime, refs: PublicArtifact[]): Record<string, unknown> {
+  const experiment = r.tracker.database.prepare("SELECT experiment_id FROM experiments WHERE run_id = ? AND kind = 'baseline' ORDER BY ordinal LIMIT 1").get(r.runId)
+  const experimentId = experiment?.['experiment_id']
+  if (typeof experimentId !== 'string' || !experimentId) throw new Error('baseline-blocked run is missing its baseline experiment')
+  const attempt = r.tracker.database.prepare('SELECT * FROM attempts WHERE run_id = ? AND experiment_id = ? ORDER BY ordinal DESC LIMIT 1').get(r.runId, experimentId)
+  const attemptId = attempt?.['attempt_id']
+  if (!attempt || typeof attemptId !== 'string' || !attemptId) throw new Error('baseline-blocked run is missing its baseline attempt')
+  return { ...common(r, refs), status: 'baseline-blocked', baselineAttemptId: attemptId, reason: String(attempt['failure_message'] ?? 'baseline evaluation failed'), exit: { exitCode: attempt['exit_code'] === null ? null : Number(attempt['exit_code']), signal: attempt['signal'] === null ? null : String(attempt['signal']), timedOut: attempt['timed_out'] === 1, stdout: refs.find(item => item.kind === 'stdout')!, stderr: refs.find(item => item.kind === 'stderr')! } }
 }
