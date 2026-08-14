@@ -90,6 +90,14 @@ describe('host-owned Git boundary', () => {
     } finally { delete process.env.GIT_DIR }
   })
 
+  it('accepts bare and absolute Git executables but rejects relative paths with separators', async () => {
+    const { ctx, subprocess } = fixture(); const absolute = execFileSync('which', ['git']).toString().trim()
+    await expect(resolveGitExecutable(ctx, 'git')).resolves.toBe(absolute)
+    await expect(resolveGitExecutable(ctx, absolute)).resolves.toBe(absolute)
+    for (const configured of ['./git', 'bin/git', '..\\git']) await expect(resolveGitExecutable(ctx, configured)).rejects.toThrow('bare name or absolute path')
+    expect(subprocess.specs).toHaveLength(0)
+  })
+
   it('rejects includes and every executable config surface before helpers can run', async () => {
     for (const key of ['core.fsmonitor', 'core.hooksPath', 'filter.evil.clean', 'filter.evil.smudge', 'filter.evil.process', 'diff.evil.command', 'diff.evil.textconv', 'merge.evil.driver']) {
       const f = fixture(); const marker = join(f.root, `${key.replaceAll('.', '-')}.marker`); execFileSync('git', ['-C', f.root, 'config', key, markerCommand(marker)])
@@ -144,6 +152,17 @@ describe('host-owned Git boundary', () => {
     const dependency = { ...snapshot, changed: snapshot.changed.filter((item) => item.path === 'package.json') }; expect(validateCandidate(dependency, { ...policy(), exceptionalAllowlists: { dependencies: ['package.json'], evaluators: [], datasets: [], submodules: [], gitConfig: [] } })).toEqual(['package.json'])
     execFileSync('git', ['-C', f.identity.worktree, 'reset', '--hard']); execFileSync('git', ['-C', f.identity.worktree, 'mv', 'src/code.ts', 'forbidden.policy']); const rename = await snapshotCandidate(f.ctx, 'git', f.identity.worktree, f.gitConfig, commandOptions)
     expect(() => validateCandidate(rename, policy(['src/**']))).toThrowError(expect.objectContaining({ evidence: expect.arrayContaining(['forbidden.policy: outside mutable paths']) }))
+  })
+
+  it('enumerates ignored untracked paths separately and requires policy permission before publication', async () => {
+    const base = fixture(); writeFileSync(join(base.root, '.gitignore'), 'ignored/**\n'); execFileSync('git', ['-C', base.root, 'add', '.gitignore']); execFileSync('git', ['-C', base.root, 'commit', '-m', 'ignore generated paths'])
+    const f = await createRun(base); mkdirSync(join(f.identity.worktree, 'ignored')); writeFileSync(join(f.identity.worktree, 'ignored', 'cache.bin'), 'candidate data\n')
+    const snapshot = await snapshotCandidate(f.ctx, 'git', f.identity.worktree, f.gitConfig, commandOptions)
+    expect(snapshot.changed).toEqual([]); expect(snapshot.ignoredUntracked).toEqual(['ignored/cache.bin'])
+    expect(() => validateCandidate(snapshot, policy())).toThrowError(expect.objectContaining({ code: 'candidate-policy-violation', evidence: ['ignored/cache.bin: ignored untracked path not allowlisted'] }))
+    const allowedPaths = validateCandidate(snapshot, policy(['src/**', 'ignored/**'])); expect(allowedPaths).toEqual(['ignored/cache.bin'])
+    const committed = await commitCandidate(f.ctx, 'git', f.identity.worktree, f.identity, 'ignored', snapshot, allowedPaths, commandOptions)
+    expect(execFileSync('git', ['-C', f.root, 'show', `${committed.candidateCommit}:ignored/cache.bin`]).toString()).toBe('candidate data\n')
   })
 
   it('names an unstaged protected path and state in policy evidence', async () => {

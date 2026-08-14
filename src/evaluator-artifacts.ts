@@ -18,6 +18,8 @@ interface DirectoryIdentity { readonly path: string; readonly dev: number; reado
 export class EvaluatorArtifactWriter {
   readonly attemptDirectory: string
   private readonly parent: DirectoryIdentity
+  /** Internal owner-only capability for artifact I/O; never persist this path. */
+  internalPath(kind: 'stdout' | 'stderr'): string { return join(this.attemptDirectory, `${kind}.log`) }
   private used = false
 
   private constructor(directory: string) {
@@ -46,7 +48,7 @@ export class EvaluatorArtifactWriter {
 
   private writeOne(kind: 'stdout' | 'stderr', output: SubprocessOutputRead | undefined, secrets: readonly string[]): EvaluatorArtifactRecord {
     this.assertParent()
-    const destination = join(this.attemptDirectory, `${kind}.log`)
+    const destination = this.internalPath(kind)
     const source = output?.spillPath === undefined ? output?.text ?? '' : readSpill(output.spillPath)
     const bytes = Buffer.from(redact(source, secrets))
     const fd = openSync(destination, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600)
@@ -60,7 +62,7 @@ export class EvaluatorArtifactWriter {
       if (final.dev !== opened.dev || final.ino !== opened.ino || final.size !== bytes.length) throw new TypeError('artifact destination identity changed')
     } finally { closeSync(fd) }
     this.assertParent()
-    return Object.freeze({ kind, location: redact(destination, secrets), sizeBytes: bytes.length, sha256: hash(bytes), truncated: output?.lossy ?? false })
+    return Object.freeze({ kind, location: `artifact:sha256:${hash(Buffer.from(destination, 'utf8'))}`, sizeBytes: bytes.length, sha256: hash(bytes), truncated: output?.lossy ?? false })
   }
 
   private assertParent(): void {

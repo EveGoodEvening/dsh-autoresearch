@@ -197,7 +197,7 @@ describe('host-owned evaluator execution', () => {
       stdio: { stdin: 'ignore', stdout: { maxBytes: 128, spill: { maxBytes: 128 } }, stderr: { maxBytes: 64, spill: { maxBytes: 64 } } },
     })
     expect(setup.value.persistence.events).toEqual(['intent', 'observed', 'outcome'])
-    expect(result.artifacts.map(item => [item.kind, readFileSync(item.location, 'utf8')])).toEqual([['stdout', '{"score":1.5}\n'], ['stderr', '']])
+    expect(result.artifacts.map(item => [item.kind, readFileSync(setup.value.artifactWriter.internalPath(item.kind), 'utf8')])).toEqual([['stdout', '{"score":1.5}\n'], ['stderr', '']])
     expect(setup.runtime.waited).toBe(1)
   })
 
@@ -210,8 +210,8 @@ describe('host-owned evaluator execution', () => {
     expect(setup.value.persistence.intent?.env.ORDINARY).toMatch(/^sha256:/)
     expect(setup.value.persistence.intent?.env.ORDINARY).not.toContain(secret)
     expect(JSON.stringify(result)).not.toContain(secret)
-    expect(result.artifacts.map(item => readFileSync(item.location, 'utf8')).join('\n')).not.toContain(secret)
-    expect(readFileSync(result.artifacts[0]!.location, 'utf8')).toContain('[REDACTED]')
+    expect(result.artifacts.map(item => readFileSync(setup.value.artifactWriter.internalPath(item.kind), 'utf8')).join('\n')).not.toContain(secret)
+    expect(readFileSync(setup.value.artifactWriter.internalPath('stdout'), 'utf8')).toContain('[REDACTED]')
     const frozen = freezeEvaluatorProvenance(setup.paths.root, { evaluation: setup.value.evaluation, environment: { ORDINARY: secret }, metricName: 'score', metricDirection: 'minimize' })
     expect(frozen.canonical).not.toContain(secret)
 
@@ -347,7 +347,7 @@ describe('host-owned evaluator execution', () => {
     const setup = options(runtime)
     const result = await runEvaluator(setup.value)
     expect(result).toMatchObject({ kind: 'measured', metric: 4 })
-    expect(readFileSync(result.artifacts[0]!.location, 'utf8')).toBe('log\n{"score":4}\n')
+    expect(readFileSync(setup.value.artifactWriter.internalPath('stdout'), 'utf8')).toBe('log\n{"score":4}\n')
   })
 
   it.each([
@@ -462,7 +462,7 @@ describe('host-owned evaluator execution', () => {
       const setup = options(fakeRuntime(fake), { environment: { ORDINARY: secret }, policy: { note: secret } })
       const result = await runEvaluator(setup.value)
       expect(JSON.stringify({ result, intent: setup.value.persistence.intent, outcome: setup.value.persistence.outcome })).not.toContain(secret)
-      expect(result.artifacts.map(item => readFileSync(item.location, 'utf8')).join('\n')).not.toContain(secret)
+      expect(result.artifacts.map(item => readFileSync(setup.value.artifactWriter.internalPath(item.kind), 'utf8')).join('\n')).not.toContain(secret)
     }
 
     const spillSetup = options(fakeRuntime())
@@ -472,7 +472,7 @@ describe('host-owned evaluator execution', () => {
     const spilled = options(spillRuntime, { environment: { ORDINARY: secret } })
     const spillResult = await runEvaluator(spilled.value)
     expect(JSON.stringify(spillResult)).not.toContain(secret)
-    expect(spillResult.artifacts.map(item => readFileSync(item.location, 'utf8')).join('\n')).not.toContain(secret)
+    expect(spillResult.artifacts.map(item => readFileSync(spilled.value.artifactWriter.internalPath(item.kind), 'utf8')).join('\n')).not.toContain(secret)
 
     const throwing = options(fakeRuntime(), { environment: { ORDINARY: secret } })
     throwing.value.persistence.persistSpawnObserved = () => { throw new Error(secret) }
@@ -556,13 +556,54 @@ describe('host-owned evaluator execution', () => {
     expect(result.artifacts.every(item => !item.location.includes(secret))).toBe(true)
   })
 
+  it('redacts nested provenance keys and evaluator path keys, including secrets embedded in temp paths', async () => {
+    const secret = 'secret-temp-alias'
+    const root = mkdtempSync(join(tmpdir(), `${secret}-worktree-`)); roots.push(root)
+    const artifacts = mkdtempSync(join(tmpdir(), `${secret}-artifacts-`)); roots.push(artifacts)
+    mkdirSync(join(root, secret))
+    writeFileSync(join(root, secret, 'evaluate.mjs'), 'fixture\n')
+    const evaluation = { command: 'node', args: ['evaluate.mjs'], cwd: secret }
+    const frozen = freezeEvaluatorProvenance(root, {
+      evaluation, evaluatorFiles: [`${secret}/evaluate.mjs`], environment: { TOKEN: secret },
+      dataset: { [`dataset-${secret}`]: 'value' }, metricName: 'score', metricDirection: 'minimize',
+      policy: { outer: { [`path-${secret}`]: { [`${secret}-leaf`]: 'value' } } },
+    })
+    expect(frozen.canonical).not.toContain(secret)
+    expect(Object.keys(frozen.evaluatorFileHashes)).toEqual(['[REDACTED]/evaluate.mjs'])
+
+    const writer = EvaluatorArtifactWriter.mint(StateLayout.open(artifacts), 'run', 'experiment', 'opaque')
+    const records = writer.write(reader('ok'), reader(''), [secret])
+    expect(records.every(record => /^artifact:sha256:[0-9a-f]{64}$/u.test(record.location))).toBe(true)
+    expect(JSON.stringify(records)).not.toContain(secret)
+    expect(readFileSync(writer.internalPath('stdout'), 'utf8')).toBe('ok')
+  })
+
+  it('terminates and persists failure when a declared file is replaced during spawn', async () => {
+    const setup = options()
+    const originalSpawn = setup.runtime.runtime.spawn
+    setup.runtime.runtime.spawn = spec => {
+      const handle = originalSpawn(spec)
+      const evaluator = join(setup.paths.root, 'bench', 'evaluate.mjs')
+      renameSync(evaluator, `${evaluator}.old`)
+      writeFileSync(evaluator, 'replacement after spawn\n')
+      return handle
+    }
+    const result = await runEvaluator(setup.value)
+    expect(result).toMatchObject({ kind: 'failed', code: 'spawn', exit: { processTreeQuiescent: true } })
+    expect(setup.runtime.terminated).toBe(1)
+    expect(setup.runtime.waited).toBe(1)
+    expect(setup.value.persistence.events).toEqual(['intent', 'outcome'])
+    expect(setup.value.persistence.outcome?.[0]).toMatchObject({ failureCode: 'spawn', processTreeQuiescent: true })
+  })
+
   it('writes artifacts exclusively under an owner-only StateLayout capability', async () => {
     const paths = fixture()
     const writer = EvaluatorArtifactWriter.mint(StateLayout.open(paths.artifacts), 'run', 'experiment', 'secure')
     const result = writer.write(reader('ok'), reader('err'), [])
-    expect(result.every(item => item.location.startsWith(realpathSync(paths.artifacts)))).toBe(true)
+    expect(result.every(item => /^artifact:sha256:[0-9a-f]{64}$/u.test(item.location))).toBe(true)
     expect(statSync(writer.attemptDirectory).mode & 0o077).toBe(0)
-    expect(result.every(item => (statSync(item.location).mode & 0o077) === 0)).toBe(true)
+    expect((statSync(writer.internalPath('stdout')).mode & 0o077) === 0).toBe(true)
+    expect((statSync(writer.internalPath('stderr')).mode & 0o077) === 0).toBe(true)
     expect(() => writer.write(reader('again'), reader('again'), [])).toThrow(/single-use/)
 
     const collision = EvaluatorArtifactWriter.mint(StateLayout.open(paths.artifacts), 'run', 'experiment', 'collision')

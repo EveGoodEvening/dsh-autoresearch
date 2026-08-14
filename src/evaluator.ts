@@ -135,20 +135,20 @@ export function revalidateEvaluatorBoundary(worktree: string, boundary: Evaluato
 
 export function freezeEvaluatorProvenance(worktree: string, input: EvaluatorProvenanceInput): FrozenEvaluatorProvenance {
   const root = canonicalWorktree(worktree)
+  const secrets = secretsOf(input.environment)
   const fileHashes: Record<string, string> = Object.create(null) as Record<string, string>
   for (const file of [...(input.evaluatorFiles ?? [])].sort()) {
-    fileHashes[file] = sha256(readContainedFile(root, file, 'evaluator file'))
+    assignDurableKey(fileHashes, redact(file, secrets), sha256(readContainedFile(root, file, 'evaluator file')), 'evaluator file path')
   }
-  const secrets = Object.values(input.environment ?? {})
   const value = {
     evaluation: durableSerialize(input.evaluation, secrets),
     evaluatorFileHashes: fileHashes,
-    dataset: durableSerialize(sortedRecord(input.dataset ?? {}), secrets),
+    dataset: durableSerialize(sortedRecord(input.dataset ?? {}), secrets, true),
     environment: hashedEnvironment(input.environment ?? {}),
     metricName: redact(input.metricName, secrets),
     metricDirection: input.metricDirection,
     parserVersion: EVALUATOR_PARSER_VERSION,
-    policySha256: sha256(canonicalJson(durableSerialize(input.policy ?? null, secrets))),
+    policySha256: sha256(canonicalJson(durableSerialize(input.policy ?? null, secrets, true))),
   }
   const canonical = canonicalJson(value)
   return deepFreeze({ parserVersion: EVALUATOR_PARSER_VERSION, evaluatorFileHashes: fileHashes, canonical, sha256: sha256(canonical) })
@@ -241,6 +241,7 @@ export async function runEvaluator(options: EvaluatorRunOptions): Promise<Evalua
       },
     })
     assertPathIdentity(root, cwdIdentity, 'evaluator cwd')
+    revalidateEvaluatorBoundary(root, options.boundary)
     terminateOnAbort = (): void => {
       if (!terminationRequested) { terminationRequested = true; handle?.terminate() }
     }
@@ -372,7 +373,10 @@ function explicitEnvironment(overrides: Readonly<Record<string, string>>): Reado
 }
 
 function hashedEnvironment(environment: Readonly<Record<string, string>>): Readonly<Record<string, string>> {
-  return Object.freeze(Object.fromEntries(Object.entries(environment).sort(([a], [b]) => a.localeCompare(b)).map(([key, value]) => [key, `sha256:${sha256(value)}`])))
+  const secrets = secretsOf(environment)
+  const result: Record<string, string> = Object.create(null) as Record<string, string>
+  for (const [key, value] of Object.entries(environment).sort(([a], [b]) => a.localeCompare(b))) assignDurableKey(result, redact(key, secrets), `sha256:${sha256(value)}`, 'environment key')
+  return Object.freeze(result)
 }
 
 
@@ -419,15 +423,27 @@ function normalizedRelativePath(root: string, canonical: string): string {
   return path
 }
 
-function durableSerialize<T>(value: T, secrets: readonly string[]): T {
+function durableSerialize<T>(value: T, secrets: readonly string[], redactKeys = false): T {
   if (typeof value === 'string') return redact(value, secrets) as T
-  if (Array.isArray(value)) return value.map(item => durableSerialize(item, secrets)) as T
+  if (Array.isArray(value)) return value.map(item => durableSerialize(item, secrets, redactKeys)) as T
   if (value !== null && typeof value === 'object') {
     const result: Record<string, unknown> = Object.create(null) as Record<string, unknown>
-    for (const [key, item] of Object.entries(value)) result[key] = durableSerialize(item, secrets)
+    for (const [key, item] of Object.entries(value)) {
+      const durableKey = redactKeys ? redact(key, secrets) : key
+      assignDurableKey(result, durableKey, durableSerialize(item, secrets, redactKeys), redactKeys ? 'provenance metadata key' : 'durable key')
+    }
     return result as T
   }
   return value
+}
+
+function secretsOf(environment: Readonly<Record<string, string>> | undefined): readonly string[] {
+  return Object.values(environment ?? {}).filter(secret => secret.length > 0)
+}
+
+function assignDurableKey<T>(target: Record<string, T>, key: string, value: T, label: string): void {
+  if (Object.prototype.hasOwnProperty.call(target, key)) throw new TypeError(`${label} aliases another key after secret redaction`)
+  target[key] = value
 }
 
 function deepFreeze<T>(value: T): T {
