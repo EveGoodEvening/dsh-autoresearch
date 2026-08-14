@@ -220,6 +220,11 @@ describe('configuration and policy normalization', () => {
     expect(() => normalizeRunPolicy(input(override as Partial<AutoresearchToolInput>), resolveConfig(), '/caller')).toThrow(message)
   })
 
+  it('rejects reserved DSH_ evaluator environment keys during normalization', () => {
+    expect(() => normalizeRunPolicy(input({ environment: { DSH_TOKEN: 'secret' } }), resolveConfig(), '/caller')).toThrow(/reserved DSH_ prefix/)
+    expect(normalizeRunPolicy(input({ environment: { PATH_HINT: 'safe' } }), resolveConfig(), '/caller').environment).toEqual({ PATH_HINT: 'safe' })
+  })
+
   it('returns a deeply immutable, deduplicated and key-stable snapshot', () => {
     const policy = normalizeRunPolicy(input({ constraints: ['same', 'same'], mutable_globs: ['src/**', 'src/**'], environment: { ZED: 'last', ALPHA: 'first' } }), resolveConfig(), '/caller')
     expect(policy.constraints).toEqual(['same'])

@@ -8,7 +8,9 @@ import type { PatchOptions } from '@deepseek-ai/cordis-plugin-include'
 import type {} from '@deepseek-ai/cordis-plugin-hmr'
 import { renderPrompt } from '@deepseek-ai/dsh-system-prompt'
 
-const packageRoot = fileURLToPath(new URL('../..', import.meta.url))
+export const packageRoot = process.env.DSH_AUTORESEARCH_INSTALLED_ROOT
+  ? fileURLToPath(pathToFileURL(process.env.DSH_AUTORESEARCH_INSTALLED_ROOT))
+  : fileURLToPath(new URL('../..', import.meta.url))
 const installAnchor = fileURLToPath(import.meta.resolve('@deepseek-ai/dsh-app-boot'))
 const baseEntry = fileURLToPath(import.meta.resolve('@deepseek-ai/dsh-base'))
 const basePackage = join(baseEntry, '..', '..')
@@ -30,6 +32,16 @@ export interface RealHarness {
 function providerOverlay(): PatchOptions[] {
   return [{ insert: [{ id: 'autoresearch-test-model', name: modelPlugin }] }]
 }
+function configureBootEntry(entry: EntryOptions): EntryOptions {
+  if (entry.id === 'hmr') {
+    return { ...entry, config: { root: [], ignored: [], debounce: 10 } }
+  }
+  if (entry.id === 'autoresearch') {
+    return { ...entry, config: { ...entry.config, terminationGraceMs: COMPOSITION_TERMINATION_GRACE_MS } }
+  }
+  return entry
+}
+
 
 export async function composeHarness(options: { autoresearch?: boolean; omitEntry?: string; reverseEntries?: boolean } = {}): Promise<RealHarness> {
   const root = await mkdtemp(join(tmpdir(), 'dsh-autoresearch-loader-'))
@@ -52,12 +64,14 @@ export async function composeHarness(options: { autoresearch?: boolean; omitEntr
   })
   const profile = loadProfile('dsh-autoresearch-test', 'integration', installAnchor, home, { userLayer: false })
   const entries = composeEntries([...profile.layers.map(layer => layer.patches), profile.patches, providerOverlay()])
-  const selected = (options.omitEntry ? entries.filter(entry => entry.id !== options.omitEntry) : entries).toSorted((left, right) => options.reverseEntries ? right.id.localeCompare(left.id) : 0)
-  const bootEntries = selected.map(entry => entry.id === 'hmr'
-    ? { ...entry, config: { root: [], ignored: [], debounce: 10 } }
-    : entry.id === 'autoresearch'
-      ? { ...entry, config: { ...entry.config, terminationGraceMs: COMPOSITION_TERMINATION_GRACE_MS } }
-      : entry)
+  const selectedEntries = options.omitEntry
+    ? entries.filter(entry => entry.id !== options.omitEntry)
+    : entries
+  const selected = selectedEntries.toSorted((left, right) => {
+    if (!options.reverseEntries) return 0
+    return right.id.localeCompare(left.id)
+  })
+  const bootEntries = selected.map(configureBootEntry)
   const configPath = join(profileDir, 'cordis.yml')
   await writeFile(configPath, '[]\n')
   const patches: PatchOptions[] = [{ insert: bootEntries }]

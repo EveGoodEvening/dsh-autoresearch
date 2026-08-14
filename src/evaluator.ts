@@ -3,7 +3,7 @@ import { closeSync, fstatSync, lstatSync, openSync, readFileSync, realpathSync, 
 import { constants } from 'node:fs'
 import { isAbsolute, relative, resolve, sep } from 'node:path'
 import type { SubprocessHandle, SubprocessOutcome, SubprocessOutputRead, SubprocessSpawnSpec } from '@deepseek-ai/dsh-subprocess'
-import type { EvaluatorArgv } from './types.ts'
+import type { EvaluatorArgv } from './types.js'
 import { EvaluatorArtifactWriter, normalizeRedactionSecrets, type EvaluatorArtifactRecord } from './evaluator-artifacts.js'
 
 export const EVALUATOR_PARSER_VERSION = 'final-line-json-v1' as const

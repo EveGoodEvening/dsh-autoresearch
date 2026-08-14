@@ -92,7 +92,7 @@ All sizes and times are positive integers. Unknown keys are rejected. The shippe
 | `max_experiments` | `defaultMaxExperiments` | Positive integer no greater than `maxExperiments`; excludes baseline. |
 | `target` | unset | Optional finite stopping threshold. |
 | `provenance` | `{}` | Exact object with optional normalized `evaluator` and `dataset` labels. |
-| `environment` | `{}` | Explicit evaluator overrides. Keys match shell environment identifiers; values are NUL-free strings. Values are hashed/redacted in durable evidence. |
+| `environment` | `{}` | Explicit evaluator overrides. Keys must match shell environment identifiers and must not begin with the reserved `DSH_` prefix; values are NUL-free strings. Values are hashed/redacted in durable evidence. |
 | `mode` | `background` | `background` or `foreground`. |
 
 These normalized values are frozen as the run policy. A resume must match the durable policy; changing the objective, scope, evaluator, metric, limits, provenance, or environment is not a continuation of the same run.
@@ -306,6 +306,8 @@ Current limitations: automatic age-based artifact/TSV retention is not implement
 
 The npm package is ESM, requires Node `^22.19.0 || >=24.0.0`, exports `dsh-autoresearch` and `dsh-autoresearch/invariant`, and ships only generated `lib/` JavaScript/declarations/source maps, `cordis.patch.yml`, README, LICENSE, and package metadata. Harness packages are peers supplied by the installed profile; the sole direct runtime dependency is `@deepseek-ai/schemastery`.
 
+`prepack` removes `lib/` before compiling so deleted or renamed source modules cannot survive as stale published output. The release smoke enforces an exact tarball-entry allowlist, validates every packed declaration import, installs into an isolated named profile with both `HOME` and `DSH_HOME` redirected, applies the installed package while rejecting source-tree resolution, and emits one structured JSON evidence object. Its temporary-repository scenarios use the packed controller with real Git, SQLite, and the local subprocess provider.
+
 Repository verification commands are:
 
 ```bash
@@ -315,5 +317,5 @@ pnpm run test
 pnpm run test:coverage
 pnpm run build
 pnpm pack
-node scripts/release-smoke.mjs ./dsh-autoresearch-0.1.0.tgz
+pnpm run release:smoke -- ./dsh-autoresearch-0.1.0.tgz
 ```

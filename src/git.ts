@@ -348,7 +348,18 @@ export async function inspectRunGitState(ctx: GitContext, executable: string, di
   return { ...(acceptedCommit ? { acceptedCommit } : {}), ...(branchCommit ? { branchCommit } : {}), ...(headCommit ? { headCommit } : {}), auditCommits, worktreeRegistered: registered !== undefined, ...(registered?.branch ? { registeredBranch: registered.branch } : {}) }
 }
 
-export async function removeRunWorktree(ctx: GitContext, executable: string, discovery: RepositoryDiscovery, identity: RunGitIdentity, options: Omit<GitCommandOptions, 'cwd'>): Promise<void> { const listed = parseWorktreeList((await runGit(ctx, executable, ['worktree', 'list', '--porcelain'], { ...options, cwd: discovery.repository })).stdout); if (listed.some((item) => item.path === identity.worktree)) await runGit(ctx, executable, ['worktree', 'remove', identity.worktree], { ...options, cwd: discovery.repository }) }
+export async function removeRunWorktree(ctx: GitContext, executable: string, discovery: RepositoryDiscovery, identity: RunGitIdentity, options: Omit<GitCommandOptions, 'cwd'>): Promise<void> {
+  const result = await runGit(ctx, executable, ['worktree', 'list', '--porcelain'], {
+    ...options,
+    cwd: discovery.repository,
+  })
+  const worktrees = parseWorktreeList(result.stdout)
+  if (!worktrees.some(item => item.path === identity.worktree)) return
+  await runGit(ctx, executable, ['worktree', 'remove', identity.worktree], {
+    ...options,
+    cwd: discovery.repository,
+  })
+}
 
 function validateControllerProcessIdentity(identity: ControllerProcessIdentity): void {
   if (!Number.isSafeInteger(identity.pid) || identity.pid <= 0) throw new TypeError('controller PID must be a positive integer')
@@ -386,7 +397,7 @@ function parseNameStatus(value: string): string[] { const fields = value.split('
 function globRegex(glob: string): RegExp { let out = '^'; for (let i = 0; i < glob.length; i++) { const char = glob[i]!; if (char === '*') { if (glob[i + 1] === '*') { i++; if (glob[i + 1] === '/') { i++; out += '(?:.*/)?' } else out += '.*' } else out += '[^/]*' } else if (char === '?') out += '[^/]'; else out += char.replace(/[|\\{}()[\]^$+?.]/gu, '\\$&') } return new RegExp(`${out}$`, 'u') }
 function matchesAny(path: string, globs: readonly string[]): boolean { return globs.some((glob) => globRegex(normalizeRepoPath(glob)).test(path)) }
 function isProtected(path: string): boolean { return PROTECTED_DEFAULTS.some((entry) => path === entry || path.startsWith(`${entry}/`)) || path.startsWith('.git/') || /(^|\/)(?:eval|evaluator|dataset|policy)(?:\.|\/|$)/iu.test(path) }
-function exceptionalCategory(path: string, submodule: boolean, policy: Pick<NormalizedRunPolicy, 'exceptionalAllowlists' | 'evaluation' | 'provenance'>): boolean { const lists = policy.exceptionalAllowlists; if (submodule && matchesAny(path, lists.submodules)) return true; if ((path === '.gitmodules' || path.startsWith('.git/')) && matchesAny(path, lists.gitConfig)) return true; if (/^(?:package\.json|.*lock.*|pnpm-workspace\.yaml)$/u.test(path) && matchesAny(path, lists.dependencies)) return true; const evaluatorPath = policy.evaluation.cwd ? `${policy.evaluation.cwd}/${policy.evaluation.command}` : policy.evaluation.command; if ((path === normalizeRepoPath(evaluatorPath) || /(^|\/)(?:eval|evaluator)(?:\.|\/|$)/iu.test(path)) && matchesAny(path, lists.evaluators)) return true; if ((policy.provenance.dataset && path.includes(policy.provenance.dataset)) || /(^|\/)dataset(?:\.|\/|$)/iu.test(path)) return matchesAny(path, lists.datasets); return false }
+function exceptionalCategory(path: string, submodule: boolean, policy: Pick<NormalizedRunPolicy, 'exceptionalAllowlists' | 'evaluation' | 'provenance'>): boolean { const lists = policy.exceptionalAllowlists; if (submodule && matchesAny(path, lists.submodules)) return true; if ((path === '.gitmodules' || path.startsWith('.git/')) && matchesAny(path, lists.gitConfig)) return true; if (/^(?:package\.json|.*lock.*|pnpm-workspace\.yaml)$/u.test(path) && matchesAny(path, lists.dependencies)) return true; const evaluatorPath = policy.evaluation.cwd ? `${policy.evaluation.cwd}/${policy.evaluation.command}` : policy.evaluation.command; const repositoryEvaluatorPath = evaluatorPath.startsWith('/') ? undefined : normalizeRepoPath(evaluatorPath); if ((path === repositoryEvaluatorPath || /(^|\/)(?:eval|evaluator)(?:\.|\/|$)/iu.test(path)) && matchesAny(path, lists.evaluators)) return true; if (policy.provenance.evaluator === path && matchesAny(path, lists.evaluators)) return true; if (policy.provenance.dataset === path && matchesAny(path, lists.datasets)) return true; return false }
 function sameSet(left: readonly string[], right: readonly string[]): boolean { const a = [...left].sort(); const b = [...right].sort(); return a.length === b.length && a.every((value, index) => value === b[index]) }
 function isUniqueConstraint(error: unknown): boolean { return String((error as { code?: unknown }).code ?? '').startsWith('SQLITE_CONSTRAINT') || String(error).includes('UNIQUE constraint failed') }
 function parseWorktreeList(value: string): Array<{ path: string; branch?: string }> { return value.trim().split(/\n\n+/u).filter(Boolean).map((block) => { const lines = block.split('\n'); const path = lines[0]?.startsWith('worktree ') ? lines[0].slice(9) : ''; const branch = lines.find((line) => line.startsWith('branch '))?.slice(7); return { path, ...(branch ? { branch } : {}) } }) }

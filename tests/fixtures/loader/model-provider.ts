@@ -17,21 +17,36 @@ export function releaseModel(): void {
   modelGate?.resolve()
   modelGate = undefined
 }
+interface ProposalHandoff {
+  readonly identity: { readonly runId: string; readonly experimentId: string; readonly ordinal: number; readonly nonce: string }
+  readonly workspace: { readonly worktree: string }
+}
 
-function proposalHandoff(options: GenerateOptions): { identity: { runId: string; experimentId: string; ordinal: number; nonce: string }; workspace: { worktree: string } } {
+
+function proposalHandoff(options: GenerateOptions): ProposalHandoff {
   const serialized = JSON.stringify(options.messages)
   const marker = 'AUTORESEARCH PROPOSAL ROUND\\n\\n'
-  const start = serialized.indexOf(marker)
-  if (start < 0) throw new Error('proposal handoff missing from model request')
-  const decoded = JSON.parse(serialized) as unknown
-  const walk = (value: unknown): string | undefined => {
+  if (!serialized.includes(marker)) throw new Error('proposal handoff missing from model request')
+
+  function findPrompt(value: unknown): string | undefined {
     if (typeof value === 'string' && value.startsWith('AUTORESEARCH PROPOSAL ROUND\n\n')) return value
-    if (Array.isArray(value)) for (const item of value) { const found = walk(item); if (found) return found }
-    if (value && typeof value === 'object') for (const item of Object.values(value)) { const found = walk(item); if (found) return found }
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        const prompt = findPrompt(item)
+        if (prompt) return prompt
+      }
+    } else if (value && typeof value === 'object') {
+      for (const item of Object.values(value)) {
+        const prompt = findPrompt(item)
+        if (prompt) return prompt
+      }
+    }
+    return undefined
   }
-  const prompt = walk(decoded)
+
+  const prompt = findPrompt(JSON.parse(serialized) as unknown)
   if (!prompt) throw new Error('proposal prompt text missing')
-  return JSON.parse(prompt.slice('AUTORESEARCH PROPOSAL ROUND\n\n'.length)) as { identity: { runId: string; experimentId: string; ordinal: number; nonce: string }; workspace: { worktree: string } }
+  return JSON.parse(prompt.slice('AUTORESEARCH PROPOSAL ROUND\n\n'.length)) as ProposalHandoff
 }
 
 function toolCall(name: string, args: unknown, idText: string): StreamChunk[] {
@@ -54,9 +69,25 @@ class BoundedAdapter extends LlmAdapter {
     await modelGate?.promise
     const serialized = JSON.stringify(options.messages)
     const handoff = proposalHandoff(options)
-    const chunks = serialized.includes('"name":"read"')
-      ? toolCall('autoresearch_report', { ...handoff.identity, hypothesis: 'Inspect the strict fixture score', intendedEdits: ['score.txt'], implementationSummary: 'Observed the bounded candidate input without changing it.', blockerClaim: null }, 'report-call')
-      : toolCall('read', { file_path: join(handoff.workspace.worktree, 'score.txt') }, 'read-call')
+    const releaseAccepted = serialized.includes('release accepted candidate')
+    const releaseRejected = serialized.includes('release rejected candidate')
+    const releaseTie = serialized.includes('release tie candidate')
+    let chunks: StreamChunk[]
+    if ((releaseAccepted || releaseRejected || releaseTie) && !serialized.includes('release-score-read')) {
+      chunks = toolCall('read', { file_path: join(handoff.workspace.worktree, 'score.txt') }, 'release-score-read')
+    } else if ((releaseAccepted || releaseRejected || releaseTie) && !serialized.includes('release-score-write')) {
+      let content = '1\n'
+      if (releaseAccepted) content = '0\n'
+      else if (releaseRejected) content = '2\n'
+      chunks = toolCall('write', {
+        file_path: join(handoff.workspace.worktree, 'score.txt'),
+        content,
+      }, 'release-score-write')
+    } else if (serialized.includes('"name":"read"') || releaseAccepted || releaseRejected || releaseTie) {
+      chunks = toolCall('autoresearch_report', { ...handoff.identity, hypothesis: 'Inspect the strict fixture score', intendedEdits: ['score.txt'], implementationSummary: releaseAccepted || releaseRejected || releaseTie ? 'Wrote the bounded release scenario score.' : 'Observed the bounded candidate input without changing it.', blockerClaim: null }, 'report-call')
+    } else {
+      chunks = toolCall('read', { file_path: join(handoff.workspace.worktree, 'score.txt') }, 'read-call')
+    }
     for (const chunk of chunks) yield chunk
   }
 }
