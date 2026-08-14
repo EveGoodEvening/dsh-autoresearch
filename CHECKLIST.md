@@ -411,13 +411,13 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 
 ## Chunk 06-owned orchestration dependencies
 
-- [ ] Chunk 06: prove proposal Agent, tool, process, and job quiescence; await `whenIdle()` and memoized `AgentHandle.dispose()` before any snapshot/commit/evaluation handoff.
-- [ ] Chunk 06: prove exclusive worktree ownership after child disposal, exact start/candidate commit-backed state, and no late/concurrent writer until evaluator settlement.
-- [ ] Chunk 06: run and durably settle the baseline before child creation; cover target shortcut, every baseline-blocked outcome, immutable provenance, and no candidate-budget consumption.
-- [ ] Chunk 06: persist each experiment/outcome/artifact set before admitting the next child and persist accept/reject plus reconciliation intent before applying Chunk 05 reconciliation primitives.
-- [ ] Chunk 06: prove authorized restart reconciliation converges and ambiguous/external state blocks without duplicate candidates or lost audit refs.
-- [ ] Chunk 06: atomically persist terminal/quiescent run state, completed reconciliation, and artifact references before releasing the active lock as the controller's final idempotent repository action.
-- [ ] Chunk 06: do not claim that a malicious independent same-UID racer cannot execute against string `cwd`; require an external sandbox/read-only provider for that stronger guarantee.
+- [x] Chunk 06: prove proposal Agent, tool, process, and job quiescence; await `whenIdle()` and memoized `AgentHandle.dispose()` before any snapshot/commit/evaluation handoff.
+- [x] Chunk 06: prove exclusive worktree ownership after child disposal, exact start/candidate commit-backed state, and no late/concurrent writer until evaluator settlement.
+- [x] Chunk 06: run and durably settle the baseline before child creation; cover target shortcut, every baseline-blocked outcome, immutable provenance, and no candidate-budget consumption.
+- [x] Chunk 06: persist each experiment/outcome/artifact set before admitting the next child and persist accept/reject plus reconciliation intent before applying Chunk 05 reconciliation primitives.
+- [x] Chunk 06: prove authorized restart reconciliation converges and ambiguous/external state blocks without duplicate candidates or lost audit refs.
+- [x] Chunk 06: atomically persist terminal/quiescent run state, completed reconciliation, and artifact references before releasing the active lock as the controller's final idempotent repository action.
+- [x] Chunk 06: do not claim that a malicious independent same-UID racer cannot execute against string `cwd`; require an external sandbox/read-only provider for that stronger guarantee.
 
 ## Chunk 05 verification gate
 
@@ -465,92 +465,93 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 
 ## Proposal agent (`src/agent.ts`)
 
-- [ ] Create `src/agent.ts`.
-- [ ] Create every proposal child directly with `ctx.agents.create`; do not route worktree-bound rounds through `ctx.subagents.start`.
-- [ ] Generate a fresh `SessionId` for every proposal round.
-- [ ] Persist canonical isolated worktree path in child `meta.cwd`.
-- [ ] Set `parentSession`, origin, and delegation-depth metadata from `exec.agent`.
-- [ ] Pass explicit `agentOptions.provider`, `model`, and optional `maxTokens`, inherited from the initiating Agent unless configured overrides apply.
-- [ ] During `setup(childCtx)`, compose the required parent preset/policy surface before publication.
-- [ ] During the same setup window, register an autoresearch-only schema-validating report tool in the child scope.
-- [ ] Register a matching child-scoped system-prompt section that requires exactly one report-tool submission.
+- [x] Create `src/agent.ts`.
+- [x] Create every proposal child directly with `ctx.agents.create`; do not route worktree-bound rounds through `ctx.subagents.start`.
+- [x] Generate a fresh `SessionId` for every proposal round.
+- [x] Persist canonical isolated worktree path in child `meta.cwd`.
+- [x] Set `parentSession`, origin, and delegation-depth metadata from `exec.agent`.
+- [x] Pass explicit `agentOptions.provider`, `model`, and optional `maxTokens`, inherited from the initiating Agent unless configured overrides apply.
+- [x] During `setup(childCtx)`, compose the required parent preset/policy surface before publication.
+- [x] During the same setup window, register an autoresearch-only schema-validating report tool in the child scope.
+- [x] Register a matching child-scoped system-prompt section that requires exactly one report-tool submission.
 - [ ] Document in code/tests that `SubagentStartRequest` is unsuitable because it has no per-run cwd/session-meta hook, `agentOptions` cannot carry cwd, and prompt paths do not create isolation.
-- [ ] Bound handoff size and report size.
-- [ ] Supply immutable objective/policy, experiment number, best measured facts, bounded prior summary, and tracker-derived workspace facts.
-- [ ] Instruct the child to inspect/edit only the isolated worktree represented by its durable cwd.
-- [ ] Define the validated child report with hypothesis, intended edits, implementation summary, and optional blocker claim only.
-- [ ] Exclude authoritative metric/status/command/Git decision fields.
-- [ ] Drive the child with `followup(...)`, await `whenIdle()`, and reject missing, duplicate, malformed, stale, wrong-experiment, or oversized reports.
-- [ ] Propagate controller cancellation through `agent.cancel(...)`.
-- [ ] Always await `AgentHandle.dispose()` in `finally` on success, report failure, cancellation, controller failure, and unload; the host remains authoritative.
-- [ ] Prove every proposal-owned tool/process/job is structured and quiescent before ownership transfer; remove background/detach capabilities or retain and await every handle so a late writer cannot survive disposal.
+- [x] Bound handoff size and report size.
+- [x] Supply immutable objective/policy, experiment number, best measured facts, bounded prior summary, and tracker-derived workspace facts.
+- [x] Instruct the child to inspect/edit only the isolated worktree represented by its durable cwd.
+- [x] Define the validated child report with hypothesis, intended edits, implementation summary, and optional blocker claim only.
+- [x] Exclude authoritative metric/status/command/Git decision fields.
+- [x] Drive the child with `followup(...)`, await `whenIdle()`, and reject missing, duplicate, malformed, stale, wrong-experiment, or oversized reports.
+- [x] Propagate controller cancellation through `agent.cancel(...)`.
+- [x] Always await `AgentHandle.dispose()` in `finally` on success, report failure, cancellation, controller failure, and unload; the host remains authoritative.
+- [x] Prove every proposal-owned tool/process/job is structured and quiescent before ownership transfer; remove background/detach capabilities or retain and await every handle so a late writer cannot survive disposal.
 
 ## Recovery (`src/recovery.ts`)
 
-- [ ] Create `src/recovery.ts`.
-- [ ] Resume by `run_id`, not branch/tag alone.
-- [ ] Verify repository identity and start SHA.
-- [ ] Verify immutable policy and evaluator/provenance hash.
-- [ ] Verify run-id-bearing branch/worktree registration and current full HEAD.
-- [ ] Verify unresolved experiment, artifact completeness, and recorded evaluator spawn/attempt facts.
-- [ ] Within the same live provider session, use only the provider-owned handle for evaluator process-tree liveness/termination.
-- [ ] After host restart, never signal a recorded PID without provider-supported stable identity proof stronger than PID reuse.
-- [ ] Rerun an interrupted baseline/candidate evaluator only when durable/provider evidence proves the entire prior provider-owned process tree—parent and every descendant—is quiescent; parent death alone is insufficient.
-- [ ] Mark missing whole-process-tree quiescence proof typed `blocked`; do not signal or duplicate evaluation.
-- [ ] When safe rerun is proven, retain the interrupted baseline attempt, restore the isolated worktree to immutable start, and rerun the exact evaluator.
-- [ ] When safe rerun is proven, restore recorded candidate commit for interrupted candidate evaluation and rerun without creating a new candidate.
-- [ ] Recompute interrupted decision from durable measured facts.
-- [ ] Idempotently restore expected accepted HEAD for committed decision.
-- [ ] Never create duplicate candidate for unresolved experiment.
-- [ ] Block on protected changes.
-- [ ] Block on missing commits.
-- [ ] Block on provenance mismatch.
-- [ ] Block on ambiguous tracker state.
-- [ ] Block on uncertain surviving evaluator.
-- [ ] Block on external worktree/branch mutation.
-- [ ] Preserve evidence before repair/reconciliation.
-- [ ] Persist deterministic accept/reject and reconcile intent before applying Chunk 05 prepare/cleanup/ref-transaction primitives; authorize restart repair only when durable intent, audit ref, lineage, and observed Git state agree.
-- [ ] Restore and exactly reverify the recorded start/candidate commit, including no untracked or ignored extras, before resumed evaluation; admit no writer until settlement.
+- [x] Create `src/recovery.ts`.
+- [x] Resume by `run_id`, not branch/tag alone.
+- [x] Verify repository identity and start SHA.
+- [x] Verify immutable policy and evaluator/provenance hash.
+- [x] Verify run-id-bearing branch/worktree registration and current full HEAD.
+- [x] Verify unresolved experiment, artifact completeness, and recorded evaluator spawn/attempt facts.
+- [x] Within the same live provider session, use only the provider-owned handle for evaluator process-tree liveness/termination.
+- [x] After host restart, never signal a recorded PID without provider-supported stable identity proof stronger than PID reuse.
+- [x] Rerun an interrupted baseline/candidate evaluator only when durable/provider evidence proves the entire prior provider-owned process tree—parent and every descendant—is quiescent; parent death alone is insufficient.
+- [x] Mark missing whole-process-tree quiescence proof typed `blocked`; do not signal or duplicate evaluation.
+- [x] When safe rerun is proven, retain the interrupted baseline attempt, restore the isolated worktree to immutable start, and rerun the exact evaluator.
+- [x] When safe rerun is proven, restore recorded candidate commit for interrupted candidate evaluation and rerun without creating a new candidate.
+- [x] Recompute interrupted decision from durable measured facts.
+- [x] Idempotently restore expected accepted HEAD for committed decision.
+- [x] Never create duplicate candidate for unresolved experiment.
+- [x] Block on protected changes.
+- [x] Block on missing commits.
+- [x] Block on provenance mismatch.
+- [x] Block on ambiguous tracker state.
+- [x] Block on uncertain surviving evaluator.
+- [x] Block on external worktree/branch mutation.
+- [x] Preserve evidence before repair/reconciliation.
+- [x] Persist deterministic accept/reject and reconcile intent before applying Chunk 05 prepare/cleanup/ref-transaction primitives; authorize restart repair only when durable intent, audit ref, lineage, and observed Git state agree.
+- [x] Restore and exactly reverify the recorded start/candidate commit, including no untracked or ignored extras, before resumed evaluation; admit no writer until settlement.
 
 ## Controller (`src/controller.ts`)
 
-- [ ] Create `src/controller.ts`.
-- [ ] Make `AutoresearchRunController` sole orchestration/state owner.
-- [ ] Normalize and freeze run policy before execution.
-- [ ] Allow only read-only repository/common-directory/start-SHA discovery before tracker creation.
-- [ ] Create tracker/run row with discovered repository identity and start SHA before every mutating/allocating external setup effect.
-- [ ] Persist intent before every external side effect.
-- [ ] Persist observed outcome after every external side effect.
-- [ ] Resolve/freeze Git executable identity and normalized policy once; mint evaluator boundary identities only from those immutable facts and block resume on any executable/evaluation/policy hash mismatch.
-- [ ] After allocation, verify the dedicated worktree exactly equals `startCommit`; persist baseline intent, artifacts, and terminal outcome before creating any child. Cover target shortcut and every nonzero/timeout/signal/parser/provenance/isolation `baseline-blocked` result without consuming candidate budget.
-- [ ] Run baseline gate.
-- [ ] Handle baseline-target shortcut.
-- [ ] Request one fresh proposal at a time.
-- [ ] Validate child-authored filesystem changes on host.
-- [ ] Create candidate commit/audit record before evaluation.
-- [ ] Execute independent evaluator on recorded candidate commit.
-- [ ] Enforce event order `whenIdle -> dispose resolved -> candidate audit commit -> exact worktree verification -> declared-file revalidation -> spawn intent -> string-cwd spawn`; admit no next proposal/writer until evaluator outcome, artifacts, and terminal experiment state are durable.
-- [ ] Parse trusted metric on host.
-- [ ] Compute strict minimize acceptance with `<`.
-- [ ] Compute strict maximize acceptance with `>`.
-- [ ] Reject ties.
-- [ ] Reject regressions.
-- [ ] Recompute target satisfaction after accepted result.
-- [ ] Persist terminal experiment before next proposal.
-- [ ] Stop at experiment budget.
-- [ ] Surface proven post-baseline blocker separately.
-- [ ] Surface infrastructure/contract failure as `round-failed`.
-- [ ] Handle cancellation at a quiescent durable boundary.
+- [x] Create `src/controller.ts`.
+- [x] Make `AutoresearchRunController` sole orchestration/state owner.
+- [x] Normalize and freeze run policy before execution.
+- [x] Allow only read-only repository/common-directory/start-SHA discovery before tracker creation.
+- [x] Create tracker/run row with discovered repository identity and start SHA before every mutating/allocating external setup effect.
+- [x] Persist intent before every external side effect.
+- [x] Persist observed outcome after every external side effect.
+- [x] Resolve/freeze Git executable identity and normalized policy once; mint evaluator boundary identities only from those immutable facts and block resume on any executable/evaluation/policy hash mismatch.
+- [x] After allocation, verify the dedicated worktree exactly equals `startCommit`; persist baseline intent, artifacts, and terminal outcome before creating any child. Cover target shortcut and every nonzero/timeout/signal/parser/provenance/isolation `baseline-blocked` result without consuming candidate budget.
+- [x] Run baseline gate.
+- [x] Handle baseline-target shortcut.
+- [x] Request one fresh proposal at a time.
+- [x] Validate child-authored filesystem changes on host.
+- [x] Create candidate commit/audit record before evaluation.
+- [x] Execute independent evaluator on recorded candidate commit.
+- [x] Enforce event order `whenIdle -> dispose resolved -> candidate audit commit -> exact worktree verification -> declared-file revalidation -> spawn intent -> string-cwd spawn`; admit no next proposal/writer until evaluator outcome, artifacts, and terminal experiment state are durable.
+- [x] Parse trusted metric on host.
+- [x] Compute strict minimize acceptance with `<`.
+- [x] Compute strict maximize acceptance with `>`.
+- [x] Reject ties.
+- [x] Reject regressions.
+- [x] Recompute target satisfaction after accepted result.
+- [x] Persist terminal experiment before next proposal.
+- [x] Stop at experiment budget.
+- [x] Surface proven post-baseline blocker separately.
+- [x] Surface infrastructure/contract failure as `round-failed`.
+- [x] Handle cancellation at a quiescent durable boundary.
 - [ ] Remove `ctx.workflowEngine` production orchestration.
 - [ ] Replace or remove the four workflow-based unit tests in `tests/autoresearch.spec.ts` during the controller clean cutover.
 - [ ] Remove no-longer-used workflow runtime dependency/peer after cutover.
 - [ ] Remove temporary legacy `evaluation_command` and workflow-specific public patch/tool schema runtime compatibility during the controller clean cutover.
-- [ ] Keep rejected candidate commits/audit refs.
-- [ ] Reconcile isolated worktree to last durable accepted commit.
-- [ ] Mint the attempt artifact writer from owner-only `StateLayout` only after durable attempt identity exists; transactionally link artifact ownership before terminal transition or the next experiment.
-- [ ] Persist terminal/quiescent run facts, completed Git reconciliation, and artifact references before active-lock release; make release the controller's final idempotent repository action.
+- [x] Keep rejected candidate commits/audit refs.
+- [x] Reconcile isolated worktree to last durable accepted commit.
+- [x] Mint the attempt artifact writer from owner-only `StateLayout` only after durable attempt identity exists; transactionally link artifact ownership before terminal transition or the next experiment.
+- [x] Persist terminal/quiescent run facts, completed Git reconciliation, and artifact references before active-lock release; make release the controller's final idempotent repository action.
 
 ## Chunk 06 verification gate
+- [x] Record focused Chunk 06 implementation verification: `pnpm install --frozen-lockfile` passed; `pnpm run typecheck` passed; Vitest passed 9 files / 172 tests; `pnpm run build` passed. Granular test, independent review, closure, and accounting-commit checkboxes remain unchecked pending their separate gates.
 
 - [ ] Test baseline-target shortcut spawns no child.
 - [ ] Test strict accepted improvement.
@@ -585,14 +586,14 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 
 ## Chunk 06 implementation commit gate
 
-- [ ] Integrate proposal/recovery lanes into controller.
-- [ ] Confirm all prior callers migrated to the controller clean cutover.
-- [ ] Commit recoverable controller and focused tests.
+- [x] Integrate proposal/recovery lanes into controller.
+- [ ] Confirm all prior callers migrated to the controller clean cutover; legacy workflow/tool wiring remains assigned to Chunk 07.
+- [x] Commit recoverable controller and focused tests in foundation commit `ca184254e3681fea00cbf53ec4d377c9803928a0`, proposal/recovery commit `b690a56f7df0b97dd5fb03d32201b8a933928718`, and controller commit `99b7aa12a7036b5f8cf10c634a455779141d956f`.
 
 ## Chunk 06 tracker-accounting gate
 
-- [ ] Record Chunk 06 implementation commit full SHA after it exists.
-- [ ] Commit the checklist update separately from the Chunk 06 implementation commit.
+- [x] Record Chunk 06 implementation commits: `ca184254e3681fea00cbf53ec4d377c9803928a0`, `b690a56f7df0b97dd5fb03d32201b8a933928718`, and `99b7aa12a7036b5f8cf10c634a455779141d956f`.
+- [ ] Commit the checklist update separately from the Chunk 06 implementation commits; independent review, closure, and accounting commit remain pending.
 
 # Chunk 07 — `07-wire-tool-jobs-lifecycle-and-hmr`
 
