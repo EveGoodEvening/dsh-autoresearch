@@ -368,73 +368,73 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 
 ## Git boundary (`src/git.ts`)
 
-- [ ] Create `src/git.ts`.
-- [ ] Perform read-only caller repository, Git common directory, repository identity, and immutable start-SHA discovery before tracker creation; make no lock/ref/worktree/index mutation during discovery.
-- [ ] Invoke configured Git executable through `ctx.subprocess` with argv.
-- [ ] Use a wall-clock timeout for every Git subprocess call.
-- [ ] Require positive termination grace for Git subprocess calls.
-- [ ] Terminate the whole Git process tree on timeout or cancellation.
-- [ ] Await Git `waitForExit()` before command settlement.
-- [ ] Enforce stdout and stderr byte caps for Git invocations.
-- [ ] Use an explicit/scrubbed environment for Git invocations.
-- [ ] Acquire repository/run-tag active exclusion only after the tracker/run row exists.
-- [ ] Enforce `maxActiveRunsPerRepository`.
-- [ ] Create dedicated branch whose identity includes `branchPrefix`, `runTag`, and immutable `run_id`.
-- [ ] Create dedicated worktree whose identity includes immutable `run_id` for every run.
-- [ ] Treat `runTag` only as the active exclusion key; retained terminal branches/worktrees do not collide with later runs using the same tag.
-- [ ] Reject branch/worktree identity collision unless resuming the same `run_id`.
-- [ ] Never checkout/reset/stage/clean caller worktree.
-- [ ] Preserve dirty caller staged/unstaged/untracked work.
-- [ ] Snapshot candidate parent before child edits.
-- [ ] Inspect staged changes.
-- [ ] Inspect unstaged changes.
-- [ ] Inspect untracked changes.
-- [ ] Enforce mutable globs on host.
-- [ ] Enforce protected surfaces on host.
-- [ ] Reject dependency changes unless explicitly allowlisted.
-- [ ] Reject submodule changes unless explicitly allowlisted.
-- [ ] Reject Git config changes unless explicitly allowlisted.
-- [ ] Reject evaluator/dataset/policy changes unless explicitly allowlisted.
-- [ ] Stage only validated paths.
-- [ ] Create every candidate as a full commit.
-- [ ] Record full parent/candidate SHAs.
-- [ ] Create/retain audit refs for accepted and rejected candidates.
-- [ ] Implement idempotent accepted-HEAD reconciliation.
+- [x] Create `src/git.ts`.
+- [x] Perform read-only caller repository, Git common directory, repository identity, and immutable start-SHA discovery before tracker creation; make no lock/ref/worktree/index mutation during discovery.
+- [x] Invoke configured Git executable through `ctx.subprocess` with argv.
+- [x] Use a wall-clock timeout for every Git subprocess call.
+- [x] Require positive termination grace for Git subprocess calls.
+- [x] Terminate the whole Git process tree on timeout or cancellation.
+- [x] Await Git `waitForExit()` before command settlement.
+- [x] Enforce stdout and stderr byte caps for Git invocations.
+- [x] Use an explicit/scrubbed environment for Git invocations.
+- [x] Acquire repository/run-tag active exclusion only after the tracker/run row exists.
+- [x] Enforce `maxActiveRunsPerRepository`.
+- [x] Create dedicated branch whose identity includes `branchPrefix`, `runTag`, and immutable `run_id`.
+- [x] Create dedicated worktree whose identity includes immutable `run_id` for every run.
+- [x] Treat `runTag` only as the active exclusion key; retained terminal branches/worktrees do not collide with later runs using the same tag.
+- [x] Reject branch/worktree identity collision unless resuming the same `run_id`.
+- [x] Never checkout/reset/stage/clean caller worktree.
+- [x] Preserve dirty caller staged/unstaged/untracked work.
+- [x] Snapshot candidate parent before child edits.
+- [x] Inspect staged changes.
+- [x] Inspect unstaged changes.
+- [x] Inspect untracked changes.
+- [x] Enforce mutable globs on host.
+- [x] Enforce protected surfaces on host.
+- [x] Reject dependency changes unless explicitly allowlisted.
+- [x] Reject submodule changes unless explicitly allowlisted.
+- [x] Reject Git config changes unless explicitly allowlisted.
+- [x] Reject evaluator/dataset/policy changes unless explicitly allowlisted.
+- [x] Stage only validated paths.
+- [x] Create every candidate as a full commit.
+- [x] Record full parent/candidate SHAs.
+- [x] Create/retain audit refs for accepted and rejected candidates.
+- [x] Implement idempotent accepted-HEAD reconciliation.
 - [ ] Atomically persist terminal/quiescent run outcome before releasing the repository/run-tag active lock; make release the final idempotent operation.
-- [ ] Recover and release a stale lock only when its owning run is durably terminal.
-- [ ] Implement explicit configured worktree removal/release as an operational cleanup path without deleting tracker, artifact, commit, or audit-ref evidence.
-- [ ] Avoid destructive reset as sole provenance record.
+- [x] Recover and release a stale lock only when its owning run is durably terminal.
+- [x] Implement explicit configured worktree removal/release as an operational cleanup path without deleting tracker, artifact, commit, or audit-ref evidence.
+- [x] Avoid destructive reset as sole provenance record.
 
 ## Evaluator boundary (`src/evaluator.ts`)
 
-- [ ] Create `src/evaluator.ts`.
-- [ ] Represent evaluator as command plus argv, never shell line.
-- [ ] Validate evaluator cwd against normalized policy.
-- [ ] Build explicit/scrubbed environment.
-- [ ] Prevent ambient secret forwarding.
-- [ ] Freeze/hash evaluator argv.
-- [ ] Freeze/hash evaluator files.
-- [ ] Freeze/hash dataset/version identifiers.
-- [ ] Freeze/hash environment overrides.
-- [ ] Freeze/hash metric name/direction/parser version/policy.
-- [ ] Persist evaluator spawn intent before calling `ctx.subprocess.spawn`.
-- [ ] Persist provider-observed PID and attempt facts immediately after spawn.
-- [ ] Treat PID as diagnostic evidence only; never use PID alone as ownership proof after host restart.
-- [ ] Enforce stdout byte cap.
-- [ ] Enforce stderr byte cap.
-- [ ] Implement real wall-clock timeout.
-- [ ] Require positive termination grace.
-- [ ] Terminate whole process tree on timeout/cancel only through the live provider-owned handle.
-- [ ] Await `waitForExit()` before settlement.
-- [ ] Persist exit code/signal/timeout facts.
-- [ ] Retain bounded log artifacts.
-- [ ] Parse exactly one dedicated final-line JSON object.
-- [ ] Require exactly configured metric key.
-- [ ] Reject missing metric.
-- [ ] Reject duplicate metric/result objects.
-- [ ] Reject malformed JSON.
-- [ ] Reject non-finite metric.
-- [ ] Treat stdout as evidence, not agent authority.
+- [x] Create `src/evaluator.ts`.
+- [x] Represent evaluator as command plus argv, never shell line.
+- [x] Validate evaluator cwd against normalized policy.
+- [x] Build explicit/scrubbed environment.
+- [x] Prevent ambient secret forwarding.
+- [x] Freeze/hash evaluator argv.
+- [x] Freeze/hash evaluator files.
+- [x] Freeze/hash dataset/version identifiers.
+- [x] Freeze/hash environment overrides.
+- [x] Freeze/hash metric name/direction/parser version/policy.
+- [x] Persist evaluator spawn intent before calling `ctx.subprocess.spawn`.
+- [x] Persist provider-observed PID and attempt facts immediately after spawn.
+- [x] Treat PID as diagnostic evidence only; never use PID alone as ownership proof after host restart.
+- [x] Enforce stdout byte cap.
+- [x] Enforce stderr byte cap.
+- [x] Implement real wall-clock timeout.
+- [x] Require positive termination grace.
+- [x] Terminate whole process tree on timeout/cancel only through the live provider-owned handle.
+- [x] Await `waitForExit()` before settlement.
+- [x] Persist exit code/signal/timeout facts.
+- [x] Retain bounded log artifacts.
+- [x] Parse exactly one dedicated final-line JSON object.
+- [x] Require exactly configured metric key.
+- [x] Reject missing metric.
+- [x] Reject duplicate metric/result objects.
+- [x] Reject malformed JSON.
+- [x] Reject non-finite metric.
+- [x] Treat stdout as evidence, not agent authority.
 
 ## Baseline gate
 
@@ -451,30 +451,31 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 - [ ] Ensure baseline attempt does not consume candidate experiment budget.
 
 ## Chunk 05 verification gate
+- [x] Record focused Chunk 05 implementation verification: `pnpm run typecheck` passed; Vitest passed 6 files/106 tests; `pnpm run build` passed.
 
-- [ ] Test clean temporary Git repository setup.
-- [ ] Test read-only repository discovery causes no lock/ref/worktree/index mutation and tracker creation precedes all such mutations.
-- [ ] Test dirty caller work preservation.
-- [ ] Test immutable `run_id` appears in branch/worktree identity.
-- [ ] Test same repository/run-tag active exclusion.
+- [x] Test clean temporary Git repository setup.
+- [x] Test read-only repository discovery causes no lock/ref/worktree/index mutation and tracker creation precedes all such mutations.
+- [x] Test dirty caller work preservation.
+- [x] Test immutable `run_id` appears in branch/worktree identity.
+- [x] Test same repository/run-tag active exclusion.
 - [ ] Test a later run may reuse a terminal run's tag while the prior run-id-bearing worktree is retained.
 - [ ] Test independent run-tag worktrees.
-- [ ] Test full-SHA lineage.
-- [ ] Test staged protected-path violation.
+- [x] Test full-SHA lineage.
+- [x] Test staged protected-path violation.
 - [ ] Test unstaged protected-path violation.
-- [ ] Test untracked protected-path violation.
+- [x] Test untracked protected-path violation.
 - [ ] Test dependency/submodule/config exceptional policies.
-- [ ] Test candidate commit and rejected audit preservation.
-- [ ] Test exact evaluator argv/cwd/env.
-- [ ] Test stdout/stderr caps.
-- [ ] Test nonzero/signal exit facts.
-- [ ] Test wall-clock timeout.
+- [x] Test candidate commit and rejected audit preservation.
+- [x] Test exact evaluator argv/cwd/env.
+- [x] Test stdout/stderr caps.
+- [x] Test nonzero/signal exit facts.
+- [x] Test wall-clock timeout.
 - [ ] Test descendant-process termination through the live provider handle.
 - [ ] Test cancellation idempotence.
-- [ ] Test Git subprocess timeout, output caps, scrubbed environment, whole-tree termination, and awaited settlement.
-- [ ] Test terminal persistence precedes lock release and stale terminal-owner lock recovery is idempotent.
-- [ ] Test explicit worktree cleanup removes the registered worktree while retaining durable evidence.
-- [ ] Test settlement waits for whole-tree quiescence.
+- [x] Test Git subprocess timeout, output caps, scrubbed environment, whole-tree termination, and awaited settlement.
+- [x] Test terminal persistence precedes lock release and stale terminal-owner lock recovery is idempotent.
+- [x] Test explicit worktree cleanup removes the registered worktree while retaining durable evidence.
+- [x] Test settlement waits for whole-tree quiescence.
 - [ ] Test every baseline success/blocking outcome externally.
 
 ## Chunk 05 review gate
@@ -486,12 +487,12 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 
 ## Chunk 05 implementation commit gate
 
-- [ ] Integrate parallel Git/evaluator lanes against frozen tracker/types APIs.
-- [ ] Commit host Git/evaluator boundaries and focused real-behavior tests.
+- [x] Integrate parallel Git/evaluator lanes against frozen tracker/types APIs.
+- [x] Commit host Git/evaluator boundaries and focused real-behavior tests as `33acd67` (`feat(boundaries): add host Git and evaluator safety`).
 
 ## Chunk 05 tracker-accounting gate
 
-- [ ] Record Chunk 05 implementation commit full SHA after it exists.
+- [x] Record Chunk 05 implementation commit full SHA after it exists: `33acd67cf37d6a01de167c8c8279dcd4f3deda8f`.
 - [ ] Commit the checklist update separately from the Chunk 05 implementation commit.
 
 # Chunk 06 — `06-implement-recoverable-controller`
