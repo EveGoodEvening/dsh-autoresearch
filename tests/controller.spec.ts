@@ -93,4 +93,33 @@ describe('exclusive autoresearch controller contract', () => {
       tracker.close()
     } finally { rmSync(root, { recursive: true, force: true }) }
   })
+  it('commits a successful baseline using the accepted-state fact contract', () => {
+    const root = mkdtempSync(join(tmpdir(), 'controller-baseline-'))
+    try {
+      const tracker = DurableTracker.open(join(root, 'tracker.sqlite')); const sha = 'a'.repeat(40)
+      tracker.createRun({ runId: 'run', repositoryId: 'repo', repository: '/repo', gitCommonDir: '/repo/.git', callerCwd: '/repo', startCommit: sha, runTag: 'tag', branch: 'autoresearch/tag-run', worktree: '/worktree', policy: {}, policySha256: 'b'.repeat(64), provenance: {}, provenanceSha256: 'c'.repeat(64) })
+      tracker.transitionRun('run', 'baseline-running')
+      tracker.createExperiment({ experimentId: 'baseline', runId: 'run', ordinal: 0, kind: 'baseline', parentCommit: sha, command: 'node', args: [] })
+      tracker.transitionExperiment('baseline', 'running')
+      tracker.commitTerminalExperiment('baseline', 'accepted', { metric: 1, decision: 'accept' })
+      tracker.transitionRun('run', 'ready', { best: { metric: 1, commit: sha, experimentId: 'baseline' } })
+      expect(tracker.getRun('run')).toMatchObject({ state: 'ready', best_metric: 1 })
+      expect(tracker.database.prepare('SELECT state, metric, exit_code FROM experiments WHERE experiment_id = ?').get('baseline')).toMatchObject({ state: 'accepted', metric: 1, exit_code: null })
+      tracker.close()
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  })
+
+  it('atomically creates and prepares one candidate without a ready-state fault window', () => {
+    const root = mkdtempSync(join(tmpdir(), 'controller-prepare-'))
+    try {
+      const tracker = DurableTracker.open(join(root, 'tracker.sqlite')); const sha = 'a'.repeat(40)
+      tracker.createRun({ runId: 'run', repositoryId: 'repo', repository: '/repo', gitCommonDir: '/repo/.git', callerCwd: '/repo', startCommit: sha, runTag: 'tag', branch: 'autoresearch/tag-run', worktree: '/worktree', policy: {}, policySha256: 'b'.repeat(64), provenance: {}, provenanceSha256: 'c'.repeat(64) })
+      tracker.transitionRun('run', 'baseline-running'); tracker.transitionRun('run', 'ready', { best: { metric: 1, commit: sha, experimentId: 'baseline' } })
+      tracker.prepareCandidate({ experimentId: 'candidate-1', runId: 'run', ordinal: 1, kind: 'candidate', parentCommit: sha, command: 'node', args: [] }, { intent: { kind: 'candidate-snapshot', experimentId: 'candidate-1' } })
+      expect(tracker.getRun('run')?.['state']).toBe('candidate-prepared')
+      expect(tracker.database.prepare('SELECT state FROM experiments WHERE experiment_id = ?').get('candidate-1')?.['state']).toBe('baseline-pending')
+      expect(() => tracker.prepareCandidate({ experimentId: 'candidate-2', runId: 'run', ordinal: 2, kind: 'candidate', parentCommit: sha, command: 'node', args: [] }, {})).toThrow(/ready run/)
+      tracker.close()
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  })
 })

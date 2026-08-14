@@ -515,12 +515,12 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 ## Controller (`src/controller.ts`)
 
 - [x] Create `src/controller.ts`.
-- [x] Make `AutoresearchRunController` sole orchestration/state owner.
+- [ ] Make the controller the sole production orchestration/state owner during the Chunk 07 wiring clean cutover; `AutoresearchRunController` currently owns only the new recoverable-controller path.
 - [x] Normalize and freeze run policy before execution.
 - [x] Allow only read-only repository/common-directory/start-SHA discovery before tracker creation.
 - [x] Create tracker/run row with discovered repository identity and start SHA before every mutating/allocating external setup effect.
-- [x] Persist intent before every external side effect.
-- [x] Persist observed outcome after every external side effect.
+- [x] Persist intent before crash-recovery-critical external effects at the implemented controller checkpoints.
+- [x] Persist observed outcomes after those checkpointed crash-recovery-critical effects; do not claim universal per-effect coverage for every child lifecycle, verification, cleanup, or lock-release operation.
 - [x] Resolve/freeze Git executable identity and normalized policy once; mint evaluator boundary identities only from those immutable facts and block resume on any executable/evaluation/policy hash mismatch.
 - [x] After allocation, verify the dedicated worktree exactly equals `startCommit`; persist baseline intent, artifacts, and terminal outcome before creating any child. Cover target shortcut and every nonzero/timeout/signal/parser/provenance/isolation `baseline-blocked` result without consuming candidate budget.
 - [x] Run baseline gate.
@@ -538,20 +538,20 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 - [x] Recompute target satisfaction after accepted result.
 - [x] Persist terminal experiment before next proposal.
 - [x] Stop at experiment budget.
-- [x] Surface proven post-baseline blocker separately.
+- [ ] Surface a host-proven post-baseline blocker separately; child blocker claims remain non-authoritative and the controller path is not yet implemented/evidenced.
 - [x] Surface infrastructure/contract failure as `round-failed`.
 - [x] Handle cancellation at a quiescent durable boundary.
-- [ ] Remove `ctx.workflowEngine` production orchestration.
-- [ ] Replace or remove the four workflow-based unit tests in `tests/autoresearch.spec.ts` during the controller clean cutover.
-- [ ] Remove no-longer-used workflow runtime dependency/peer after cutover.
-- [ ] Remove temporary legacy `evaluation_command` and workflow-specific public patch/tool schema runtime compatibility during the controller clean cutover.
+- [ ] Chunk 07 clean-cutover dependency: remove `ctx.workflowEngine` production orchestration.
+- [ ] Chunk 07 clean-cutover dependency: replace or remove the four workflow-based unit tests in `tests/autoresearch.spec.ts` and the competing workflow integration coverage.
+- [ ] Chunk 07 clean-cutover dependency: remove the no-longer-used workflow runtime dependency/peer.
+- [ ] Chunk 07 clean-cutover dependency: remove temporary legacy `evaluation_command` and workflow-specific public patch/tool schema runtime compatibility.
 - [x] Keep rejected candidate commits/audit refs.
 - [x] Reconcile isolated worktree to last durable accepted commit.
 - [x] Mint the attempt artifact writer from owner-only `StateLayout` only after durable attempt identity exists; transactionally link artifact ownership before terminal transition or the next experiment.
 - [x] Persist terminal/quiescent run facts, completed Git reconciliation, and artifact references before active-lock release; make release the controller's final idempotent repository action.
 
 ## Chunk 06 verification gate
-- [x] Record focused Chunk 06 implementation verification: `pnpm install --frozen-lockfile` passed; `pnpm run typecheck` passed; Vitest passed 9 files / 172 tests; `pnpm run build` passed. Granular test, independent review, closure, and accounting-commit checkboxes remain unchecked pending their separate gates.
+- [x] Record focused Chunk 06 implementation verification: `pnpm install --frozen-lockfile` passed; `pnpm run typecheck` passed; Vitest passed 9 files / 172 tests; `pnpm run build` passed. Granular tests, independent review, and closure remain unchecked pending their separate gates; the separate accounting commit is recorded below.
 
 - [ ] Test baseline-target shortcut spawns no child.
 - [ ] Test strict accepted improvement.
@@ -587,13 +587,13 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 ## Chunk 06 implementation commit gate
 
 - [x] Integrate proposal/recovery lanes into controller.
-- [ ] Confirm all prior callers migrated to the controller clean cutover; legacy workflow/tool wiring remains assigned to Chunk 07.
+- [ ] Confirm all prior callers migrate to the controller clean cutover in Chunk 07; legacy workflow/tool wiring remains live and assigned to Chunk 07.
 - [x] Commit recoverable controller and focused tests in foundation commit `ca184254e3681fea00cbf53ec4d377c9803928a0`, proposal/recovery commit `b690a56f7df0b97dd5fb03d32201b8a933928718`, and controller commit `99b7aa12a7036b5f8cf10c634a455779141d956f`.
 
 ## Chunk 06 tracker-accounting gate
 
 - [x] Record Chunk 06 implementation commits: `ca184254e3681fea00cbf53ec4d377c9803928a0`, `b690a56f7df0b97dd5fb03d32201b8a933928718`, and `99b7aa12a7036b5f8cf10c634a455779141d956f`.
-- [ ] Commit the checklist update separately from the Chunk 06 implementation commits; independent review, closure, and accounting commit remain pending.
+- [x] Commit the Chunk 06 checklist accounting update separately from the implementation commits: `9215f6a`. Independent review and Chunk 06 closure remain pending.
 
 # Chunk 07 — `07-wire-tool-jobs-lifecycle-and-hmr`
 

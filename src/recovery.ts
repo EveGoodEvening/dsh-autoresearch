@@ -76,7 +76,7 @@ export async function reconcileRecovery(ctx: Context, request: RecoveryRequest):
   }
 
   if (state === 'baseline-running' || state === 'candidate-running') return evaluationDirective(request, experiment, row, attempts)
-  if (state === 'deciding') return decidingDirective(request, run, experiment, row)
+  if (state === 'deciding') return decidingDirective(request, run, experiment, row, attempts)
   return blocked(request, 'state-ambiguous', `unsupported nonterminal state ${state}`, 'retain')
 }
 
@@ -124,8 +124,8 @@ function evaluationDirective(request: RecoveryRequest, experiment: RecoveredExpe
     const reconstructed = reconstructEvaluation(request, experiment, latest)
     if (reconstructed) return { kind: 'finalize-evaluation', runId: request.runId, experiment, evaluation: reconstructed }
   } catch (error) {
-    if (error instanceof RecoveryEvidenceError) return blocked(request, error.code, error.message, 'retain')
-    throw error
+    const evidence = error instanceof RecoveryEvidenceError ? error : new RecoveryEvidenceError('artifact-incomplete', `durable evaluator evidence could not be decoded: ${error instanceof Error ? error.message : String(error)}`)
+    return blocked(request, evidence.code, evidence.message, 'retain')
   }
   return { kind: 'evaluate', runId: request.runId, experiment, commit, createExperiment: false, attemptOrdinal: integer(latest['ordinal']) + 1, rerun: true }
 }
@@ -167,7 +167,13 @@ function reconstructEvaluation(request: RecoveryRequest, experiment: RecoveredEx
   catch (error) { return { kind: 'failed', attemptId, code: 'metric-protocol', message: error instanceof Error ? error.message : String(error), provenanceSha256, exit, artifacts: decoded } }
 }
 
-function decidingDirective(request: RecoveryRequest, run: Row, experiment: RecoveredExperiment, row: Row): RecoveryDirective {
+function decidingDirective(request: RecoveryRequest, run: Row, experiment: RecoveredExperiment, row: Row, attempts: Row[]): RecoveryDirective {
+  const latest = attempts.filter(item => text(item['experiment_id']) === experiment.experimentId).sort((a, b) => integer(a['ordinal']) - integer(b['ordinal'])).at(-1)
+  if (latest && latest['process_tree_quiescent'] !== 1) {
+    const message = `attempt ${text(latest['attempt_id'])} lacks durable whole-process-tree quiescence`
+    request.tracker.checkpointRecoverableBlocked(request.runId, { code: 'attempt-uncertain', evidence: [message] })
+    return blocked(request, 'attempt-uncertain', message, 'retain')
+  }
   if (!experiment.candidateCommit) return blocked(request, 'commit-missing', 'deciding candidate has no candidate commit', 'retain')
   const best = decodeBest(run)
   if (!best) return blocked(request, 'state-ambiguous', 'deciding run has no prior best', 'retain')
@@ -201,7 +207,17 @@ function isExperimentTerminal(state: string): boolean { return !['baseline-pendi
 function exactState(value: unknown): RunDurableState { const state = text(value) as RunDurableState; if (!['initializing', 'baseline-running', 'ready', 'candidate-prepared', 'candidate-running', 'deciding', 'completed', 'baseline-blocked', 'blocked', 'round-failed', 'cancelled'].includes(state)) throw new TypeError(`unknown durable run state ${state}`); return state }
 function blocked(request: RecoveryRequest, code: RecoveryBlockCode, message: string, lock: 'retain' | 'release-after-persist'): RecoveryDirective { return { kind: 'blocked', runId: request.runId, code, evidence: [{ code, message, artifacts: [] }], lock } }
 function gitBlocked(request: RecoveryRequest, error: unknown): RecoveryDirective { if (error instanceof GitBoundaryError) { const code: RecoveryBlockCode = error.code.includes('protected') || error.code.includes('policy') ? 'protected-change' : error.code.includes('missing') || error.code.includes('sha') ? 'commit-missing' : 'git-external-mutation'; return { kind: 'blocked', runId: request.runId, code, evidence: [{ code: error.code, message: error.message, artifacts: [] }, ...error.evidence.map(message => ({ code: error.code, message, artifacts: [] }))], lock: 'retain' } } throw error }
-function readSecure(path: string): Buffer { const before = lstatSync(path); if (!before.isFile() || before.isSymbolicLink()) throw new TypeError('artifact is not a regular owner-controlled file'); const canonical = realpathSync(path); if (canonical !== path) throw new TypeError('artifact path traverses a symlink'); const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW); try { const opened = fstatSync(fd); if (opened.dev !== before.dev || opened.ino !== before.ino) throw new TypeError('artifact identity changed'); return readFileSync(fd) } finally { closeSync(fd) } }
+function readSecure(path: string): Buffer {
+  try {
+    const before = lstatSync(path)
+    if (!before.isFile() || before.isSymbolicLink()) throw new Error('artifact is not a regular owner-controlled file')
+    const canonical = realpathSync(path)
+    if (canonical !== path) throw new Error('artifact path traverses a symlink')
+    const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+    try { const opened = fstatSync(fd); if (opened.dev !== before.dev || opened.ino !== before.ino) throw new Error('artifact identity changed'); return readFileSync(fd) }
+    finally { closeSync(fd) }
+  } catch (error) { throw new RecoveryEvidenceError('artifact-incomplete', `artifact could not be securely recovered: ${error instanceof Error ? error.message : String(error)}`) }
+}
 function json(value: unknown): unknown { if (typeof value !== 'string') return undefined; try { return JSON.parse(value) } catch { throw new TypeError('malformed durable JSON checkpoint') } }
 function text(value: unknown): string { if (typeof value !== 'string') return value === null || value === undefined ? '' : String(value); return value }
 function integer(value: unknown): number { const result = Number(value); if (!Number.isSafeInteger(result)) throw new TypeError('durable integer is invalid'); return result }

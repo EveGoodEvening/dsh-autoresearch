@@ -148,6 +148,20 @@ export class DurableTracker {
       this.insertTransition(record.runId, record.experimentId, 'experiment', null, 'baseline-pending', { intent: { kind: 'create-experiment' } }, at)
     })
   }
+  prepareCandidate(record: ExperimentRecord, facts: TransitionFacts, at = new Date().toISOString()): void {
+    this.transaction(() => {
+      const run = this.requireRun(record.runId)
+      const from = String(run['state']) as RunDurableState
+      if (from !== 'ready') throw new TrackerTransitionError('candidate preparation requires a ready run')
+      if (this.database.prepare(`SELECT 1 FROM experiments WHERE run_id = ? AND state IN ('baseline-pending','running')`).get(record.runId)) throw new TrackerTransitionError('a run may not prepare a candidate while another is unresolved')
+      this.database.prepare(`INSERT INTO experiments (experiment_id, run_id, ordinal, kind, parent_commit, candidate_commit, state, command, args_json, cwd, created_at, updated_at)
+        VALUES (?, ?, ?, 'candidate', ?, NULL, 'baseline-pending', ?, ?, ?, ?, ?)`).run(record.experimentId, record.runId, record.ordinal, record.parentCommit, record.command, canonicalJson(record.args), record.cwd ?? null, at, at)
+      this.insertTransition(record.runId, record.experimentId, 'experiment', null, 'baseline-pending', { intent: { kind: 'create-experiment' } }, at)
+      validateTransition('run', from, 'candidate-prepared')
+      this.database.prepare('UPDATE runs SET state = ?, updated_at = ? WHERE run_id = ?').run('candidate-prepared', at, record.runId)
+      this.insertTransition(record.runId, record.experimentId, 'run', from, 'candidate-prepared', facts, at)
+    })
+  }
   recordCandidateCommit(experimentId: string, candidateCommit: string, updatedAt = new Date().toISOString()): void {
     if (!/^[0-9a-f]{40}$/u.test(candidateCommit)) throw new TrackerTransitionError('candidate commit must be a full lowercase SHA')
     this.transaction(() => {

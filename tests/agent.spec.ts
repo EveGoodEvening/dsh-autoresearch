@@ -148,13 +148,12 @@ function fixture(): HarnessFixture {
     },
     get(id: SessionId) { return live.get(id) }
   }
-  ;(parentCtx as unknown as { agents: typeof agents }).agents = agents
   const subprocess = new GitSubprocess()
-  const ctx = {
+  const ctx = Object.assign(parentCtx as unknown as Record<string, unknown>, {
     agents,
     subprocess,
     jobs: { list: () => [] as JobSnapshot[] },
-  } as unknown as Context
+  }) as unknown as Context
   Object.assign(harness, { ctx, parent, createOptions, childTools, restrictions, presentations, sections, order, dispose, childId })
   return harness
 }
@@ -230,6 +229,12 @@ describe('proposal-agent adapter', () => {
     const input = request(parent, vi.fn())
     const withoutRoute = { ...input, config: { maxHandoffChars: input.config.maxHandoffChars } }
     await expect(requestProposal(f.ctx, withoutRoute)).rejects.toEqual(expect.objectContaining<Partial<ProposalAgentError>>({ code: 'route-unavailable' }))
+    expect(f.createOptions).toHaveLength(0)
+  })
+  it('rejects split Context authorities before publishing a child', async () => {
+    const f = fixture()
+    const foreign = { ...f.parent, ctx: {} as Context } as Agent
+    await expect(requestProposal(f.ctx, request(foreign, vi.fn()))).rejects.toMatchObject({ code: 'capability-unavailable' })
     expect(f.createOptions).toHaveLength(0)
   })
 })

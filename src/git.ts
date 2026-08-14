@@ -208,6 +208,18 @@ export async function commitCandidate(ctx: GitContext, executable: string, workt
   await runGit(ctx, executable, ['update-ref', prepared.auditRef, prepared.candidateCommit, ZERO_SHA], { ...options, cwd: worktree })
   return prepared
 }
+export async function checkoutCandidateForEvaluation(ctx: GitContext, executable: string, worktree: string, identity: RunGitIdentity, candidateCommit: string, expectedParent: string, options: Omit<GitCommandOptions, 'cwd'>): Promise<void> {
+  requireSha(candidateCommit, 'candidate commit'); requireSha(expectedParent, 'candidate parent')
+  const invoke = (args: readonly string[], extra?: Pick<GitCommandOptions, 'stdinData'>) => runGit(ctx, executable, args, { ...options, ...extra, cwd: worktree })
+  const branchRef = `refs/heads/${identity.branch}`
+  const head = (await invoke(['rev-parse', '--verify', 'HEAD^{commit}'])).stdout.trim()
+  await requireCandidateAudit(ctx, executable, worktree, identity, candidateCommit, options)
+  if (head !== candidateCommit && head !== expectedParent) throw new GitBoundaryError('candidate-execution-identity', 'Candidate execution HEAD is not recoverable')
+  if (head === expectedParent) await invoke(['update-ref', branchRef, candidateCommit, expectedParent])
+  await invoke(['read-tree', '--reset', '-u', candidateCommit]); await invoke(['clean', '-ffdx'])
+  await verifyExactWorktree(ctx, executable, worktree, candidateCommit, options)
+}
+
 
 
 export async function reconcileAcceptedHead(ctx: GitContext, executable: string, worktree: string, identity: RunGitIdentity, expectedCommit: string, options: Omit<GitCommandOptions, 'cwd'>): Promise<void> {
@@ -215,9 +227,9 @@ export async function reconcileAcceptedHead(ctx: GitContext, executable: string,
   await requireCandidateAudit(ctx, executable, worktree, identity, expectedCommit, options); const parent = (await invoke(['rev-parse', '--verify', `${expectedCommit}^`])).stdout.trim()
   const accepted = await readOptionalRef(ctx, executable, identity.acceptedRef, worktree, options); const branch = await readOptionalRef(ctx, executable, branchRef, worktree, options); const head = (await invoke(['rev-parse', '--verify', 'HEAD^{commit}'])).stdout.trim()
   if (accepted === expectedCommit && branch === expectedCommit && head === expectedCommit) { await verifyExactWorktree(ctx, executable, worktree, expectedCommit, options); return }
-  if (accepted !== parent || branch !== parent || head !== parent) throw new GitBoundaryError('accepted-reconcile-identity', 'Accepted ref, branch, and worktree HEAD are not a recoverable promotion state')
+  if (accepted !== parent || !([parent, expectedCommit].includes(String(branch)) && [parent, expectedCommit].includes(head))) throw new GitBoundaryError('accepted-reconcile-identity', 'Accepted ref, branch, and worktree HEAD are not a recoverable promotion state')
   await requireWorktreeMatches(invoke, expectedCommit); await invoke(['read-tree', '--reset', '-u', expectedCommit]); await verifyPreparedWorktree(invoke, expectedCommit)
-  const transaction = `start\nupdate ${branchRef} ${expectedCommit} ${parent}\nupdate ${identity.acceptedRef} ${expectedCommit} ${parent}\nprepare\ncommit\n`
+  const transaction = `start\nupdate ${branchRef} ${expectedCommit} ${branch === expectedCommit ? expectedCommit : parent}\nupdate ${identity.acceptedRef} ${expectedCommit} ${parent}\nprepare\ncommit\n`
   await invoke(['update-ref', '--stdin'], { stdinData: transaction }); await verifyExactWorktree(ctx, executable, worktree, expectedCommit, options)
 }
 
@@ -225,8 +237,8 @@ export async function reconcileRejectedHead(ctx: GitContext, executable: string,
   requireSha(candidateCommit, 'rejected candidate'); requireSha(expectedAcceptedCommit, 'expected accepted commit'); await rejectExecutableGitConfig(ctx, executable, worktree, options); const invoke = (args: readonly string[]) => runGit(ctx, executable, args, { ...options, cwd: worktree }); const branchRef = `refs/heads/${identity.branch}`
   await requireCandidateAudit(ctx, executable, worktree, identity, candidateCommit, options); const parent = (await invoke(['rev-parse', '--verify', `${candidateCommit}^`])).stdout.trim(); if (parent !== expectedAcceptedCommit) throw new GitBoundaryError('rejected-reconcile-lineage', 'Rejected candidate is not based on expected accepted commit')
   const accepted = await readOptionalRef(ctx, executable, identity.acceptedRef, worktree, options); const branch = await readOptionalRef(ctx, executable, branchRef, worktree, options); const head = (await invoke(['rev-parse', '--verify', 'HEAD^{commit}'])).stdout.trim()
-  if (accepted !== expectedAcceptedCommit || branch !== expectedAcceptedCommit || head !== expectedAcceptedCommit) throw new GitBoundaryError('rejected-reconcile-identity', 'Accepted ref, branch, and HEAD are not the rejection target')
-  await invoke(['read-tree', '--reset', '-u', expectedAcceptedCommit]); await invoke(['clean', '-ffdx']); await verifyExactWorktree(ctx, executable, worktree, expectedAcceptedCommit, options)
+  if (accepted !== expectedAcceptedCommit || !([expectedAcceptedCommit, candidateCommit].includes(String(branch)) && [expectedAcceptedCommit, candidateCommit].includes(head))) throw new GitBoundaryError('rejected-reconcile-identity', 'Accepted ref, branch, and HEAD are not a recoverable rejection state')
+  await invoke(['read-tree', '--reset', '-u', expectedAcceptedCommit]); if (branch === candidateCommit) await invoke(['update-ref', branchRef, expectedAcceptedCommit, candidateCommit]); await invoke(['clean', '-ffdx']); await verifyExactWorktree(ctx, executable, worktree, expectedAcceptedCommit, options)
 }
 export async function restoreAcceptedWorktree(ctx: GitContext, executable: string, worktree: string, identity: RunGitIdentity, expectedAcceptedCommit: string, options: Omit<GitCommandOptions, 'cwd'>): Promise<void> {
   requireSha(expectedAcceptedCommit, 'expected accepted commit')

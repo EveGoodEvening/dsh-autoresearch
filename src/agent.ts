@@ -179,6 +179,7 @@ function reportTool(execute: ToolDefinition['execute']): ToolDefinition {
 
 /** Create, drive, drain, and dispose one isolated proposal child. */
 export async function requestProposal(ctx: Context, request: ProposalAgentRequest): Promise<ProposalAgentResult> {
+  if (request.parent.ctx !== ctx) throw fail('capability-unavailable', 'Proposal parent and controller must share one authoritative Context')
   // These delegation inputs belong to this call even if the parent changes while Git is inspected.
   const childDepth = resolveChildDepth(request.parent, undefined)
   const delegatedPolicy = captureDelegatedPolicyOverrides(request.parent)
@@ -207,7 +208,7 @@ export async function requestProposal(ctx: Context, request: ProposalAgentReques
     return disposePromise
   }
 
-  const releaseOwner = request.parent.ctx.effect(() => async () => {
+  const releaseOwner = ctx.effect(() => async () => {
     handle?.agent.cancel({ kind: 'parent' })
     await dispose()
   }, 'autoresearch.proposalChild()')
@@ -220,7 +221,7 @@ export async function requestProposal(ctx: Context, request: ProposalAgentReques
 
   let operationError: unknown
   try {
-    handle = await request.parent.ctx.agents.create({
+    handle = await ctx.agents.create({
       sessionId,
       meta,
       agentOptions,
