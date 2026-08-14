@@ -551,7 +551,7 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 - [x] Persist terminal/quiescent run facts, completed Git reconciliation, and artifact references before active-lock release; make release the controller's final idempotent repository action.
 
 ## Chunk 06 verification gate
-- [x] Record final post-fix Chunk 06 verification after `b1a0e1b0cf9825d19ddbbed246a9ff790fdf410e` and `e28d78ad2edeb7158370b568539e27d6fecadc85`: `pnpm run typecheck` passed; Vitest passed 9 files / 214 tests; `pnpm run build` passed. This supersedes the stale 9 files / 172 tests (and any intermediate 175-test evidence). Independent final review and closure remain unchecked.
+- [x] Record final post-fix Chunk 06 verification after review-fix commit `2e45cbc7d04a558d8b55b4ef863a5aad083dc05c`: `pnpm run typecheck` passed; Vitest passed 9 files / 219 tests; `pnpm run build` passed. This supersedes the prior 9 files / 214 tests and earlier stale evidence. Independent final review and closure remain unchecked.
 
 - [x] Test baseline-target shortcut spawns no child.
 - [x] Test strict accepted improvement.
@@ -569,11 +569,11 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 - [ ] Test proposal Agent/tool/process/job quiescence and exclusive worktree ownership; a scheduled late writer cannot mutate after disposal or overlap evaluator spawn.
 - [ ] Test exact start/candidate commit handoff, absence of hidden ignored/untracked inputs, and pre/post string-cwd/file identity substitution detection without claiming hostile same-UID race prevention.
 - [x] Test every baseline success/blocking outcome, durable artifacts, zero-child target shortcut, and no candidate-budget consumption.
-- [x] Test terminal experiment persistence before the next child and terminal/quiescent run persistence before final lock release, including crash/retry ordering.
+- [x] Test terminal experiment persistence before the next child and terminal/quiescent run persistence before final lock release, including initialization and crash-window retry ordering.
 - [x] Test target behavior for minimize/maximize.
 - [x] Test budget-limited completion.
-- [ ] Test resume from every safely reconcilable nonterminal run state.
-- [ ] Test resume from every safely reconcilable nonterminal experiment state; uncertain survivor states block conservatively.
+- [x] Test the safely reconcilable nonterminal run-state matrix, including fresh initialization, matching-lock initialization reuse, ready-state replay, and baseline-running crash windows.
+- [x] Test the safely reconcilable nonterminal experiment-state matrix, including missing/pending/running/terminal baseline states, incomplete artifacts, candidate preparation before/after audit publication, and conservative blocking for uncertain survivors.
 - [x] Test no duplicate candidate creation during recovery.
 - [x] Test deterministic decision replay.
 ## Chunk 06 review gate
@@ -588,14 +588,14 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 
 - [x] Integrate proposal/recovery lanes into controller.
 - [ ] Confirm all prior callers migrate to the controller clean cutover in Chunk 07; legacy workflow/tool wiring remains live and assigned to Chunk 07.
-- [x] Commit recoverable controller and focused tests in foundation commit `ca184254e3681fea00cbf53ec4d377c9803928a0`, proposal/recovery commit `b690a56f7df0b97dd5fb03d32201b8a933928718`, controller commit `99b7aa12a7036b5f8cf10c634a455779141d956f`, review-fix commit `b1a0e1b0cf9825d19ddbbed246a9ff790fdf410e`, and final recovery-matrix test commit `e28d78ad2edeb7158370b568539e27d6fecadc85`.
+- [x] Commit recoverable controller and focused tests in foundation commit `ca184254e3681fea00cbf53ec4d377c9803928a0`, proposal/recovery commit `b690a56f7df0b97dd5fb03d32201b8a933928718`, controller commit `99b7aa12a7036b5f8cf10c634a455779141d956f`, review-fix commit `b1a0e1b0cf9825d19ddbbed246a9ff790fdf410e`, recovery-matrix test commit `e28d78ad2edeb7158370b568539e27d6fecadc85`, and final review-fix commit `2e45cbc7d04a558d8b55b4ef863a5aad083dc05c`.
 
 ## Chunk 06 tracker-accounting gate
 
-- [x] Record Chunk 06 implementation commits: `ca184254e3681fea00cbf53ec4d377c9803928a0`, `b690a56f7df0b97dd5fb03d32201b8a933928718`, and `99b7aa12a7036b5f8cf10c634a455779141d956f`; review-fix commit: `b1a0e1b0cf9825d19ddbbed246a9ff790fdf410e`; and final recovery-matrix test commit: `e28d78ad2edeb7158370b568539e27d6fecadc85`.
-- [x] Record the prior pre-review Chunk 06 checklist accounting commit separately from its implementation commits: `9215f6a`.
+- [x] Record Chunk 06 implementation commits: `ca184254e3681fea00cbf53ec4d377c9803928a0`, `b690a56f7df0b97dd5fb03d32201b8a933928718`, and `99b7aa12a7036b5f8cf10c634a455779141d956f`; review-fix commits: `b1a0e1b0cf9825d19ddbbed246a9ff790fdf410e` and `2e45cbc7d04a558d8b55b4ef863a5aad083dc05c`; and recovery-matrix test commit: `e28d78ad2edeb7158370b568539e27d6fecadc85`.
+- [x] Record the prior Chunk 06 checklist accounting commits separately from implementation and review-fix work: `9215f6a` and `16f97d06627a72281db8ec39bd116ffebc597512`.
 - [ ] Complete the independent final Chunk 06 review and closure.
-- [ ] Commit this post-fix Chunk 06 checklist accounting update separately from the implementation, review-fix, and test commits.
+- [ ] Commit this new post-`2e45cbc7d04a558d8b55b4ef863a5aad083dc05c` Chunk 06 checklist accounting update separately from the implementation, review-fix, test, and prior accounting commits.
 
 # Chunk 07 — `07-wire-tool-jobs-lifecycle-and-hmr`
 
