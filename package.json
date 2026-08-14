@@ -74,6 +74,7 @@
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/cordis-plugin-include": "^1.0.6",
     "@deepseek-ai/dsh-agent": "^0.1.0-rc.5",
     "@deepseek-ai/dsh-invariants": "^0.1.0-rc.5",
     "@deepseek-ai/dsh-jobs": "^0.1.0-rc.5",
@@ -85,7 +86,9 @@
     "@deepseek-ai/dsh-tools": "^0.1.0-rc.5",
     "@deepseek-ai/dsh-workflow": "^0.1.0-rc.5",
     "@deepseek-ai/dsh-workflow-worker-thread": "^0.1.0-rc.5",
+    "@types/js-yaml": "^4.0.9",
     "@types/node": "^22.0.0",
+    "js-yaml": "^4.3.1",
     "typescript": "^6.0.0",
     "vitest": "^4.0.0"
   },

@@ -5,7 +5,7 @@
 - `[x]` means verified in the current worktree or completed research/planning evidence.
 - `[ ]` means not present or not verified in the current worktree.
 - Archived implementation activity was historical evidence only until the authoritative snapshot was recovered. Chunk 01 is now closed by implementation commit `3ca85a17c03d15488269b3dbc339e3ec135d98c3`, tracker-accounting commit `4095697a6b7256937f535d739ca09678b47e333d`, review-fix commit `6524bdf`, and a clean independent correctness/accounting/security re-review after `6524bdf` with zero findings.
-- **Current dependency-ready chunk: `03-define-discriminated-contract-and-config`.** Chunk 02 is closed by implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4`, tracker-accounting commit `fa4bf06ef24b590a81f883037b940f18d97c5cfc`, review-fix commit `7671499`, focused clean-generated-state verification, and clean independent package/accounting re-reviews. Chunk 03 implementation is recorded in commits `9b18630` and `e22d99a`; focused typecheck, 3-file/26-test Vitest, and build gates passed. Review and tracker-accounting closure remain pending.
+- **Current dependency-ready chunk: `03-define-discriminated-contract-and-config`.** Chunk 02 is closed by implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4`, tracker-accounting commit `fa4bf06ef24b590a81f883037b940f18d97c5cfc`, review-fix commit `7671499`, focused clean-generated-state verification, and clean independent package/accounting re-reviews. Chunk 03 implementation is recorded in commits `9b18630` and `e22d99a`; focused typecheck, 3-file/26-test Vitest, and build gates passed; tracker-accounting commit `99babc5dc3432be7c078fd6e792c97164ebfb19b` is complete. The Chunk 03 review gate remains pending.
 
 ## Established research and planning state
 
@@ -278,7 +278,7 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 ## Chunk 03 tracker-accounting gate
 
 - [x] Record Chunk 03 implementation commits: `9b18630` and `e22d99a`.
-- [ ] Commit the checklist update separately from the Chunk 03 implementation commit.
+- [x] Commit the checklist update separately from the Chunk 03 implementation commit as tracker-accounting commit `99babc5dc3432be7c078fd6e792c97164ebfb19b`.
 
 # Chunk 04 — `04-create-durable-tracker`
 

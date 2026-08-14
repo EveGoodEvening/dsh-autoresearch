@@ -318,6 +318,10 @@ export function isTargetReached(direction: MetricDirection, metric: number, targ
   assertFinite(target, 'target')
   return direction === 'minimize' ? metric <= target : metric >= target
 }
+function isStrictImprovement(direction: MetricDirection, metric: number, reference: number): boolean {
+  if (direction !== 'minimize' && direction !== 'maximize') throw new TypeError('metric direction must be minimize or maximize')
+  return direction === 'minimize' ? metric < reference : metric > reference
+}
 export function decodeRunResult(value: unknown, direction: MetricDirection, maxChars: number): AutoresearchRunResult {
   assertBoundedJson(value, maxChars, 'run result')
   const record = exactRecord(value, 'run result')
@@ -354,16 +358,35 @@ export function decodeRunResult(value: unknown, direction: MetricDirection, maxC
   }
 }
 
-export function decodeExperimentResult(value: unknown, maxChars: number): AutoresearchExperimentResult {
+export function decodeExperimentResult(value: unknown, direction: MetricDirection, maxChars: number): AutoresearchExperimentResult {
   assertBoundedJson(value, maxChars, 'experiment result')
   const record = exactRecord(value, 'experiment result')
   const kind = record['kind']
   const base = decodeExperimentBase(record)
   const candidate = (): FullCommitSha => fullSha(record['candidateCommit'], 'candidateCommit')
+  const decision = (referenceKey: 'previousBest' | 'currentBest'): { metric: number; reference: number } => ({
+    metric: finite(record['metric'], 'metric'),
+    reference: finite(record[referenceKey], referenceKey),
+  })
   switch (kind) {
-    case 'baseline-measured': exactKeys(record, [...EXPERIMENT_BASE_KEYS, 'kind', 'metric', 'commit']); return { ...base, kind, metric: finite(record['metric'], 'metric'), commit: fullSha(record['commit'], 'commit') }
-    case 'accepted': exactKeys(record, [...EXPERIMENT_BASE_KEYS, 'kind', 'metric', 'candidateCommit', 'previousBest']); return { ...base, kind, metric: finite(record['metric'], 'metric'), candidateCommit: candidate(), previousBest: finite(record['previousBest'], 'previousBest') }
-    case 'rejected': exactKeys(record, [...EXPERIMENT_BASE_KEYS, 'kind', 'metric', 'candidateCommit', 'currentBest']); return { ...base, kind, metric: finite(record['metric'], 'metric'), candidateCommit: candidate(), currentBest: finite(record['currentBest'], 'currentBest') }
+    case 'baseline-measured': {
+      exactKeys(record, [...EXPERIMENT_BASE_KEYS, 'kind', 'metric', 'commit'])
+      const commit = fullSha(record['commit'], 'commit')
+      if (commit !== base.parentCommit) throw new TypeError('baseline-measured commit must equal parentCommit')
+      return { ...base, kind, metric: finite(record['metric'], 'metric'), commit }
+    }
+    case 'accepted': {
+      exactKeys(record, [...EXPERIMENT_BASE_KEYS, 'kind', 'metric', 'candidateCommit', 'previousBest'])
+      const { metric, reference: previousBest } = decision('previousBest')
+      if (!isStrictImprovement(direction, metric, previousBest)) throw new TypeError('accepted metric must strictly improve previousBest')
+      return { ...base, kind, metric, candidateCommit: candidate(), previousBest }
+    }
+    case 'rejected': {
+      exactKeys(record, [...EXPERIMENT_BASE_KEYS, 'kind', 'metric', 'candidateCommit', 'currentBest'])
+      const { metric, reference: currentBest } = decision('currentBest')
+      if (isStrictImprovement(direction, metric, currentBest)) throw new TypeError('rejected metric must not strictly improve currentBest')
+      return { ...base, kind, metric, candidateCommit: candidate(), currentBest }
+    }
     case 'crashed': exactKeys(record, [...EXPERIMENT_BASE_KEYS, 'kind', 'exit', 'reason', ...(record['candidateCommit'] === undefined ? [] : ['candidateCommit'])]); return { ...base, kind, exit: decodeExit(record['exit']), reason: text(record['reason'], 'reason'), ...(record['candidateCommit'] === undefined ? {} : { candidateCommit: candidate() }) }
     case 'timed-out': { exactKeys(record, [...EXPERIMENT_BASE_KEYS, 'kind', 'exit', ...(record['candidateCommit'] === undefined ? [] : ['candidateCommit'])]); const exit = decodeExit(record['exit']); if (!exit.timedOut) throw new TypeError('timed-out result requires timedOut exit'); return { ...base, kind, exit: { ...exit, timedOut: true }, ...(record['candidateCommit'] === undefined ? {} : { candidateCommit: candidate() }) } }
     case 'policy-violation': { exactKeys(record, [...EXPERIMENT_BASE_KEYS, 'kind', 'candidateCommit', 'evidence']); const evidence = decodeEvidence(record['evidence']); if (evidence.length === 0) throw new TypeError('policy violation requires evidence'); return { ...base, kind, candidateCommit: candidate(), evidence } }
