@@ -655,13 +655,13 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 - [ ] Chunk 09 documentation dependency: document the subprocess provider requirement; Chunk 08 must validate the real composition and failure path.
 - [ ] Chunk 09 documentation dependency: document the core Agent registry/runtime and child setup requirement, with no subagent provider; Chunk 08 must validate the real composition and failure path.
 - [x] Chunk 08 composition dependency: verify activation is opt-in through real profile installation; the keyless base profile omitted autoresearch and the assembled installed layer activated it.
-- [ ] Chunk 08 composition dependency: verify service ordering is expressed by injection, not YAML row order, through real Harness composition.
+- [x] Chunk 08 composition dependency: verify service ordering is expressed by injection, not YAML row order, through real Harness composition; the equivalent profile entries were deliberately reversed, `autoresearch` followed `jobs` in row order, and injection still produced a successful boot and end-to-end run.
 
 ## Chunk 07 verification gate
 
 - [x] Test foreground tool result.
 - [x] Test background tool result waits for durable readiness facts.
-- [ ] Test actual LocalJobRegistry ordering: `run()` remains synchronous, controller work stays gated until returned job id is durably recorded, then starts under the job-owned signal; real-registry composition proof remains Chunk 08.
+- [x] Test actual LocalJobRegistry ordering: the real registry invoked `run()` synchronously, returned its generated job id, the plugin durably recorded that exact id before worktree/evaluator side effects, and controller work then ran under the job-owned signal with cancellation aborting and quiescing the evaluator.
 - [x] Test typed initialization failure/cancellation before readiness and no orphaned resources.
 - [x] Test background job output consumption through the actual local jobs registry and generic output tool.
 - [x] Test generic job list/output/kill compatibility through real Harness composition.
@@ -747,6 +747,7 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 - [x] Verify separate immutable run-id-bearing worktrees/branches.
 - [x] Verify no caller HEAD/index/ledger interference.
 - [x] Verify serialized promotion/tracker updates; two concurrent restart controllers at each decision publication window produce one successful reconciliation, one canonical Git result, one candidate attempt, and one terminal tracker transition.
+- [x] Test shared-release crash recovery: inject a crash after the per-run tracker lock is released but before shared authority deletion, then resume the same terminal run to remove the identity-checked shared lock and permit a new same-tag run with a distinct immutable run id.
 - [x] Test production cancellation plus plugin/HMR disposal with an active run: generic kill settles the job, unload waits for controller/evaluator quiescence, and the child Agent handle is disposed before completion.
 
 ## Chunk 08 verification gate
@@ -757,12 +758,13 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 - [x] Observe concurrent run isolation through independent active run tags and immutable run-id-bearing Git identities.
 - [x] Observe same-tag collision and repository-capacity blocks from one shared tracker authority.
 - [x] Observe controller restart after allocation resumes successfully by run id without duplicating the baseline experiment or evaluator attempt.
-- [ ] Run focused per-file coverage expected by project policy.
+- [x] Run focused per-file coverage expected by project policy; `pnpm run test:coverage` passed 10 files / 267 tests and enforced the configured thresholds for `src/agent.ts` (86.47% statements / 78.03% branches / 85.71% functions / 95.08% lines), `src/controller.ts` (83.73% / 65.12% / 91.17% / 92.55%), `src/git.ts` (88.76% / 77.27% / 96.73% / 97.76%), `src/index.ts` (84.73% / 75.80% / 62.50% / 93.45%), and `src/recovery.ts` (79.18% / 72.06% / 91.66% / 91.30%).
 
-- [x] Record final post-`2a8ed8eed4337fbe1615e51e0a3283bfc1a60b8e` gates: `pnpm run typecheck` passed; Vitest passed 10 files / 264 tests; `pnpm run build` passed; `pnpm pack` passed.
+- [x] Record final post-`a591dca237580e4cf3e5cbfc550a36334ddc643b` gates: `pnpm install --frozen-lockfile` passed; `pnpm run typecheck` passed; Vitest and the focused coverage gate passed 10 files / 267 tests, with all five configured per-file statement/branch/function/line thresholds satisfied; `pnpm run build` passed; `pnpm pack` passed and produced `dsh-autoresearch-0.1.0.tgz`.
 
 ## Chunk 08 review gate
 
+- [x] Record the clean composition-focused review evidence already established for the pre-`a591dca237580e4cf3e5cbfc550a36334ddc643b` suite across observable contracts, mock boundaries, real Git/subprocess/SQLite fixtures, and deterministic cleanup; the definitive final post-`a591dca237580e4cf3e5cbfc550a36334ddc643b` review and closure remain open below.
 - [ ] Complete the independent final review that tests assert observable contracts rather than source/plumbing.
 - [ ] Complete the independent final review that only model proposal content is mocked.
 - [ ] Complete the independent final review that fixtures use real Git/subprocess/SQLite boundaries.
@@ -776,12 +778,14 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 - [x] Record profile-reload/run-ownership hardening implementation commit `bf9fb505578ff8c1f296f420270b8c8d5d2aa6cc` (`fix(integration): harden profile reload and run ownership`).
 - [x] Record controller-ownership fencing implementation commit `900521fc9326e6bcfeaceaab64e6a3c5c11e9938` (`fix(integration): fence controller ownership across restart`).
 - [x] Record restart-reconciliation implementation and test commit `2a8ed8eed4337fbe1615e51e0a3283bfc1a60b8e` (`test(integration): cover restart reconciliation windows`).
+- [x] Record final recovery/order/coverage implementation and test commit `a591dca237580e4cf3e5cbfc550a36334ddc643b` (`test(integration): enforce recovery and coverage gates`); it contains exactly 10 changed files and covers shared-release crash recovery, injection-vs-row-order composition, actual LocalJobRegistry durable job-id ordering, and focused per-file coverage thresholds.
 
 ## Chunk 08 tracker-accounting gate
 
 - [x] Record separate earlier Chunk 08 checklist-accounting commit `87735c734264d20ccf74db0296619b9cfb48ae29` (`docs: record real composition verification`) as complete and separate from implementation commits.
 - [x] Record final post-`896d440aeeb50697b8159724779ddb1b30115f81` checklist update as separate accounting-only commit `d53fea5dfd94e194616b2c2fbaa898d28db5f896` (`docs: record complete integration verification`).
-- [ ] Commit this post-`2a8ed8eed4337fbe1615e51e0a3283bfc1a60b8e` checklist update separately as a new accounting-only commit.
+- [x] Record post-`2a8ed8eed4337fbe1615e51e0a3283bfc1a60b8e` accounting-only commit `d33df24e3733494a1734b30e66e658eec56e1b14` (`docs: record restart reconciliation verification`) as complete and separate from implementation work.
+- [ ] Commit this post-`a591dca237580e4cf3e5cbfc550a36334ddc643b` checklist update separately as a new accounting-only commit.
 
 # Chunk 09 — `09-complete-docs-and-release-gate`
 
