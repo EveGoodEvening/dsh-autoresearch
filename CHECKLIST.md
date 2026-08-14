@@ -373,7 +373,7 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 - [x] Invoke configured Git executable through `ctx.subprocess` with argv.
 - [x] Use a wall-clock timeout for every Git subprocess call.
 - [x] Require positive termination grace for Git subprocess calls.
-- [x] Terminate the whole Git process tree on timeout or cancellation.
+- [ ] Short-circuit pre-aborted Git calls before spawn; terminate the whole live Git process tree on in-flight timeout or cancellation and await quiescence.
 - [x] Await Git `waitForExit()` before command settlement.
 - [x] Enforce stdout and stderr byte caps for Git invocations.
 - [x] Use an explicit/scrubbed environment for Git invocations.
@@ -382,10 +382,10 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 - [x] Create dedicated branch whose identity includes `branchPrefix`, `runTag`, and immutable `run_id`.
 - [x] Create dedicated worktree whose identity includes immutable `run_id` for every run.
 - [x] Treat `runTag` only as the active exclusion key; retained terminal branches/worktrees do not collide with later runs using the same tag.
-- [x] Reject branch/worktree identity collision unless resuming the same `run_id`.
+- [ ] Reject branch/worktree identity collision unless resuming the same `run_id`; on same-run resume, verify the registered path, branch/HEAD/start commit, and accepted ref before accepting or repairing the allocation.
 - [x] Never checkout/reset/stage/clean caller worktree.
 - [x] Preserve dirty caller staged/unstaged/untracked work.
-- [x] Snapshot candidate parent before child edits.
+- [x] Implement candidate-parent snapshot discovery; enforce snapshot-before-child-edit ordering in the Chunk 06 controller.
 - [x] Inspect staged changes.
 - [x] Inspect unstaged changes.
 - [x] Inspect untracked changes.
@@ -393,13 +393,13 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 - [x] Enforce protected surfaces on host.
 - [x] Reject dependency changes unless explicitly allowlisted.
 - [x] Reject submodule changes unless explicitly allowlisted.
-- [x] Reject Git config changes unless explicitly allowlisted.
+- [ ] Reject reportable worktree-path Git metadata changes unless explicitly allowlisted; common-directory Git config mutation detection remains unimplemented.
 - [x] Reject evaluator/dataset/policy changes unless explicitly allowlisted.
 - [x] Stage only validated paths.
 - [x] Create every candidate as a full commit.
 - [x] Record full parent/candidate SHAs.
-- [x] Create/retain audit refs for accepted and rejected candidates.
-- [x] Implement idempotent accepted-HEAD reconciliation.
+- [ ] Create/retain audit refs for accepted and rejected candidates with restart-safe recovery across interruption after candidate commit creation.
+- [ ] Implement idempotent accepted-HEAD reconciliation whose failed preconditions cannot partially advance the accepted ref, branch, or worktree HEAD.
 - [ ] Atomically persist terminal/quiescent run outcome before releasing the repository/run-tag active lock; make release the final idempotent operation.
 - [x] Recover and release a stale lock only when its owning run is durably terminal.
 - [x] Implement explicit configured worktree removal/release as an operational cleanup path without deleting tracker, artifact, commit, or audit-ref evidence.
@@ -409,13 +409,13 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 
 - [x] Create `src/evaluator.ts`.
 - [x] Represent evaluator as command plus argv, never shell line.
-- [x] Validate evaluator cwd against normalized policy.
+- [ ] Validate evaluator cwd against normalized policy using canonical filesystem containment, including symlink traversal.
 - [x] Build explicit/scrubbed environment.
 - [x] Prevent ambient secret forwarding.
 - [x] Freeze/hash evaluator argv.
-- [x] Freeze/hash evaluator files.
+- [ ] Freeze/hash only evaluator files canonically contained in the isolated worktree under the defined symlink policy.
 - [x] Freeze/hash dataset/version identifiers.
-- [x] Freeze/hash environment overrides.
+- [ ] Freeze/hash environment overrides without persisting or exposing raw values outside the live spawn call.
 - [x] Freeze/hash metric name/direction/parser version/policy.
 - [x] Persist evaluator spawn intent before calling `ctx.subprocess.spawn`.
 - [x] Persist provider-observed PID and attempt facts immediately after spawn.
@@ -424,7 +424,7 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 - [x] Enforce stderr byte cap.
 - [x] Implement real wall-clock timeout.
 - [x] Require positive termination grace.
-- [x] Terminate whole process tree on timeout/cancel only through the live provider-owned handle.
+- [ ] Short-circuit pre-aborted evaluator attempts before spawn; terminate the whole live process tree on in-flight timeout/cancel only through the provider-owned handle.
 - [x] Await `waitForExit()` before settlement.
 - [x] Persist exit code/signal/timeout facts.
 - [x] Retain bounded log artifacts.
@@ -451,7 +451,7 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 - [ ] Ensure baseline attempt does not consume candidate experiment budget.
 
 ## Chunk 05 verification gate
-- [x] Record focused Chunk 05 implementation verification: `pnpm run typecheck` passed; Vitest passed 6 files/106 tests; `pnpm run build` passed.
+- [ ] Re-run focused Chunk 05 implementation verification after the required Git/evaluator fixes: `pnpm run typecheck`, focused Vitest suites, and `pnpm run build`.
 
 - [x] Test clean temporary Git repository setup.
 - [x] Test read-only repository discovery causes no lock/ref/worktree/index mutation and tracker creation precedes all such mutations.
@@ -465,10 +465,10 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 - [ ] Test unstaged protected-path violation.
 - [x] Test untracked protected-path violation.
 - [ ] Test dependency/submodule/config exceptional policies.
-- [x] Test candidate commit and rejected audit preservation.
+- [ ] Test candidate commit recovery across commit/audit-ref interruptions and rejected audit preservation through later promotion and cleanup.
 - [x] Test exact evaluator argv/cwd/env.
-- [x] Test stdout/stderr caps.
-- [x] Test nonzero/signal exit facts.
+- [ ] Test stdout and stderr caps, including oversized/lossy stderr.
+- [ ] Test returned and durably persisted nonzero exit-code and signal facts.
 - [x] Test wall-clock timeout.
 - [ ] Test descendant-process termination through the live provider handle.
 - [ ] Test cancellation idempotence.
@@ -493,7 +493,7 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 ## Chunk 05 tracker-accounting gate
 
 - [x] Record Chunk 05 implementation commit full SHA after it exists: `33acd67cf37d6a01de167c8c8279dcd4f3deda8f`.
-- [ ] Commit the checklist update separately from the Chunk 05 implementation commit.
+- [x] Commit the checklist update separately from the Chunk 05 implementation commit as `ad273870e3cf71676a87fc8cbb2d09b86c9cd3d2`.
 
 # Chunk 06 — `06-implement-recoverable-controller`
 

@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
+import { readFile } from 'node:fs/promises'
 import { realpath } from 'node:fs/promises'
-import { isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { isAbsolute, join, resolve } from 'node:path'
 import { scrubbedParentEnv, type SubprocessHandle, type SubprocessOutcome, type SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
 import type { ResolvedConfig } from './config.js'
 import type { NormalizedRunPolicy } from './types.js'
@@ -17,12 +18,14 @@ export interface GitCommandResult { readonly argv: readonly string[]; readonly s
 export interface RepositoryDiscovery { readonly repository: string; readonly callerCwd: string; readonly gitCommonDir: string; readonly repositoryId: string; readonly startCommit: string }
 export interface RunGitIdentity { readonly runId: string; readonly runTag: string; readonly branch: string; readonly worktree: string; readonly acceptedRef: string; readonly candidateRefPrefix: string }
 export interface ChangedPath { readonly path: string; readonly staged: boolean; readonly unstaged: boolean; readonly untracked: boolean; readonly submodule: boolean }
-export interface CandidateSnapshot { readonly parentCommit: string; readonly changed: readonly ChangedPath[] }
+export interface CandidateSnapshot { readonly parentCommit: string; readonly changed: readonly ChangedPath[]; readonly gitConfig: readonly GitConfigSnapshot[] }
+export interface GitConfigSnapshot { readonly path: string; readonly exists: boolean; readonly sha256?: string }
 export interface CandidateCommit { readonly parentCommit: string; readonly candidateCommit: string; readonly auditRef: string; readonly changedPaths: readonly string[] }
 
 export async function runGit(ctx: GitContext, executable: string, args: readonly string[], options: GitCommandOptions): Promise<GitCommandResult> {
   if (options.graceMs <= 0 || !Number.isFinite(options.graceMs)) throw new TypeError('Git termination grace must be positive')
   if (options.timeoutMs <= 0 || !Number.isFinite(options.timeoutMs)) throw new TypeError('Git timeout must be positive')
+  if (options.signal?.aborted) throw new GitBoundaryError('git-cancelled', `Git command cancelled before spawn: ${args.join(' ')}`)
   const deadline = new AbortController()
   const onAbort = () => deadline.abort(options.signal?.reason ?? new Error('Git command cancelled'))
   options.signal?.addEventListener('abort', onAbort, { once: true })
@@ -83,13 +86,22 @@ export function acquireRunLock(tracker: DurableTracker, identity: RunGitIdentity
 
 export async function allocateRunWorktree(ctx: GitContext, executable: string, discovery: RepositoryDiscovery, identity: RunGitIdentity, options: Omit<GitCommandOptions, 'cwd'>, resume = false): Promise<void> {
   const invoke = (args: readonly string[]) => runGit(ctx, executable, args, { ...options, cwd: discovery.repository })
-  const branchExists = await gitSucceeds(ctx, executable, ['show-ref', '--verify', '--quiet', `refs/heads/${identity.branch}`], discovery.repository, options)
-  const worktrees = (await invoke(['worktree', 'list', '--porcelain'])).stdout
-  const registered = parseWorktreeList(worktrees).find((item) => item.path === identity.worktree)
-  if (branchExists || registered) {
-    if (!resume || !branchExists || !registered || registered.branch !== `refs/heads/${identity.branch}`) throw new GitBoundaryError('git-identity-collision', 'Run branch/worktree identity collides with another allocation')
+  const branchRef = `refs/heads/${identity.branch}`
+  const branchCommit = await readOptionalRef(ctx, executable, branchRef, discovery.repository, options)
+  const registered = parseWorktreeList((await invoke(['worktree', 'list', '--porcelain'])).stdout).find((item) => item.path === identity.worktree)
+  if (branchCommit || registered) {
+    if (!resume || !branchCommit || !registered || registered.branch !== branchRef) throw new GitBoundaryError('git-identity-collision', 'Run branch/worktree identity collides with another allocation')
+    const worktreeHead = (await runGit(ctx, executable, ['rev-parse', '--verify', 'HEAD^{commit}'], { ...options, cwd: identity.worktree })).stdout.trim()
+    const accepted = await readOptionalRef(ctx, executable, identity.acceptedRef, discovery.repository, options)
+    if (branchCommit !== worktreeHead) throw new GitBoundaryError('git-resume-mismatch', 'Run branch and worktree HEAD disagree')
+    if (accepted === undefined) {
+      if (branchCommit !== discovery.startCommit) throw new GitBoundaryError('git-resume-mismatch', 'Missing accepted ref cannot be recovered after the run branch advanced')
+      await invoke(['update-ref', identity.acceptedRef, discovery.startCommit, '0'.repeat(40)])
+    } else if (accepted !== branchCommit) throw new GitBoundaryError('git-resume-mismatch', 'Accepted ref, run branch, and worktree HEAD disagree')
     return
   }
+  const accepted = await readOptionalRef(ctx, executable, identity.acceptedRef, discovery.repository, options)
+  if (accepted !== undefined) throw new GitBoundaryError('git-identity-collision', 'Run accepted ref exists without its branch/worktree')
   await invoke(['worktree', 'add', '-b', identity.branch, identity.worktree, discovery.startCommit])
   await invoke(['update-ref', identity.acceptedRef, discovery.startCommit, '0'.repeat(40)])
 }
@@ -104,7 +116,7 @@ export async function snapshotCandidate(ctx: GitContext, executable: string, wor
   const submodules = new Set((await invoke(['ls-files', '--stage', '-z'])).stdout.split('\0').filter((entry) => entry.startsWith('160000 ')).map((entry) => normalizeRepoPath(entry.slice(entry.indexOf('\t') + 1))))
   const paths = new Map<string, ChangedPath>()
   for (const [kind, values] of [['staged', staged], ['unstaged', unstaged], ['untracked', untracked]] as const) for (const path of values) { const previous = paths.get(path); paths.set(path, { path, staged: previous?.staged ?? kind === 'staged', unstaged: previous?.unstaged ?? kind === 'unstaged', untracked: previous?.untracked ?? kind === 'untracked', submodule: previous?.submodule ?? submodules.has(path) }) }
-  return { parentCommit, changed: [...paths.values()].sort((a, b) => a.path.localeCompare(b.path)) }
+  return { parentCommit, changed: [...paths.values()].sort((a, b) => a.path.localeCompare(b.path)), gitConfig: await snapshotGitConfig(ctx, executable, worktree, options) }
 }
 
 export function validateCandidate(snapshot: CandidateSnapshot, policy: Pick<NormalizedRunPolicy, 'mutableGlobs' | 'exceptionalAllowlists' | 'evaluation' | 'provenance'>): readonly string[] {
@@ -123,16 +135,23 @@ export function validateCandidate(snapshot: CandidateSnapshot, policy: Pick<Norm
 
 export async function commitCandidate(ctx: GitContext, executable: string, worktree: string, identity: RunGitIdentity, experimentId: string, snapshot: CandidateSnapshot, validatedPaths: readonly string[], options: Omit<GitCommandOptions, 'cwd'>): Promise<CandidateCommit> {
   const invoke = (args: readonly string[], env?: Readonly<Record<string, string>>) => runGit(ctx, executable, args, { ...options, cwd: worktree, ...(env ? { env } : {}) })
+  const auditRef = `${identity.candidateRefPrefix}${safeIdentity(experimentId, 'experimentId')}`
   const current = (await invoke(['rev-parse', '--verify', 'HEAD^{commit}'])).stdout.trim()
-  if (current !== snapshot.parentCommit) throw new GitBoundaryError('candidate-parent-moved', 'Candidate parent changed after snapshot')
+  const existingAudit = await readOptionalRef(ctx, executable, auditRef, worktree, options)
+  if (current !== snapshot.parentCommit) {
+    await verifyRecoverableCandidate(invoke, current, snapshot, validatedPaths, experimentId)
+    if (existingAudit === undefined) await invoke(['update-ref', auditRef, current, '0'.repeat(40)])
+    else if (existingAudit !== current) throw new GitBoundaryError('candidate-audit-collision', 'Candidate audit ref points at a different commit')
+    return { parentCommit: snapshot.parentCommit, candidateCommit: current, auditRef, changedPaths: [...validatedPaths] }
+  }
+  if (existingAudit !== undefined) throw new GitBoundaryError('candidate-audit-collision', 'Candidate audit ref exists before candidate commit creation')
+  if (!sameGitConfig(snapshot.gitConfig, await snapshotGitConfig(ctx, executable, worktree, options))) throw new GitBoundaryError('git-config-mutated', 'Repository Git configuration changed after candidate snapshot')
   await invoke(['add', '--', ...validatedPaths])
   const staged = parseNameStatus((await invoke(['diff', '--cached', '--name-status', '-z'])).stdout)
   if (!sameSet(staged, validatedPaths)) throw new GitBoundaryError('candidate-stage-mismatch', 'Staged paths differ from validated paths', staged)
   await invoke(['commit', '--no-gpg-sign', '-m', `autoresearch candidate ${experimentId}`], { GIT_AUTHOR_NAME: 'dsh-autoresearch', GIT_AUTHOR_EMAIL: 'autoresearch@localhost', GIT_COMMITTER_NAME: 'dsh-autoresearch', GIT_COMMITTER_EMAIL: 'autoresearch@localhost' })
   const candidateCommit = (await invoke(['rev-parse', '--verify', 'HEAD^{commit}'])).stdout.trim()
-  const actualParent = (await invoke(['rev-parse', '--verify', `${candidateCommit}^`])).stdout.trim()
-  if (!FULL_SHA.test(candidateCommit) || actualParent !== snapshot.parentCommit) throw new GitBoundaryError('candidate-lineage-invalid', 'Candidate commit lineage is invalid')
-  const auditRef = `${identity.candidateRefPrefix}${safeIdentity(experimentId, 'experimentId')}`
+  await verifyRecoverableCandidate(invoke, candidateCommit, snapshot, validatedPaths, experimentId)
   await invoke(['update-ref', auditRef, candidateCommit, '0'.repeat(40)])
   return { parentCommit: snapshot.parentCommit, candidateCommit, auditRef, changedPaths: [...validatedPaths] }
 }
@@ -140,16 +159,15 @@ export async function commitCandidate(ctx: GitContext, executable: string, workt
 export async function reconcileAcceptedHead(ctx: GitContext, executable: string, worktree: string, identity: RunGitIdentity, expectedCommit: string, options: Omit<GitCommandOptions, 'cwd'>): Promise<void> {
   if (!FULL_SHA.test(expectedCommit)) throw new TypeError('expected accepted commit must be a full SHA')
   const invoke = (args: readonly string[]) => runGit(ctx, executable, args, { ...options, cwd: worktree })
+  const branchRef = `refs/heads/${identity.branch}`
   const currentRef = await readOptionalRef(ctx, executable, identity.acceptedRef, worktree, options)
-  if (currentRef !== expectedCommit) await invoke(['update-ref', identity.acceptedRef, expectedCommit, currentRef ?? '0'.repeat(40)])
   const head = (await invoke(['rev-parse', '--verify', 'HEAD^{commit}'])).stdout.trim()
-  if (head !== expectedCommit) {
-    const dirty = (await invoke(['status', '--porcelain=v1', '-z'])).stdout
-    if (dirty.length) throw new GitBoundaryError('accepted-reconcile-dirty', 'Cannot reconcile accepted HEAD over unpreserved changes')
-    await invoke(['checkout', '--detach', expectedCommit])
-    await invoke(['branch', '-f', identity.branch, expectedCommit])
-    await invoke(['checkout', identity.branch])
-  }
+  const branch = await readOptionalRef(ctx, executable, branchRef, worktree, options)
+  const dirty = (await invoke(['status', '--porcelain=v1', '-z'])).stdout
+  if (dirty.length) throw new GitBoundaryError('accepted-reconcile-dirty', 'Cannot reconcile accepted HEAD over unpreserved changes')
+  if (branch !== head) throw new GitBoundaryError('accepted-reconcile-identity', 'Run branch and worktree HEAD disagree before promotion')
+  if (head !== expectedCommit) throw new GitBoundaryError('accepted-reconcile-commit', 'Worktree HEAD is not the candidate selected for promotion')
+  if (currentRef !== expectedCommit) await invoke(['update-ref', identity.acceptedRef, expectedCommit, currentRef ?? '0'.repeat(40)])
 }
 
 export function releaseTerminalRunLock(tracker: DurableTracker, runId: string): boolean { return tracker.releaseActiveLock(runId) }
@@ -170,3 +188,22 @@ function isUniqueConstraint(error: unknown): boolean { return String((error as {
 function parseWorktreeList(value: string): Array<{ path: string; branch?: string }> { return value.trim().split(/\n\n+/u).filter(Boolean).map((block) => { const lines = block.split('\n'); const path = lines[0]?.startsWith('worktree ') ? lines[0].slice(9) : ''; const branch = lines.find((line) => line.startsWith('branch '))?.slice(7); return { path, ...(branch ? { branch } : {}) } }) }
 async function gitSucceeds(ctx: GitContext, executable: string, args: readonly string[], cwd: string, options: Omit<GitCommandOptions, 'cwd'>): Promise<boolean> { try { await runGit(ctx, executable, args, { ...options, cwd }); return true } catch (error) { if (error instanceof GitBoundaryError && error.code === 'git-command-failed') return false; throw error } }
 async function readOptionalRef(ctx: GitContext, executable: string, ref: string, cwd: string, options: Omit<GitCommandOptions, 'cwd'>): Promise<string | undefined> { try { return (await runGit(ctx, executable, ['rev-parse', '--verify', ref], { ...options, cwd })).stdout.trim() } catch (error) { if (error instanceof GitBoundaryError && error.code === 'git-command-failed') return undefined; throw error } }
+
+async function snapshotGitConfig(ctx: GitContext, executable: string, cwd: string, options: Omit<GitCommandOptions, 'cwd'>): Promise<readonly GitConfigSnapshot[]> {
+  const paths = new Set<string>()
+  for (const args of [['rev-parse', '--git-path', 'config'], ['rev-parse', '--git-path', 'config.worktree']] as const) {
+    const value = (await runGit(ctx, executable, args, { ...options, cwd })).stdout.trim()
+    paths.add(resolve(cwd, value))
+  }
+  return Promise.all([...paths].sort().map(async (path) => {
+    try { return { path, exists: true, sha256: createHash('sha256').update(await readFile(path)).digest('hex') } }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { path, exists: false }; throw error }
+  }))
+}
+function sameGitConfig(left: readonly GitConfigSnapshot[], right: readonly GitConfigSnapshot[]): boolean { return JSON.stringify(left) === JSON.stringify(right) }
+async function verifyRecoverableCandidate(invoke: (args: readonly string[], env?: Readonly<Record<string, string>>) => Promise<GitCommandResult>, commit: string, snapshot: CandidateSnapshot, validatedPaths: readonly string[], experimentId: string): Promise<void> {
+  const parent = (await invoke(['rev-parse', '--verify', `${commit}^`])).stdout.trim()
+  const subject = (await invoke(['show', '-s', '--format=%s', commit])).stdout.trim()
+  const paths = parseNameStatus((await invoke(['diff-tree', '--no-commit-id', '--name-status', '-r', '-z', commit])).stdout)
+  if (!FULL_SHA.test(commit) || parent !== snapshot.parentCommit || subject !== `autoresearch candidate ${experimentId}` || !sameSet(paths, validatedPaths)) throw new GitBoundaryError('candidate-lineage-invalid', 'Existing HEAD is not the exact recoverable candidate')
+}

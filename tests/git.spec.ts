@@ -1,5 +1,5 @@
 import { execFileSync, spawn } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -48,6 +48,13 @@ function fixture() {
   const subprocess = new LocalSubprocess(); return { root, subprocess, ctx: { subprocess } as unknown as GitContext }
 }
 function policy(mutableGlobs = ['src/**']) { return { mutableGlobs, exceptionalAllowlists: { dependencies: [], evaluators: [], datasets: [], submodules: [], gitConfig: [] }, evaluation: { command: 'evaluate.mjs', args: [] }, provenance: {} } }
+function faultingGit(root: string, match: string): string {
+  const script = join(root, `fault-git-${Math.random().toString(16).slice(2)}.cjs`)
+  const marker = `${script}.fired`
+  writeFileSync(script, `#!/usr/bin/env node\nconst { existsSync, writeFileSync } = require('node:fs'); const { spawnSync } = require('node:child_process'); const args = process.argv.slice(2); if (!existsSync(${JSON.stringify(marker)}) && args.join(' ').includes(${JSON.stringify(match)})) { writeFileSync(${JSON.stringify(marker)}, '1'); process.stderr.write('injected git failure\\n'); process.exit(91) } const result = spawnSync('git', args, { stdio: 'inherit', env: process.env }); process.exit(result.status ?? 1)\n`)
+  chmodSync(script, 0o700)
+  return script
+}
 
 async function setupRun() {
   const f = fixture(); const discovery = await discoverRepository(f.ctx, 'git', f.root, commandOptions); const identity = makeRunGitIdentity({ branchPrefix: 'autoresearch/', stateRoot: 'state' }, discovery, 'speed', 'run-001')
@@ -82,7 +89,7 @@ describe('host-owned Git boundary', () => {
     const snapshot = await snapshotCandidate(f.ctx, 'git', f.identity.worktree, commandOptions)
     expect(snapshot.changed.find((item) => item.path === 'package.json')?.staged).toBe(true); expect(snapshot.changed.find((item) => item.path === 'src.txt')?.unstaged).toBe(true); expect(snapshot.changed.find((item) => item.path === 'secret.policy')?.untracked).toBe(true)
     expect(() => validateCandidate(snapshot, policy(['**']))).toThrowError(GitBoundaryError)
-    const dependencyOnly = { parentCommit: snapshot.parentCommit, changed: snapshot.changed.filter((item) => item.path === 'package.json') }
+    const dependencyOnly = { parentCommit: snapshot.parentCommit, changed: snapshot.changed.filter((item) => item.path === 'package.json'), gitConfig: snapshot.gitConfig }
     expect(validateCandidate(dependencyOnly, { ...policy(['src/**']), exceptionalAllowlists: { dependencies: ['package.json'], evaluators: [], datasets: [], submodules: [], gitConfig: [] } })).toEqual(['package.json'])
   })
 
@@ -94,6 +101,62 @@ describe('host-owned Git boundary', () => {
     expect(execFileSync('git', ['-C', f.root, 'rev-parse', candidate.auditRef]).toString().trim()).toBe(candidate.candidateCommit)
     await reconcileAcceptedHead(f.ctx, 'git', f.identity.worktree, f.identity, candidate.candidateCommit, commandOptions); await reconcileAcceptedHead(f.ctx, 'git', f.identity.worktree, f.identity, candidate.candidateCommit, commandOptions)
     expect(execFileSync('git', ['-C', f.identity.worktree, 'rev-parse', 'HEAD']).toString().trim()).toBe(candidate.candidateCommit)
+  })
+
+  it('checks promotion preconditions before publishing the accepted ref', async () => {
+    const f = await setupRun(); writeFileSync(join(f.identity.worktree, 'src', 'code.ts'), 'export const n = 2\n')
+    const snapshot = await snapshotCandidate(f.ctx, 'git', f.identity.worktree, commandOptions); const candidate = await commitCandidate(f.ctx, 'git', f.identity.worktree, f.identity, 'dirty', snapshot, validateCandidate(snapshot, policy()), commandOptions)
+    writeFileSync(join(f.identity.worktree, 'src', 'unpreserved.ts'), 'dirty\n')
+    await expect(reconcileAcceptedHead(f.ctx, 'git', f.identity.worktree, f.identity, candidate.candidateCommit, commandOptions)).rejects.toMatchObject({ code: 'accepted-reconcile-dirty' })
+    expect(execFileSync('git', ['-C', f.root, 'rev-parse', f.identity.acceptedRef]).toString().trim()).toBe(f.discovery.startCommit)
+    expect(execFileSync('git', ['-C', f.root, 'rev-parse', `refs/heads/${f.identity.branch}`]).toString().trim()).toBe(candidate.candidateCommit)
+    expect(execFileSync('git', ['-C', f.identity.worktree, 'rev-parse', 'HEAD']).toString().trim()).toBe(candidate.candidateCommit)
+  })
+
+  it('recovers candidate audit refs idempotently across commit/ref failure windows', async () => {
+    const f = await setupRun(); writeFileSync(join(f.identity.worktree, 'src', 'code.ts'), 'export const n = 2\n')
+    const snapshot = await snapshotCandidate(f.ctx, 'git', f.identity.worktree, commandOptions); const paths = validateCandidate(snapshot, policy())
+
+    const faulty = faultingGit(f.root, `update-ref ${f.identity.candidateRefPrefix}recover`)
+    await expect(commitCandidate(f.ctx, faulty, f.identity.worktree, f.identity, 'recover', snapshot, paths, commandOptions)).rejects.toMatchObject({ code: 'git-command-failed' })
+    const orphan = execFileSync('git', ['-C', f.identity.worktree, 'rev-parse', 'HEAD']).toString().trim()
+    const recovered = await commitCandidate(f.ctx, 'git', f.identity.worktree, f.identity, 'recover', snapshot, paths, commandOptions)
+    expect(recovered.candidateCommit).toBe(orphan); expect(execFileSync('git', ['-C', f.root, 'rev-parse', recovered.auditRef]).toString().trim()).toBe(orphan)
+    await expect(commitCandidate(f.ctx, 'git', f.identity.worktree, f.identity, 'recover', snapshot, paths, commandOptions)).resolves.toEqual(recovered)
+  })
+  it('retries accepted-ref publication after an interrupted promotion', async () => {
+    const f = await setupRun(); writeFileSync(join(f.identity.worktree, 'src', 'code.ts'), 'export const n = 2\n')
+    const snapshot = await snapshotCandidate(f.ctx, 'git', f.identity.worktree, commandOptions); const candidate = await commitCandidate(f.ctx, 'git', f.identity.worktree, f.identity, 'promote', snapshot, validateCandidate(snapshot, policy()), commandOptions)
+    const faulty = faultingGit(f.root, `update-ref ${f.identity.acceptedRef}`)
+    await expect(reconcileAcceptedHead(f.ctx, faulty, f.identity.worktree, f.identity, candidate.candidateCommit, commandOptions)).rejects.toMatchObject({ code: 'git-command-failed' })
+    expect(execFileSync('git', ['-C', f.root, 'rev-parse', f.identity.acceptedRef]).toString().trim()).toBe(f.discovery.startCommit)
+    await reconcileAcceptedHead(f.ctx, 'git', f.identity.worktree, f.identity, candidate.candidateCommit, commandOptions)
+    expect(execFileSync('git', ['-C', f.root, 'rev-parse', f.identity.acceptedRef]).toString().trim()).toBe(candidate.candidateCommit)
+  })
+
+  it('recovers interrupted allocation and blocks tampered same-run resume', async () => {
+    const f = fixture(); const discovery = await discoverRepository(f.ctx, 'git', f.root, commandOptions); const identity = makeRunGitIdentity({ branchPrefix: 'autoresearch/', stateRoot: 'state' }, discovery, 'resume', 'run-resume')
+    const faulty = faultingGit(f.root, `update-ref ${identity.acceptedRef}`)
+    await expect(allocateRunWorktree(f.ctx, faulty, discovery, identity, commandOptions)).rejects.toMatchObject({ code: 'git-command-failed' })
+    await allocateRunWorktree(f.ctx, 'git', discovery, identity, commandOptions, true)
+    expect(execFileSync('git', ['-C', f.root, 'rev-parse', identity.acceptedRef]).toString().trim()).toBe(discovery.startCommit)
+    execFileSync('git', ['-C', identity.worktree, 'checkout', '--detach']); expect(await allocateRunWorktree(f.ctx, 'git', discovery, identity, commandOptions, true).then(() => undefined, (error: unknown) => (error as GitBoundaryError).code)).toBe('git-identity-collision')
+  })
+
+  it('rejects Git config mutation after snapshot', async () => {
+    const f = await setupRun(); writeFileSync(join(f.identity.worktree, 'src', 'code.ts'), 'export const n = 2\n')
+    const snapshot = await snapshotCandidate(f.ctx, 'git', f.identity.worktree, commandOptions); execFileSync('git', ['-C', f.identity.worktree, 'config', 'autoresearch.tampered', 'true'])
+    await expect(commitCandidate(f.ctx, 'git', f.identity.worktree, f.identity, 'config', snapshot, validateCandidate(snapshot, policy()), commandOptions)).rejects.toMatchObject({ code: 'git-config-mutated' })
+  })
+
+  it('retains rejected candidate audit refs through later promotion and cleanup', async () => {
+    const f = await setupRun(); writeFileSync(join(f.identity.worktree, 'src', 'code.ts'), 'export const n = 2\n')
+    const firstSnapshot = await snapshotCandidate(f.ctx, 'git', f.identity.worktree, commandOptions); const rejected = await commitCandidate(f.ctx, 'git', f.identity.worktree, f.identity, 'rejected', firstSnapshot, validateCandidate(firstSnapshot, policy()), commandOptions)
+    execFileSync('git', ['-C', f.identity.worktree, 'reset', '--hard', f.identity.acceptedRef]); writeFileSync(join(f.identity.worktree, 'src', 'code.ts'), 'export const n = 3\n')
+    const secondSnapshot = await snapshotCandidate(f.ctx, 'git', f.identity.worktree, commandOptions); const accepted = await commitCandidate(f.ctx, 'git', f.identity.worktree, f.identity, 'accepted', secondSnapshot, validateCandidate(secondSnapshot, policy()), commandOptions)
+    await reconcileAcceptedHead(f.ctx, 'git', f.identity.worktree, f.identity, accepted.candidateCommit, commandOptions); await removeRunWorktree(f.ctx, 'git', f.discovery, f.identity, commandOptions)
+    expect(execFileSync('git', ['-C', f.root, 'rev-parse', rejected.auditRef]).toString().trim()).toBe(rejected.candidateCommit)
+    expect(execFileSync('git', ['-C', f.root, 'rev-parse', accepted.auditRef]).toString().trim()).toBe(accepted.candidateCommit)
   })
 
   it('excludes active repository/tag runs, releases only terminal quiescent locks, and cleans worktree without deleting refs', async () => {
@@ -110,5 +173,13 @@ describe('host-owned Git boundary', () => {
     const { ctx, root } = fixture()
     await expect(runGit(ctx, process.execPath, ['-e', "process.stdout.write('x'.repeat(10000))"], { ...commandOptions, cwd: root, maxStdoutBytes: 32 })).rejects.toMatchObject({ code: 'git-output-limit' })
     const started = Date.now(); await expect(runGit(ctx, process.execPath, ['-e', "setInterval(()=>{},1000)"], { ...commandOptions, cwd: root, timeoutMs: 50 })).rejects.toMatchObject({ code: 'git-timeout' }); expect(Date.now() - started).toBeLessThan(2_000)
+  })
+
+  it('does not spawn pre-aborted Git and quiesces in-flight cancellation', async () => {
+    const { ctx, root, subprocess } = fixture(); const pre = new AbortController(); pre.abort(new Error('stop'))
+    await expect(runGit(ctx, process.execPath, ['-e', 'process.exit(0)'], { ...commandOptions, cwd: root, signal: pre.signal })).rejects.toMatchObject({ code: 'git-cancelled' })
+    expect(subprocess.specs).toHaveLength(0)
+    const active = new AbortController(); const running = runGit(ctx, process.execPath, ['-e', 'setInterval(()=>{},1000)'], { ...commandOptions, cwd: root, signal: active.signal }); await new Promise((resolve) => setTimeout(resolve, 50)); active.abort(new Error('stop'))
+    await expect(running).rejects.toMatchObject({ code: 'git-cancelled' }); expect(subprocess.specs).toHaveLength(1)
   })
 })

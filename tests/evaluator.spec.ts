@@ -1,8 +1,9 @@
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { spawn } from 'node:child_process'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { describe, expect, it, vi } from 'vitest'
-import type { SubprocessHandle, SubprocessOutputRead, SubprocessSpawnSpec } from '@deepseek-ai/dsh-subprocess'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { SubprocessHandle, SubprocessOutcome, SubprocessOutputRead, SubprocessOutputReader, SubprocessSpawnSpec } from '@deepseek-ai/dsh-subprocess'
 import { freezeEvaluatorProvenance, parseFinalLineMetric, runEvaluator } from '../src/evaluator.ts'
 import type { EvaluatorPersistence } from '../src/evaluator.ts'
 
@@ -16,8 +17,11 @@ interface FakeOptions {
   spawnError?: Error
 }
 
+const roots: string[] = []
+afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
+
 function fixture(): { root: string; artifacts: string } {
-  const root = mkdtempSync(join(tmpdir(), 'autoresearch-evaluator-'))
+  const root = mkdtempSync(join(tmpdir(), 'autoresearch-evaluator-')); roots.push(root)
   const artifacts = join(root, '.artifacts')
   mkdirSync(join(root, 'bench'))
   writeFileSync(join(root, 'bench', 'evaluate.mjs'), 'fixture evaluator\n')
@@ -39,7 +43,7 @@ function fakeRuntime(options: FakeOptions = {}) {
         if (options.spawnError !== undefined) throw options.spawnError
         let settle!: (value: { exitCode: number | null; signal: NodeJS.Signals | null }) => void
         const done = new Promise<{ exitCode: number | null; signal: NodeJS.Signals | null }>((resolve) => { settle = resolve })
-        const normal = (): void => settle({ exitCode: options.exitCode ?? 0, signal: options.signal ?? null })
+        const normal = (): void => settle({ exitCode: options.exitCode === undefined ? 0 : options.exitCode, signal: options.signal ?? null })
         if (options.settleOnAbort) next.signal?.addEventListener('abort', normal, { once: true })
         else queueMicrotask(normal)
         return {
@@ -56,11 +60,81 @@ function fakeRuntime(options: FakeOptions = {}) {
   }
 }
 
-function persistence(): EvaluatorPersistence & { events: string[]; outcome?: Parameters<EvaluatorPersistence['persistAttemptOutcome']> } {
-  const state: EvaluatorPersistence & { events: string[]; outcome?: Parameters<EvaluatorPersistence['persistAttemptOutcome']> } = {
+class LocalReader implements SubprocessOutputReader {
+  constructor(private readonly chunks: Buffer[], private readonly maxBytes: number) {}
+  readFrom(fromByte: number): SubprocessOutputRead {
+    const whole = Buffer.concat(this.chunks)
+    const retained = whole.subarray(Math.max(0, whole.length - this.maxBytes))
+    return { text: retained.toString('utf8'), nextOffset: whole.length, lossy: fromByte < whole.length - retained.length }
+  }
+}
+
+class LocalHandle implements SubprocessHandle {
+  readonly stdin = undefined
+  readonly stdout = undefined
+  readonly stderr = undefined
+  readonly pid: number
+  readonly collected
+  readonly done: Promise<SubprocessOutcome>
+  private exited = false
+  private escalation: ReturnType<typeof setTimeout> | undefined
+
+  constructor(private readonly child: ReturnType<typeof spawn>, stdout: Buffer[], stderr: Buffer[], maxOut: number, maxErr: number, graceMs: number) {
+    this.pid = child.pid ?? -1
+    this.collected = { stdout: new LocalReader(stdout, maxOut), stderr: new LocalReader(stderr, maxErr) }
+    this.done = new Promise((resolve, reject) => {
+      child.once('error', reject)
+      child.once('close', (exitCode, signal) => {
+        this.exited = true
+        if (this.escalation !== undefined) clearTimeout(this.escalation)
+        resolve({ exitCode, signal })
+      })
+    })
+    this.escalation = undefined
+    this.graceMs = graceMs
+  }
+
+  private readonly graceMs: number
+
+  terminate(): void {
+    if (this.exited || this.pid <= 0 || this.escalation !== undefined) return
+    try { process.kill(-this.pid, 'SIGTERM') } catch { return }
+    this.escalation = setTimeout(() => {
+      if (!this.exited) try { process.kill(-this.pid, 'SIGKILL') } catch { /* tree already exited */ }
+    }, this.graceMs)
+  }
+
+  async waitForExit(): Promise<boolean> { await this.done; return true }
+}
+
+class LocalSubprocess {
+  spawn(spec: SubprocessSpawnSpec): SubprocessHandle {
+    const stdout: Buffer[] = []; const stderr: Buffer[] = []
+    const child = spawn(spec.argv[0]!, spec.argv.slice(1), { cwd: spec.cwd, env: spec.env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] })
+    child.stdout.on('data', (chunk: Buffer) => stdout.push(chunk)); child.stderr.on('data', (chunk: Buffer) => stderr.push(chunk))
+    const maxOut = typeof spec.stdio.stdout === 'object' ? spec.stdio.stdout.maxBytes : 0
+    const maxErr = typeof spec.stdio.stderr === 'object' ? spec.stdio.stderr.maxBytes : 0
+    const handle = new LocalHandle(child, stdout, stderr, maxOut, maxErr, spec.graceMs ?? 25)
+    spec.signal?.addEventListener('abort', () => handle.terminate(), { once: true })
+    return handle
+  }
+}
+
+function persistence(): EvaluatorPersistence & {
+  events: string[]
+  intent?: Parameters<EvaluatorPersistence['persistSpawnIntent']>[0]
+  observed?: Parameters<EvaluatorPersistence['persistSpawnObserved']>[0]
+  outcome?: Parameters<EvaluatorPersistence['persistAttemptOutcome']>
+} {
+  const state: EvaluatorPersistence & {
+    events: string[]
+    intent?: Parameters<EvaluatorPersistence['persistSpawnIntent']>[0]
+    observed?: Parameters<EvaluatorPersistence['persistSpawnObserved']>[0]
+    outcome?: Parameters<EvaluatorPersistence['persistAttemptOutcome']>
+  } = {
     events: [],
-    persistSpawnIntent: () => { state.events.push('intent') },
-    persistSpawnObserved: () => { state.events.push('observed') },
+    persistSpawnIntent: intent => { state.events.push('intent'); state.intent = intent },
+    persistSpawnObserved: observed => { state.events.push('observed'); state.observed = observed },
     persistAttemptOutcome: (...facts) => { state.events.push('outcome'); state.outcome = facts },
   }
   return state
@@ -118,6 +192,26 @@ describe('host-owned evaluator execution', () => {
     expect(setup.runtime.waited).toBe(1)
   })
 
+  it('passes raw environment only to spawn and hashes or redacts every durable and returned surface', async () => {
+    const secret = 'innocuous-name-secret-value'
+    const runtime = fakeRuntime({ stdout: reader(`log ${secret}\n{"score":2}\n`), stderr: reader(`warning ${secret}\n`) })
+    const setup = options(runtime, { environment: { ORDINARY: secret } })
+    const result = await runEvaluator(setup.value)
+    expect(runtime.spec?.env).toEqual({ ORDINARY: secret })
+    expect(setup.value.persistence.intent?.env.ORDINARY).toMatch(/^sha256:/)
+    expect(setup.value.persistence.intent?.env.ORDINARY).not.toContain(secret)
+    expect(JSON.stringify(result)).not.toContain(secret)
+    expect(result.artifacts.map(item => readFileSync(item.location, 'utf8')).join('\n')).not.toContain(secret)
+    expect(readFileSync(result.artifacts[0]!.location, 'utf8')).toContain('[REDACTED]')
+    const frozen = freezeEvaluatorProvenance(setup.paths.root, { evaluation: setup.value.evaluation, environment: { ORDINARY: secret }, metricName: 'score', metricDirection: 'minimize' })
+    expect(frozen.canonical).not.toContain(secret)
+
+    const failing = options(fakeRuntime({ spawnError: new Error(`cannot launch ${secret}`) }), { environment: { ORDINARY: secret } })
+    const failure = await runEvaluator(failing.value)
+    expect(JSON.stringify(failure)).not.toContain(secret)
+    expect(JSON.stringify(failing.value.persistence.outcome)).not.toContain(secret)
+  })
+
   it('hashes argv, files, dataset, environment, parser, metric, direction, and policy deterministically', () => {
     const paths = fixture()
     const first = freezeEvaluatorProvenance(paths.root, { evaluation: { command: 'node', args: ['x'], cwd: 'bench' }, evaluatorFiles: ['bench/evaluate.mjs'], dataset: { z: '2', a: '1' }, environment: { B: '2', A: '1' }, metricName: 'score', metricDirection: 'maximize', policy: { tie: 'reject' } })
@@ -153,11 +247,62 @@ describe('host-owned evaluator execution', () => {
     expect(runtime.terminated).toBe(1)
   })
 
+  it('records a durable cancelled no-spawn outcome for an already-aborted caller', async () => {
+    const controller = new AbortController(); controller.abort()
+    const runtime = fakeRuntime()
+    const setup = options(runtime, { signal: controller.signal })
+    const result = await runEvaluator(setup.value)
+    expect(result).toMatchObject({ kind: 'failed', code: 'cancelled', exit: { cancelled: true, processTreeQuiescent: true } })
+    expect(result.exit).not.toHaveProperty('providerPid')
+    expect(runtime.spec).toBeUndefined()
+    expect(setup.value.persistence.events).toEqual(['intent', 'outcome'])
+    expect(setup.value.persistence.observed).toBeUndefined()
+    expect(setup.value.persistence.outcome?.[0]).toMatchObject({ cancelled: true, exitCode: null, signal: null })
+  })
+
+  it.each(['timeout', 'repeated-cancellation'] as const)('kills a real evaluator descendant tree before persisting %s', async mode => {
+    const paths = fixture()
+    const childPidPath = join(paths.root, 'child.pid')
+    const script = [
+      "const { spawn } = require('node:child_process')",
+      "const { writeFileSync } = require('node:fs')",
+      "process.on('SIGTERM', () => {})",
+      "const child = spawn(process.execPath, ['-e', \"process.on('SIGTERM',()=>{});setInterval(()=>{},1000)\"], { stdio: 'ignore' })",
+      `writeFileSync(${JSON.stringify(childPidPath)}, String(child.pid))`,
+      "setInterval(() => {}, 1000)",
+    ].join(';')
+    const controller = new AbortController()
+    const durable = persistence()
+    const pending = runEvaluator({
+      subprocess: new LocalSubprocess(), worktree: paths.root,
+      evaluation: { command: process.execPath, args: ['-e', script], cwd: 'bench' },
+      metricName: 'score', metricDirection: 'minimize', timeoutMs: mode === 'timeout' ? 150 : 5_000,
+      terminationGraceMs: 30, maxStdoutBytes: 128, maxStderrBytes: 64,
+      artifactDirectory: paths.artifacts, artifactPrefix: mode, persistence: durable,
+      ...(mode === 'repeated-cancellation' ? { signal: controller.signal } : {}),
+    })
+    while (!readFileExists(childPidPath)) await new Promise(resolve => setTimeout(resolve, 5))
+    const childPid = Number(readFileSync(childPidPath, 'utf8'))
+    if (mode === 'repeated-cancellation') { controller.abort(); controller.abort() }
+    const result = await pending
+    expect(result).toMatchObject({ kind: 'failed', code: mode === 'timeout' ? 'timeout' : 'cancelled', exit: { processTreeQuiescent: true } })
+    expect(durable.events.at(-1)).toBe('outcome')
+    expect(() => process.kill(childPid, 0)).toThrow()
+  }, 10_000)
+
   it('rejects lossy stdout as non-authoritative while persisting its bounded tail', async () => {
     const setup = options(fakeRuntime({ stdout: reader('tail without full metric', true) }))
     const result = await runEvaluator(setup.value)
     expect(result).toMatchObject({ kind: 'failed', code: 'output-limit' })
     expect(result.artifacts[0]).toMatchObject({ kind: 'stdout', truncated: true, sizeBytes: 24 })
+  })
+
+  it('marks and persists lossy stderr while preserving authoritative stdout', async () => {
+    const setup = options(fakeRuntime({ stderr: reader('bounded stderr tail', true) }))
+    const result = await runEvaluator(setup.value)
+    expect(result).toMatchObject({ kind: 'measured', metric: 1.5 })
+    expect(result.artifacts[1]).toMatchObject({ kind: 'stderr', truncated: true, sizeBytes: 19 })
+    expect(setup.value.persistence.outcome?.[1][1]).toMatchObject({ kind: 'stderr', truncated: true })
   })
 
   it('persists a bounded complete spill artifact and parses it when the in-memory read is lossless', async () => {
@@ -172,22 +317,66 @@ describe('host-owned evaluator execution', () => {
   })
 
   it.each([
-    [{ exitCode: 7 }, 'exit'],
-    [{ signal: 'SIGTERM' as NodeJS.Signals, exitCode: null }, 'signal'],
-    [{ waitQuiescent: false }, 'signal'],
-    [{ spawnError: new Error('ENOENT') }, 'spawn'],
-    [{ stdout: reader('{"wrong":1}\n') }, 'metric-protocol'],
-  ])('classifies exit, signal, quiescence, spawn, and parse failures %#', async (fake, code) => {
+    [{ exitCode: 7 }, 'exit', { exitCode: 7, signal: null }],
+    [{ signal: 'SIGTERM' as NodeJS.Signals, exitCode: null }, 'signal', { exitCode: null, signal: 'SIGTERM' }],
+    [{ waitQuiescent: false }, 'signal', { exitCode: 0, signal: null }],
+    [{ spawnError: new Error('ENOENT') }, 'spawn', { exitCode: null, signal: null }],
+    [{ stdout: reader('{"wrong":1}\n') }, 'metric-protocol', { exitCode: 0, signal: null }],
+  ])('classifies and persists exit, signal, quiescence, spawn, and parse failures %#', async (fake, code, persisted) => {
     const setup = options(fakeRuntime(fake))
     await expect(runEvaluator(setup.value)).resolves.toMatchObject({ kind: 'failed', code })
     expect(setup.value.persistence.events[0]).toBe('intent')
     expect(setup.value.persistence.events.at(-1)).toBe('outcome')
+    expect(setup.value.persistence.outcome?.[0]).toMatchObject(persisted)
   })
 
-  it('rejects escaping cwd and credential-shaped or managed environment overrides before spawn', async () => {
+  it('rejects lexical and symlink cwd/file escapes before spawn', async () => {
     const escaping = options(fakeRuntime(), { evaluation: { command: 'node', args: [], cwd: '../outside' } })
     await expect(runEvaluator(escaping.value)).rejects.toThrow(/escapes/)
-    const secret = options(fakeRuntime(), { environment: { API_TOKEN: 'secret' } })
-    await expect(runEvaluator(secret.value)).rejects.toThrow(/unsafe evaluator environment key/)
+    expect(escaping.runtime.spec).toBeUndefined()
+
+    const outside = mkdtempSync(join(tmpdir(), 'autoresearch-outside-')); roots.push(outside)
+    writeFileSync(join(outside, 'evaluate.mjs'), 'outside\n')
+    const cwdLink = options()
+    rmSync(join(cwdLink.paths.root, 'bench'), { recursive: true })
+    symlinkSync(outside, join(cwdLink.paths.root, 'bench'), 'dir')
+    await expect(runEvaluator(cwdLink.value)).rejects.toThrow(/symbolic link/)
+    expect(cwdLink.runtime.spec).toBeUndefined()
+
+    const fileLink = options()
+    rmSync(join(fileLink.paths.root, 'bench', 'evaluate.mjs'))
+    symlinkSync(join(outside, 'evaluate.mjs'), join(fileLink.paths.root, 'bench', 'evaluate.mjs'))
+    expect(() => freezeEvaluatorProvenance(fileLink.paths.root, { evaluation: fileLink.value.evaluation, evaluatorFiles: ['bench/evaluate.mjs'], metricName: 'score', metricDirection: 'minimize' })).toThrow(/symbolic link/)
+
+    const intermediate = options()
+    mkdirSync(join(intermediate.paths.root, 'inside'))
+    writeFileSync(join(intermediate.paths.root, 'inside', 'evaluate.mjs'), 'inside\n')
+    symlinkSync(join(intermediate.paths.root, 'inside'), join(intermediate.paths.root, 'linked'), 'dir')
+    expect(() => freezeEvaluatorProvenance(intermediate.paths.root, { evaluation: intermediate.value.evaluation, evaluatorFiles: ['linked/evaluate.mjs'], metricName: 'score', metricDirection: 'minimize' })).toThrow(/symbolic link/)
+  })
+
+  it('terminates a spawn when the validated cwd is replaced during startup', async () => {
+    const setup = options()
+    const originalSpawn = setup.runtime.runtime.spawn
+    setup.runtime.runtime.spawn = spec => {
+      const handle = originalSpawn(spec)
+      rmSync(join(setup.paths.root, 'bench'), { recursive: true })
+      symlinkSync(tmpdir(), join(setup.paths.root, 'bench'), 'dir')
+      return handle
+    }
+    const result = await runEvaluator(setup.value)
+    expect(result).toMatchObject({ kind: 'failed', code: 'spawn', exit: { processTreeQuiescent: true } })
+    expect(setup.runtime.terminated).toBe(1)
+  })
+
+  it('supports arbitrary override names but rejects managed environment keys', async () => {
+    const supported = options(fakeRuntime(), { environment: { API_TOKEN: 'supported-secret' } })
+    await expect(runEvaluator(supported.value)).resolves.toMatchObject({ kind: 'measured' })
+    const managed = options(fakeRuntime(), { environment: { DSH_TOKEN: 'secret' } })
+    await expect(runEvaluator(managed.value)).rejects.toThrow(/unsafe evaluator environment key/)
   })
 })
+
+function readFileExists(path: string): boolean {
+  try { readFileSync(path); return true } catch { return false }
+}

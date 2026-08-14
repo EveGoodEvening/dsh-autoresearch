@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
-import { chmodSync, copyFileSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, closeSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs'
+import { constants } from 'node:fs'
 import { isAbsolute, relative, resolve, sep } from 'node:path'
 import type { SubprocessHandle, SubprocessOutcome, SubprocessOutputRead, SubprocessSpawnSpec } from '@deepseek-ai/dsh-subprocess'
 import type { EvaluatorArgv } from './types.ts'
@@ -76,17 +77,16 @@ export interface EvaluatorRunOptions {
 }
 
 export function freezeEvaluatorProvenance(worktree: string, input: EvaluatorProvenanceInput): FrozenEvaluatorProvenance {
-  const root = resolve(worktree)
+  const root = canonicalWorktree(worktree)
   const fileHashes: Record<string, string> = Object.create(null) as Record<string, string>
   for (const file of [...(input.evaluatorFiles ?? [])].sort()) {
-    const absolute = containedPath(root, file, 'evaluator file')
-    fileHashes[file] = sha256(readFileSync(absolute))
+    fileHashes[file] = sha256(readContainedFile(root, file, 'evaluator file'))
   }
   const value = {
     evaluation: { command: input.evaluation.command, args: [...input.evaluation.args], ...(input.evaluation.cwd === undefined ? {} : { cwd: input.evaluation.cwd }) },
     evaluatorFileHashes: fileHashes,
     dataset: sortedRecord(input.dataset ?? {}),
-    environment: sortedRecord(input.environment ?? {}),
+    environment: hashedEnvironment(input.environment ?? {}),
     metricName: input.metricName,
     metricDirection: input.metricDirection,
     parserVersion: EVALUATOR_PARSER_VERSION,
@@ -129,9 +129,12 @@ export async function runEvaluator(options: EvaluatorRunOptions): Promise<Evalua
   validatePositive(options.maxStdoutBytes, 'maxStdoutBytes')
   validatePositive(options.maxStderrBytes, 'maxStderrBytes')
   const now = options.now ?? (() => new Date())
-  const cwd = evaluatorCwd(options.worktree, options.evaluation.cwd)
+  const root = canonicalWorktree(options.worktree)
+  const cwdIdentity = capturePathIdentity(root, options.evaluation.cwd ?? '.', 'evaluator cwd', true)
+  const cwd = cwdIdentity.canonical
   const env = explicitEnvironment(options.environment ?? {})
-  const provenance = freezeEvaluatorProvenance(options.worktree, {
+  const persistedEnv = hashedEnvironment(env)
+  const provenance = freezeEvaluatorProvenance(root, {
     evaluation: options.evaluation,
     ...(options.evaluatorFiles === undefined ? {} : { evaluatorFiles: options.evaluatorFiles }),
     ...(options.dataset === undefined ? {} : { dataset: options.dataset }),
@@ -141,12 +144,18 @@ export async function runEvaluator(options: EvaluatorRunOptions): Promise<Evalua
     policy: options.policy,
   })
   const argv = Object.freeze([options.evaluation.command, ...options.evaluation.args])
-  options.persistence.persistSpawnIntent({ argv, cwd, env, provenanceSha256: provenance.sha256 })
-
+  options.persistence.persistSpawnIntent({ argv, cwd, env: persistedEnv, provenanceSha256: provenance.sha256 })
   const controller = new AbortController()
   let cause: 'timeout' | 'cancelled' | undefined
   const cancel = (): void => { if (cause === undefined) cause = 'cancelled'; controller.abort() }
-  if (options.signal?.aborted) cancel()
+  if (options.signal?.aborted) {
+    const facts: EvaluatorAttemptFacts = {
+      exitedAt: now().toISOString(), exitCode: null, signal: null, timedOut: false, cancelled: true, processTreeQuiescent: true,
+    }
+    const artifacts = persistArtifacts(options.artifactDirectory, options.artifactPrefix, undefined, undefined, Object.values(env))
+    options.persistence.persistAttemptOutcome(facts, artifacts)
+    return { kind: 'failed', code: 'cancelled', message: 'evaluator cancelled', provenanceSha256: provenance.sha256, exit: facts, artifacts }
+  }
   options.signal?.addEventListener('abort', cancel, { once: true })
   const timeout = setTimeout(() => { if (cause === undefined) cause = 'timeout'; controller.abort() }, options.timeoutMs)
   let handle: SubprocessHandle | undefined
@@ -154,6 +163,7 @@ export async function runEvaluator(options: EvaluatorRunOptions): Promise<Evalua
   let spawnedAt: string | undefined
   let spawnFailure: unknown
   try {
+    assertPathIdentity(root, cwdIdentity, 'evaluator cwd')
     handle = options.subprocess.spawn({
       argv, cwd, env, signal: controller.signal, graceMs: options.terminationGraceMs,
       stdio: {
@@ -162,6 +172,7 @@ export async function runEvaluator(options: EvaluatorRunOptions): Promise<Evalua
         stderr: { maxBytes: options.maxStderrBytes, spill: { maxBytes: options.maxStderrBytes } },
       },
     })
+    assertPathIdentity(root, cwdIdentity, 'evaluator cwd')
     spawnedAt = now().toISOString()
     options.persistence.persistSpawnObserved({ providerPid: handle.pid, spawnedAt })
     try { outcome = await handle.done } catch (error) { spawnFailure = error }
@@ -179,16 +190,16 @@ export async function runEvaluator(options: EvaluatorRunOptions): Promise<Evalua
   }
   const stdoutRead = handle?.collected.stdout?.readFrom(0)
   const stderrRead = handle?.collected.stderr?.readFrom(0)
-  const artifacts = persistArtifacts(options.artifactDirectory, options.artifactPrefix, stdoutRead, stderrRead)
+  const artifacts = persistArtifacts(options.artifactDirectory, options.artifactPrefix, stdoutRead, stderrRead, Object.values(env))
   const facts: EvaluatorAttemptFacts = {
     ...(handle === undefined ? {} : { providerPid: handle.pid }), ...(spawnedAt === undefined ? {} : { spawnedAt }),
     exitedAt: now().toISOString(), exitCode: outcome.exitCode, signal: outcome.signal,
     timedOut: cause === 'timeout', cancelled: cause === 'cancelled', processTreeQuiescent: quiescent,
-    ...(spawnFailure === undefined ? {} : { failureCode: 'spawn', failureMessage: errorMessage(spawnFailure) }),
+    ...(spawnFailure === undefined ? {} : { failureCode: 'spawn', failureMessage: safeErrorMessage(spawnFailure, Object.values(env)) }),
   }
   options.persistence.persistAttemptOutcome(facts, artifacts)
   const base = { provenanceSha256: provenance.sha256, exit: facts, artifacts } as const
-  if (spawnFailure !== undefined) return { kind: 'failed', code: 'spawn', message: errorMessage(spawnFailure), ...base }
+  if (spawnFailure !== undefined) return { kind: 'failed', code: 'spawn', message: safeErrorMessage(spawnFailure, Object.values(env)), ...base }
   if (cause === 'cancelled') return { kind: 'failed', code: 'cancelled', message: 'evaluator cancelled', ...base }
   if (cause === 'timeout') return { kind: 'failed', code: 'timeout', message: 'evaluator timed out', ...base }
   if (!quiescent) return { kind: 'failed', code: 'signal', message: 'evaluator process tree did not become quiescent', ...base }
@@ -196,38 +207,86 @@ export async function runEvaluator(options: EvaluatorRunOptions): Promise<Evalua
   if (outcome.exitCode !== 0) return { kind: 'failed', code: 'exit', message: `evaluator exited with code ${outcome.exitCode}`, ...base }
   if (stdoutRead === undefined || stdoutRead.lossy) return { kind: 'failed', code: 'output-limit', message: 'evaluator stdout exceeded its authoritative parse limit', ...base }
   try { return { kind: 'measured', metric: parseFinalLineMetric(stdoutRead.text, options.metricName), ...base } }
-  catch (error) { return { kind: 'failed', code: 'metric-protocol', message: errorMessage(error), ...base } }
+  catch (error) { return { kind: 'failed', code: 'metric-protocol', message: safeErrorMessage(error, Object.values(env)), ...base } }
 }
 
-function evaluatorCwd(worktree: string, configured?: string): string {
-  const root = resolve(worktree)
-  return configured === undefined ? root : containedPath(root, configured, 'evaluator cwd')
+
+interface PathIdentity { readonly canonical: string; readonly dev: number; readonly ino: number }
+
+function canonicalWorktree(worktree: string): string {
+  return realpathSync(resolve(worktree))
 }
 
-function containedPath(root: string, path: string, label: string): string {
+function capturePathIdentity(root: string, path: string, label: string, directory: boolean): PathIdentity {
+  const lexical = lexicalContainedPath(root, path, label)
+  rejectSymlinkComponents(root, lexical, label)
+  const canonical = realpathSync(lexical)
+  requireContained(root, canonical, label)
+  const stat = statSync(canonical)
+  if (directory ? !stat.isDirectory() : !stat.isFile()) throw new TypeError(`${label} must be ${directory ? 'a directory' : 'a regular file'}`)
+  return { canonical, dev: stat.dev, ino: stat.ino }
+}
+
+function assertPathIdentity(root: string, expected: PathIdentity, label: string): void {
+  const canonical = realpathSync(expected.canonical)
+  requireContained(root, canonical, label)
+  const stat = statSync(canonical)
+  if (canonical !== expected.canonical || stat.dev !== expected.dev || stat.ino !== expected.ino) throw new TypeError(`${label} changed during evaluator startup`)
+}
+
+function readContainedFile(root: string, path: string, label: string): Buffer {
+  const identity = capturePathIdentity(root, path, label, false)
+  const fd = openSync(identity.canonical, constants.O_RDONLY | constants.O_NOFOLLOW)
+  try {
+    const opened = fstatSync(fd)
+    if (!opened.isFile() || opened.dev !== identity.dev || opened.ino !== identity.ino) throw new TypeError(`${label} changed before it could be read`)
+    const bytes = readFileSync(fd)
+    assertPathIdentity(root, identity, label)
+    return bytes
+  } finally { closeSync(fd) }
+}
+
+function lexicalContainedPath(root: string, path: string, label: string): string {
   if (isAbsolute(path)) throw new TypeError(`${label} must be relative to the worktree`)
   const absolute = resolve(root, path)
-  const rel = relative(root, absolute)
-  if (rel === '..' || rel.startsWith(`..${sep}`)) throw new TypeError(`${label} escapes the worktree`)
+  requireContained(root, absolute, label)
   return absolute
+}
+
+function requireContained(root: string, path: string, label: string): void {
+  const rel = relative(root, path)
+  if (rel === '..' || rel.startsWith(`..${sep}`)) throw new TypeError(`${label} escapes the worktree`)
+}
+
+function rejectSymlinkComponents(root: string, target: string, label: string): void {
+  const rel = relative(root, target)
+  let current = root
+  for (const component of rel.split(sep).filter(Boolean)) {
+    current = resolve(current, component)
+    if (lstatSync(current).isSymbolicLink()) throw new TypeError(`${label} must not traverse a symbolic link`)
+  }
 }
 
 function explicitEnvironment(overrides: Readonly<Record<string, string>>): Readonly<Record<string, string>> {
   const env: Record<string, string> = Object.create(null) as Record<string, string>
   for (const [key, value] of Object.entries(overrides).sort(([a], [b]) => a.localeCompare(b))) {
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(key) || /KEY|PASSWORD|SECRET|TOKEN/i.test(key) || key.startsWith('DSH_')) throw new TypeError(`unsafe evaluator environment key ${JSON.stringify(key)}`)
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(key) || key.startsWith('DSH_')) throw new TypeError(`unsafe evaluator environment key ${JSON.stringify(key)}`)
     env[key] = value
   }
   return Object.freeze(env)
 }
 
-function persistArtifacts(directory: string, prefix: string, stdout: SubprocessOutputRead | undefined, stderr: SubprocessOutputRead | undefined): readonly EvaluatorArtifactInput[] {
+function hashedEnvironment(environment: Readonly<Record<string, string>>): Readonly<Record<string, string>> {
+  return Object.freeze(Object.fromEntries(Object.entries(environment).sort(([a], [b]) => a.localeCompare(b)).map(([key, value]) => [key, `sha256:${sha256(value)}`])))
+}
+
+function persistArtifacts(directory: string, prefix: string, stdout: SubprocessOutputRead | undefined, stderr: SubprocessOutputRead | undefined, secrets: readonly string[]): readonly EvaluatorArtifactInput[] {
   mkdirSync(directory, { recursive: true, mode: 0o700 })
   chmodSync(directory, 0o700)
   return ([['stdout', stdout], ['stderr', stderr]] as const).map(([kind, read]) => {
     const destination = resolve(directory, `${safeName(prefix)}.${kind}.log`)
-    if (read?.spillPath !== undefined) copyFileSync(read.spillPath, destination)
-    else writeFileSync(destination, read?.text ?? '', { mode: 0o600 })
+    const source = read?.spillPath === undefined ? read?.text ?? '' : readFileSync(read.spillPath, 'utf8')
+    writeFileSync(destination, redact(source, secrets), { mode: 0o600 })
     chmodSync(destination, 0o600)
     const bytes = readFileSync(destination)
     return { kind, location: destination, sizeBytes: statSync(destination).size, sha256: sha256(bytes), truncated: read?.lossy ?? false }
@@ -258,4 +317,9 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function sha256(value: string | Uint8Array): string { return createHash('sha256').update(value).digest('hex') }
-function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error) }
+function redact(value: string, secrets: readonly string[]): string {
+  return secrets.filter(secret => secret.length > 0).reduce((text, secret) => text.split(secret).join('[REDACTED]'), value)
+}
+function safeErrorMessage(error: unknown, secrets: readonly string[]): string {
+  return redact(error instanceof Error ? error.message : String(error), secrets)
+}
