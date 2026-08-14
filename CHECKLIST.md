@@ -5,7 +5,7 @@
 - `[x]` means verified in the current worktree or completed research/planning evidence.
 - `[ ]` means not present or not verified in the current worktree.
 - Archived implementation activity was historical evidence only until the authoritative snapshot was recovered. Chunk 01 is now closed by implementation commit `3ca85a17c03d15488269b3dbc339e3ec135d98c3`, tracker-accounting commit `4095697a6b7256937f535d739ca09678b47e333d`, review-fix commit `6524bdf`, and a clean independent correctness/accounting/security re-review after `6524bdf` with zero findings.
-- **Current dependency-ready chunk: `05-build-host-git-and-evaluator-boundaries`.** Chunk 02 is closed by implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4`, tracker-accounting commit `fa4bf06ef24b590a81f883037b940f18d97c5cfc`, review-fix commit `7671499`, focused clean-generated-state verification, and clean independent package/accounting re-reviews. Chunk 03 is closed by implementation commits `9b18630` and `e22d99a`, tracker-accounting commit `99babc5dc3432be7c078fd6e792c97164ebfb19b`, review-fix commit `5e990acb1df3bcf8b7e2612c91f38443d364d2db`, passing post-fix frozen-install/typecheck/3-file-54-test/build/pack gates, and a clean independent correctness/security/accounting re-review. Chunk 04 is closed by implementation commit `cfc2e45366961c10b97b6fab63ffea9abfb3b5dd`, tracker-accounting commit `a1fca4c61fbf241b716a8e423a12788d16e3c71d`, review-fix commits `c9ba821923cd233c8c3112a7b3cdd2b8d311ec36`, `5ada9cd`, and `e7fb2e6`, passing final typecheck/4-file-79-test/build gates, completed correctness/security/concurrency/accounting reviews, a frozen tracker API, and a clean final re-review.
+- **Current dependency-ready chunk: `06-implement-recoverable-controller`.** Chunk 02 is closed by implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4`, tracker-accounting commit `fa4bf06ef24b590a81f883037b940f18d97c5cfc`, review-fix commit `7671499`, focused clean-generated-state verification, and clean independent package/accounting re-reviews. Chunk 03 is closed by implementation commits `9b18630` and `e22d99a`, tracker-accounting commit `99babc5dc3432be7c078fd6e792c97164ebfb19b`, review-fix commit `5e990acb1df3bcf8b7e2612c91f38443d364d2db`, passing post-fix frozen-install/typecheck/3-file-54-test/build/pack gates, and a clean independent correctness/security/accounting re-review. Chunk 04 is closed by implementation commit `cfc2e45366961c10b97b6fab63ffea9abfb3b5dd`, tracker-accounting commit `a1fca4c61fbf241b716a8e423a12788d16e3c71d`, review-fix commits `c9ba821923cd233c8c3112a7b3cdd2b8d311ec36`, `5ada9cd`, and `e7fb2e6`, passing final typecheck/4-file-79-test/build gates, completed correctness/security/concurrency/accounting reviews, a frozen tracker API, and a clean final re-review. Chunk 05 is closed by its recorded implementation/review-fix commits, final clean Git/evaluator/security/tracker-concurrency reviews, and final tracker/accounting commit `89f50fba279e8c2156394763f1357bd9377996b7`.
 
 ## Established research and planning state
 
@@ -364,7 +364,7 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 - [x] Complete a final independent re-review after `e7fb2e6`; the re-review returned clean with zero findings.
 - [x] Close Chunk 04 only after its implementation, tracker-accounting, review-fix, final verification, tracker API freeze, completed reviews, and clean final re-review evidence is recorded.
 
-# Chunk 05 — `05-build-host-git-and-evaluator-boundaries`
+# Chunk 05 — `05-build-host-git-and-evaluator-boundaries` (CLOSED)
 
 ## Supported threat model and Harness limit
 
@@ -458,8 +458,8 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 ## Chunk 05 closure and accounting
 
 - [x] Complete final clean Git and evaluator/security re-reviews, complete the tracker concurrency fix review, and record zero unresolved Chunk 05 findings.
-- [ ] Commit this final Chunk 05 tracker/accounting update separately and record its full SHA; this item remains open because this edit's commit does not yet exist.
-- [ ] Close the Chunk 05 heading and advance Chunk 06 to dependency-ready only after the separate closure commit is recorded; until then every Chunk 06 dependency remains unchecked and Chunk 06 is not dependency-ready.
+- [x] Commit the final Chunk 05 tracker/accounting update separately and record its full SHA: `89f50fba279e8c2156394763f1357bd9377996b7`.
+- [x] Close Chunk 05 and advance Chunk 06 to dependency-ready after recording the separate closure commit; every Chunk 06 implementation and dependency checkbox remains unchecked.
 
 # Chunk 06 — `06-implement-recoverable-controller`
 
