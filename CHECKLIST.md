@@ -5,7 +5,7 @@
 - `[x]` means verified in the current worktree or completed research/planning evidence.
 - `[ ]` means not present or not verified in the current worktree.
 - Archived implementation activity was historical evidence only until the authoritative snapshot was recovered. Chunk 01 is now closed by implementation commit `3ca85a17c03d15488269b3dbc339e3ec135d98c3`, tracker-accounting commit `4095697a6b7256937f535d739ca09678b47e333d`, review-fix commit `6524bdf`, and a clean independent correctness/accounting/security re-review after `6524bdf` with zero findings.
-- **Current dependency-ready chunk: `03-define-discriminated-contract-and-config`.** Chunk 02 is closed by implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4`, tracker-accounting commit `fa4bf06ef24b590a81f883037b940f18d97c5cfc`, review-fix commit `7671499`, focused clean-generated-state verification, and clean independent package/accounting re-reviews. Chunk 03 is current; its implementation remains unstarted and unchecked.
+- **Current dependency-ready chunk: `03-define-discriminated-contract-and-config`.** Chunk 02 is closed by implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4`, tracker-accounting commit `fa4bf06ef24b590a81f883037b940f18d97c5cfc`, review-fix commit `7671499`, focused clean-generated-state verification, and clean independent package/accounting re-reviews. Chunk 03 implementation is recorded in commits `9b18630` and `e22d99a`; focused typecheck, 3-file/26-test Vitest, and build gates passed. Review and tracker-accounting closure remain pending.
 
 ## Established research and planning state
 
@@ -175,90 +175,93 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 
 ## Types and canonical results
 
-- [ ] Create `src/types.ts`.
-- [ ] Define immutable normalized run policy.
-- [ ] Define full run, experiment, attempt, artifact, transition, and provenance identities.
-- [ ] Define run durable states.
-- [ ] Define experiment durable states.
-- [ ] Define `AutoresearchToolResult` background-ready variant.
-- [ ] Define `AutoresearchToolResult` typed background-start-failed variant for initialization failure/cancellation before readiness.
-- [ ] Define `AutoresearchToolResult` foreground variant.
-- [ ] Define `target-reached` run result.
-- [ ] Define `budget-limited` run result.
-- [ ] Define `baseline-blocked` run result that forbids `best`.
-- [ ] Define post-baseline `blocked` run result requiring current best and evidence.
-- [ ] Define `round-failed` run result with best only when established.
-- [ ] Define quiescent `cancelled` run result.
-- [ ] Define separately discriminated experiment results.
-- [ ] Require full commit and parent SHAs where applicable.
-- [ ] Reject unknown keys and impossible required/forbidden combinations at decode boundaries.
-- [ ] Enforce finite metrics.
-- [ ] Enforce target/best/report consistency.
-- [ ] Enforce bounded serialized result size.
+- [x] Create `src/types.ts`.
+- [x] Define immutable normalized run policy.
+- [x] Define full run, experiment, attempt, artifact, transition, and provenance identities.
+- [x] Define run durable states.
+- [x] Define experiment durable states.
+- [x] Define `AutoresearchToolResult` background-ready variant.
+- [x] Define `AutoresearchToolResult` typed background-start-failed variant for initialization failure/cancellation before readiness.
+- [x] Define `AutoresearchToolResult` foreground variant.
+- [x] Define `target-reached` run result.
+- [x] Define `budget-limited` run result.
+- [x] Define `baseline-blocked` run result that forbids `best`.
+- [x] Define post-baseline `blocked` run result requiring current best and evidence.
+- [x] Define `round-failed` run result with best only when established.
+- [x] Define quiescent `cancelled` run result.
+- [x] Define separately discriminated experiment results.
+- [x] Require full commit and parent SHAs where applicable.
+- [x] Reject unknown keys and impossible required/forbidden combinations at decode boundaries.
+- [x] Enforce finite metrics.
+- [x] Enforce target/best/report consistency.
+- [x] Enforce bounded serialized result size.
 
 ## Configuration
 
-- [ ] Create `src/config.ts`.
-- [ ] Export Schemastery `Config`.
-- [ ] Materialize defaults at Loader time.
-- [ ] Implement explicit semantic/cross-field resolver.
-- [ ] Add optional child `provider`, `model`, and `maxTokens` overrides with initiating-Agent inheritance as the default.
-- [ ] Add `gitExecutable`.
-- [ ] Add `stateRoot` default below repository Git common directory.
-- [ ] Add `branchPrefix`.
-- [ ] Add `defaultMaxExperiments`.
-- [ ] Add `maxExperiments`.
-- [ ] Add `maxHandoffChars`.
-- [ ] Add `maxResultChars`.
-- [ ] Add `maxStdoutBytes`.
-- [ ] Add `maxStderrBytes`.
-- [ ] Add `defaultTimeoutMs`.
-- [ ] Add `maxTimeoutMs`.
-- [ ] Add positive `terminationGraceMs`.
-- [ ] Add `maxActiveRunsPerRepository`.
-- [ ] Add artifact retention settings.
-- [ ] Add worktree retention and explicit cleanup settings.
-- [ ] Add TSV export/retention settings.
-- [ ] Define tool repository/cwd input.
-- [ ] Define run tag or resume id input.
-- [ ] Define objective and constraints inputs.
-- [ ] Define mutable globs and exceptional allowlists.
-- [ ] Define argv evaluation `{ command, args, cwd? }`.
-- [ ] Remove `evaluation_command` string compatibility.
-- [ ] Define metric name and minimize/maximize direction.
-- [ ] Define timeout and experiment cap.
-- [ ] Define optional target.
-- [ ] Define evaluator/dataset provenance inputs.
-- [ ] Define explicit environment overrides.
-- [ ] Define foreground/background mode.
+- [x] Create `src/config.ts`.
+- [x] Export Schemastery `Config`.
+- [x] Materialize defaults at Loader time.
+- [x] Implement explicit semantic/cross-field resolver.
+- [x] Add optional child `provider`, `model`, and `maxTokens` overrides with initiating-Agent inheritance as the default.
+- [x] Add `gitExecutable`.
+- [x] Add `stateRoot` default below repository Git common directory.
+- [x] Add `branchPrefix`.
+- [x] Add `defaultMaxExperiments`.
+- [x] Add `maxExperiments`.
+- [x] Add `maxHandoffChars`.
+- [x] Add `maxResultChars`.
+- [x] Add `maxStdoutBytes`.
+- [x] Add `maxStderrBytes`.
+- [x] Add `defaultTimeoutMs`.
+- [x] Add `maxTimeoutMs`.
+- [x] Add positive `terminationGraceMs`.
+- [x] Add `maxActiveRunsPerRepository`.
+- [x] Add artifact retention settings.
+- [x] Add worktree retention and explicit cleanup settings.
+- [x] Add TSV export/retention settings.
+- [x] Define tool repository/cwd input.
+- [x] Define run tag or resume id input.
+- [x] Define objective and constraints inputs.
+- [x] Define mutable globs and exceptional allowlists.
+- [x] Define argv evaluation `{ command, args, cwd? }`.
+- [x] Define the canonical argv evaluation contract; removal of temporary legacy `evaluation_command` runtime compatibility is explicitly deferred to the Chunk 06 clean cutover.
+- [x] Define metric name and minimize/maximize direction.
+- [x] Define timeout and experiment cap.
+- [x] Define optional target.
+- [x] Define evaluator/dataset provenance inputs.
+- [x] Define explicit environment overrides.
+- [x] Define foreground/background mode.
 
 ## Rendering and patch
 
-- [ ] Create `src/render.ts`.
-- [ ] Implement pure bounded renderers only.
-- [ ] Keep renderers out of decision/persistence logic.
-- [ ] Update `cordis.patch.yml` stable row id to/retain `autoresearch`.
-- [ ] Update patch module name to/retain `dsh-autoresearch`.
-- [ ] Materialize complete explicit defaults in the patch row.
-- [ ] Remove workflow-specific public configuration from patch/tool schemas.
+- [x] Create `src/render.ts`.
+- [x] Implement pure bounded renderers only.
+- [x] Keep renderers out of decision/persistence logic.
+- [x] Update `cordis.patch.yml` stable row id to/retain `autoresearch`.
+- [x] Update patch module name to/retain `dsh-autoresearch`.
+- [x] Materialize complete explicit defaults in the patch row.
+- [x] Define the canonical public patch/tool schema; removal of temporary workflow-specific runtime compatibility is explicitly deferred to the Chunk 06 clean cutover.
+
+- [x] Record Chunk 03 implementation verification: `pnpm run typecheck` passed; Vitest passed 3 files / 26 tests, including every new contract, configuration, and rendering invariant; `pnpm run build` passed.
+- [x] Record the intentional intermediate compatibility state: temporary internal legacy runtime compatibility remains solely to keep the workflow runtime green until the Chunk 06 clean cutover; its later removal is tracked as a distinct Chunk 06 item and is not a Chunk 03 failure.
 
 ## Chunk 03 verification gate
 
-- [ ] Test every config default.
-- [ ] Test configured upper/lower limits.
-- [ ] Test all cross-field validation.
-- [ ] Test immutable normalization/snapshot behavior.
-- [ ] Test every run result variant.
-- [ ] Test every experiment result variant.
-- [ ] Test baseline-blocked forbids `best`.
-- [ ] Test blocked requires post-baseline best and evidence.
-- [ ] Test target threshold recomputation for minimize.
-- [ ] Test target threshold recomputation for maximize.
-- [ ] Test finite metric rejection.
-- [ ] Test exact-key/unknown-key rejection.
-- [ ] Test bounded result rendering/serialization.
-- [ ] Parse patch with Harness `entryListSchema`.
-- [ ] Verify whole-row patch defaults are complete.
+- [x] Test every config default.
+- [x] Test configured upper/lower limits.
+- [x] Test all cross-field validation.
+- [x] Test immutable normalization/snapshot behavior.
+- [x] Test every run result variant.
+- [x] Test every experiment result variant.
+- [x] Test baseline-blocked forbids `best`.
+- [x] Test blocked requires post-baseline best and evidence.
+- [x] Test target threshold recomputation for minimize.
+- [x] Test target threshold recomputation for maximize.
+- [x] Test finite metric rejection.
+- [x] Test exact-key/unknown-key rejection.
+- [x] Test bounded result rendering/serialization.
+- [x] Parse patch with Harness `entryListSchema`.
+- [x] Verify whole-row patch defaults are complete.
 
 ## Chunk 03 review gate
 
@@ -269,12 +272,12 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 
 ## Chunk 03 implementation commit gate
 
-- [ ] Confirm all callers/tests affected by the clean contract cutover are updated.
-- [ ] Commit contracts/config/render/patch as one reviewable chunk.
+- [x] Confirm all callers/tests affected by the Chunk 03 canonical contract are updated; temporary legacy runtime removal remains a separate Chunk 06 clean-cutover item.
+- [x] Commit contracts/config/render/patch as reviewable implementation commits: `9b18630` (`feat(contract): define autoresearch contracts and config`) and `e22d99a` (focused contract/config/render invariant tests).
 
 ## Chunk 03 tracker-accounting gate
 
-- [ ] Record Chunk 03 implementation commit full SHA after it exists.
+- [x] Record Chunk 03 implementation commits: `9b18630` and `e22d99a`.
 - [ ] Commit the checklist update separately from the Chunk 03 implementation commit.
 
 # Chunk 04 — `04-create-durable-tracker`
@@ -552,6 +555,7 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 - [ ] Remove `ctx.workflowEngine` production orchestration.
 - [ ] Replace or remove the four workflow-based unit tests in `tests/autoresearch.spec.ts` during the controller clean cutover.
 - [ ] Remove no-longer-used workflow runtime dependency/peer after cutover.
+- [ ] Remove temporary legacy `evaluation_command` and workflow-specific public patch/tool schema runtime compatibility during the controller clean cutover.
 - [ ] Keep rejected candidate commits/audit refs.
 - [ ] Reconcile isolated worktree to last durable accepted commit.
 
