@@ -82,6 +82,20 @@ describe('recovery reconciler', () => {
     tracker.close()
   })
 
+  it('retains a proposal-uncertain terminal lock from the durable run fact across repeated recovery', async () => {
+    const { tracker, request } = fixture(); createRun(tracker, request)
+    tracker.acquireActiveLock(request.runId, request.discovery.repositoryId, request.identity.runTag)
+    tracker.transitionRun(request.runId, 'blocked', { terminalReason: 'proposal disposal uncertain', blockedCode: 'attempt-uncertain', quiescent: false })
+    expect(tracker.getRun(request.runId)?.['terminal_quiescent']).toBe(0)
+    expect(tracker.recoveryState(request.runId)).toMatchObject({ processDisposition: 'uncertain', safeToReleaseTerminalLock: false })
+    const first = await reconcileRecovery(unusedContext, request)
+    const second = await reconcileRecovery(unusedContext, request)
+    expect(first).toEqual({ kind: 'terminal', runId: request.runId, state: 'blocked', lock: 'retain' })
+    expect(second).toEqual(first)
+    expect(() => tracker.releaseActiveLock(request.runId)).toThrow(/safe-to-release/)
+    tracker.close()
+  })
+
   it('rejects a noninitial state whose active lock was lost', async () => {
     const { tracker, request } = fixture(); createRun(tracker, request)
     tracker.transitionRun(request.runId, 'baseline-running')

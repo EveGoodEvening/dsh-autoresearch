@@ -232,6 +232,18 @@ describe('controller real Git/SQLite outcomes', () => {
     try { const { result, tracker } = await runControllerCase(f, { max_experiments: 2 }); expect(result).toMatchObject({ status: 'budget-limited', counts: { experimentsStarted: 2, experimentsCompleted: 2, attempts: 3 } }); const experiments = tracker.database.prepare("SELECT state FROM experiments WHERE kind='candidate' ORDER BY ordinal").all(); expect(experiments).toEqual([{ state: 'accepted' }, { state: 'accepted' }]); expect(tracker.database.prepare('SELECT released_at FROM active_locks').get()?.['released_at']).not.toBeNull(); expect(f.order.filter(item => item.includes('child'))).toEqual(['child-1-create', 'child-1-dispose-start', 'child-1-dispose-end', 'child-2-create', 'child-2-dispose-start', 'child-2-dispose-end']); tracker.close() } finally { rmSync(f.root, { recursive: true, force: true }) }
   })
 
+  it('durably retains the terminal lock when proposal disposal leaves child ownership uncertain', async () => {
+    const f = controllerFixture([{ stdout: '{"score":10}\n' }], [], { dispose: async () => { throw new Error('child disposal failed') } })
+    try {
+      const { result, tracker } = await runControllerCase(f, { max_experiments: 1 })
+      expect(result.status).toBe('blocked')
+      expect(tracker.getRun(result.runId)).toMatchObject({ state: 'blocked', terminal_quiescent: 0 })
+      expect(tracker.recoveryState(result.runId)).toMatchObject({ processDisposition: 'uncertain', safeToReleaseTerminalLock: false })
+      expect(tracker.database.prepare('SELECT released_at FROM active_locks').get()?.['released_at']).toBeNull()
+      tracker.close()
+    } finally { rmSync(f.root, { recursive: true, force: true }) }
+  })
+
   it('awaits proposal disposal once on controller failure and leaves no registration or job', async () => {
     const f = controllerFixture([{ stdout: '{"score":10}\n' }], [(worktree) => writeFileSync(join(worktree, 'package.json'), '{}\n')])
     try {

@@ -148,22 +148,24 @@ function reconstructEvaluation(request: RecoveryRequest, experiment: RecoveredEx
   if (!attempt['exited_at']) return undefined
   const artifacts = request.tracker.database.prepare('SELECT * FROM artifacts WHERE run_id = ? AND experiment_id = ? AND attempt_id = ? ORDER BY kind').all(request.runId, experiment.experimentId, text(attempt['attempt_id'])) as Row[]
   if (artifacts.length === 0) throw new RecoveryEvidenceError('artifact-incomplete', 'completed evaluator attempt has no durable artifacts')
-  if (artifacts.length !== 2 || artifacts.map(row => text(row['kind'])).sort().join(',') !== 'stderr,stdout') throw new RecoveryEvidenceError('artifact-incomplete', 'durable attempt artifacts are incomplete or duplicated')
+  if (artifacts.length !== 2 || artifacts.map(row => text(row['kind'])).sort().join(',') !== 'stderr,stdout') throw new RecoveryEvidenceError('artifact-incomplete', 'durable attempt artifacts must contain exactly one stdout and one stderr artifact')
   const decoded: ArtifactRecord[] = []
   let stdout = ''
+  const attemptId = text(attempt['attempt_id'])
   for (const row of artifacts) {
     const kind = text(row['kind'])
-    const path = join(request.tracker.layout.root, 'artifacts', request.runId, experiment.experimentId, text(attempt['attempt_id']), `${kind}.log`)
+    if (text(row['artifact_id']) !== `${attemptId}-${kind}` || text(row['run_id']) !== request.runId || text(row['experiment_id']) !== experiment.experimentId || text(row['attempt_id']) !== attemptId) throw new RecoveryEvidenceError('artifact-incomplete', `artifact ${kind} has noncanonical attempt-scoped identity`)
+    if (text(row['owner']) !== 'evaluator' || text(row['retention']) !== 'retain') throw new RecoveryEvidenceError('artifact-incomplete', `artifact ${kind} has noncanonical owner or retention`)
+    const path = join(request.tracker.layout.root, 'artifacts', request.runId, experiment.experimentId, attemptId, `${kind}.log`)
     const bytes = readSecure(path)
     const location = `artifact:sha256:${createHash('sha256').update(path).digest('hex')}`
-    if (text(row['location']) !== location || integer(row['size_bytes']) !== bytes.length || text(row['sha256']) !== createHash('sha256').update(bytes).digest('hex')) throw new RecoveryEvidenceError('artifact-incomplete', `artifact ${kind} failed path, size, or hash verification`)
+    if (text(row['location']) !== location || integer(row['size_bytes']) !== bytes.length || text(row['sha256']) !== createHash('sha256').update(bytes).digest('hex')) throw new RecoveryEvidenceError('artifact-incomplete', `artifact ${kind} failed canonical location, size, or hash verification`)
     const metadata = json(row['metadata_json'])
-    if (!metadata || typeof metadata !== 'object' || typeof (metadata as Record<string, unknown>).truncated !== 'boolean') throw new RecoveryEvidenceError('artifact-incomplete', `artifact ${kind} has invalid truncation metadata`)
-    decoded.push({ artifactId: text(row['artifact_id']), runId: request.runId, experimentId: experiment.experimentId, attemptId: text(attempt['attempt_id']), kind, location, sizeBytes: bytes.length, sha256: text(row['sha256']), owner: text(row['owner']), retention: text(row['retention']), metadata })
+    if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata) || Object.keys(metadata).length !== 1 || typeof (metadata as Record<string, unknown>).truncated !== 'boolean') throw new RecoveryEvidenceError('artifact-incomplete', `artifact ${kind} has noncanonical truncation metadata`)
+    decoded.push({ artifactId: `${attemptId}-${kind}`, runId: request.runId, experimentId: experiment.experimentId, attemptId, kind, location, sizeBytes: bytes.length, sha256: text(row['sha256']), owner: 'evaluator', retention: 'retain', metadata })
     if (kind === 'stdout') stdout = bytes.toString('utf8')
   }
   const exit = decodeExit(attempt)
-  const attemptId = text(attempt['attempt_id'])
   const provenanceSha256 = spawnProvenance(attempt)
   if (provenanceSha256 !== request.provenanceSha256) throw new RecoveryEvidenceError('provenance-mismatch', 'attempt spawn provenance differs from the durable run provenance')
   const failureCode = attempt['failure_code'] === null ? undefined : text(attempt['failure_code'])
@@ -231,8 +233,8 @@ function decidingDirective(request: RecoveryRequest, run: Row, experiment: Recov
 
 function terminalDirective(request: RecoveryRequest, state: RunDurableState, recovery: RecoveryState): RecoveryDirective {
   const terminal = state as 'completed' | 'baseline-blocked' | 'blocked' | 'round-failed' | 'cancelled'
-  if (recovery.activeLock && recovery.processDisposition === 'uncertain') return { kind: 'terminal', runId: request.runId, state: terminal, lock: 'retain' }
-  return { kind: 'terminal', runId: request.runId, state: terminal, lock: recovery.activeLock ? 'release' : 'already-released' }
+  if (!recovery.activeLock) return { kind: 'terminal', runId: request.runId, state: terminal, lock: 'already-released' }
+  return { kind: 'terminal', runId: request.runId, state: terminal, lock: recovery.safeToReleaseTerminalLock ? 'release' : 'retain' }
 }
 
 function decodeExperiment(row: Row): RecoveredExperiment {
@@ -252,10 +254,12 @@ function readSecure(path: string): Buffer {
   try {
     const before = lstatSync(path)
     if (!before.isFile() || before.isSymbolicLink()) throw new Error('artifact is not a regular owner-controlled file')
+    if (typeof process.getuid === 'function' && before.uid !== process.getuid()) throw new Error('artifact file is not owner-controlled')
+    if ((before.mode & 0o077) !== 0) throw new Error('artifact file is not owner-only')
     const canonical = realpathSync(path)
     if (canonical !== path) throw new Error('artifact path traverses a symlink')
     const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW)
-    try { const opened = fstatSync(fd); if (opened.dev !== before.dev || opened.ino !== before.ino) throw new Error('artifact identity changed'); return readFileSync(fd) }
+    try { const opened = fstatSync(fd); if (opened.dev !== before.dev || opened.ino !== before.ino || opened.size !== before.size) throw new Error('artifact identity changed'); return readFileSync(fd) }
     finally { closeSync(fd) }
   } catch (error) { throw new RecoveryEvidenceError('artifact-incomplete', `artifact could not be securely recovered: ${error instanceof Error ? error.message : String(error)}`) }
 }

@@ -167,7 +167,8 @@ describe('durable SQLite tracker', () => {
   it('derives whole-process-tree quiescence before terminal persistence and lock release', () => {
     const tracker = DurableTracker.open(fixturePath()); tracker.createRun(initial()); tracker.acquireActiveLock('run-1', 'repo-identity', 'test'); createRunningExperiment(tracker)
     tracker.createAttemptIntent({ attemptId: 'attempt-1', runId: 'run-1', experimentId: 'exp-0', ordinal: 1 }, { kind: 'spawn' })
-    expect(() => tracker.transitionRun('run-1', 'blocked', { terminalReason: 'stop', blockedCode: 'stop', quiescent: true })).toThrowError(/whole-process-tree quiescence/)
+    expect(() => tracker.transitionRun('run-1', 'blocked', { terminalReason: 'stop', blockedCode: 'stop', quiescent: true })).toThrowError(TrackerTransitionError)
+    expect(tracker.getRun('run-1')).toMatchObject({ state: 'baseline-running', terminal_at: null, terminal_quiescent: null, blocked_code: null })
     expect(() => tracker.releaseActiveLock('run-1')).toThrowError(TrackerTransitionError)
     finishAttempt(tracker)
     tracker.transitionExperiment('exp-0', 'cancelled', { failureCode: 'cancelled', failureMessage: 'run stopped', timedOut: false })

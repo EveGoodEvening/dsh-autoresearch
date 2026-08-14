@@ -283,9 +283,10 @@ export class AutoresearchRunController {
 
   private async finish(r: Runtime, specific: Record<string, unknown>, release = true): Promise<AutoresearchRunResult> {
     const value = { ...common(r), ...specific }
+    const safeRelease = release && r.tracker.recoveryState(r.runId).safeToReleaseTerminalLock
     if (this.options.config.exportTsv) r.tracker.exportTsv(r.runId, r.tracker.layout.resolve(join('exports', `${r.runId}.tsv`)))
-    if (release && this.options.config.cleanupWorktreesOnSuccess && !this.options.config.retainWorktrees) await removeRunWorktree(this.ctx, r.gitExecutable, r.discovery, r.identity, r.gitOptions)
-    if (release) releaseTerminalRunLock(r.tracker, r.runId)
+    if (safeRelease && this.options.config.cleanupWorktreesOnSuccess && !this.options.config.retainWorktrees) await removeRunWorktree(this.ctx, r.gitExecutable, r.discovery, r.identity, r.gitOptions)
+    if (safeRelease) releaseTerminalRunLock(r.tracker, r.runId)
     return decodeRunResult(value, r.policy.metricDirection, this.options.config.maxResultChars)
   }
 }

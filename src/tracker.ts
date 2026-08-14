@@ -142,7 +142,7 @@ export class DurableTracker {
   releaseActiveLock(runId: string, releasedAt = new Date().toISOString()): boolean {
     return this.transaction(() => {
       const run = this.requireRun(runId)
-      if (!RUN_TERMINAL[String(run['state']) as RunDurableState] || run['terminal_quiescent'] !== 1 || !this.isRunQuiescent(runId)) throw new TrackerTransitionError('active lock release requires terminal persistence and durable whole-process-tree quiescence')
+      if (!RUN_TERMINAL[String(run['state']) as RunDurableState] || run['terminal_quiescent'] !== 1) throw new TrackerTransitionError('active lock release requires terminal persistence and a durable run-level quiescence safe-to-release fact')
       return Number(this.database.prepare('UPDATE active_locks SET released_at = ? WHERE run_id = ? AND released_at IS NULL').run(releasedAt, runId).changes) === 1
     })
   }
@@ -249,13 +249,15 @@ export class DurableTracker {
     return this.transaction(() => {
       const run = this.requireRun(runId); const from = String(run['state']) as RunDurableState; validateTransition('run', from, to)
       if (RUN_TERMINAL[to]) {
-        const quiescent = this.isRunQuiescent(runId)
+        const observedQuiescent = this.isRunQuiescent(runId)
+        const terminalQuiescent = facts.quiescent ?? observedQuiescent
         const unresolved = this.database.prepare(`SELECT 1 FROM experiments WHERE run_id = ? AND state IN ('baseline-pending','running') LIMIT 1`).get(runId)
-        if (!quiescent && (to !== 'blocked' || unresolved)) throw new TrackerTransitionError('terminal run transition requires durable whole-process-tree quiescence for every attempt')
+        if (terminalQuiescent && !observedQuiescent) throw new TrackerTransitionError('terminal run cannot claim quiescence while an attempt remains uncertain')
+        if (!terminalQuiescent && (to !== 'blocked' || unresolved)) throw new TrackerTransitionError('terminal run transition requires durable whole-process-tree quiescence for every attempt')
         if (unresolved) throw new TrackerTransitionError('terminal run transition requires every experiment to be terminal')
       }
       this.validateAndInsertArtifacts(runId, null, facts.artifacts ?? [])
-      const terminalQuiescent = RUN_TERMINAL[to] ? Number(this.isRunQuiescent(runId)) : null
+      const terminalQuiescent = RUN_TERMINAL[to] ? Number(facts.quiescent ?? this.isRunQuiescent(runId)) : null
       this.database.prepare(`UPDATE runs SET state = ?, updated_at = ?, terminal_reason = ?, blocked_code = ?, terminal_at = ?, terminal_quiescent = ?,
         best_metric = COALESCE(?, best_metric), best_commit = COALESCE(?, best_commit), best_experiment_id = COALESCE(?, best_experiment_id) WHERE run_id = ?`).run(
         to, at, facts.terminalReason ?? null, facts.blockedCode ?? null, RUN_TERMINAL[to] ? at : null, terminalQuiescent,
@@ -280,7 +282,10 @@ export class DurableTracker {
     const run = this.requireRun(runId); const unresolvedExperiment = this.database.prepare(`SELECT * FROM experiments WHERE run_id = ? AND state IN ('baseline-pending','running') ORDER BY ordinal DESC LIMIT 1`).get(runId)
     const unresolvedAttempt = unresolvedExperiment ? this.database.prepare('SELECT * FROM attempts WHERE experiment_id = ? ORDER BY ordinal DESC LIMIT 1').get(unresolvedExperiment['experiment_id']!) : undefined
     const activeLock = this.database.prepare('SELECT * FROM active_locks WHERE run_id = ? AND released_at IS NULL').get(runId); const quiescent = this.isRunQuiescent(runId)
-    return { run, ...(unresolvedExperiment ? { unresolvedExperiment } : {}), ...(unresolvedAttempt ? { unresolvedAttempt } : {}), ...(activeLock ? { activeLock } : {}), safeToReleaseTerminalLock: Boolean(activeLock && RUN_TERMINAL[String(run['state']) as RunDurableState] && run['terminal_quiescent'] === 1 && quiescent), processDisposition: !this.database.prepare('SELECT 1 FROM attempts WHERE run_id = ? LIMIT 1').get(runId) ? 'none' : quiescent ? 'quiescent' : 'uncertain' }
+    const terminal = RUN_TERMINAL[String(run['state']) as RunDurableState]
+    const safeToReleaseTerminalLock = Boolean(activeLock && terminal && run['terminal_quiescent'] === 1)
+    const processDisposition = terminal ? run['terminal_quiescent'] === 1 ? 'quiescent' : 'uncertain' : !this.database.prepare('SELECT 1 FROM attempts WHERE run_id = ? LIMIT 1').get(runId) ? 'none' : quiescent ? 'quiescent' : 'uncertain'
+    return { run, ...(unresolvedExperiment ? { unresolvedExperiment } : {}), ...(unresolvedAttempt ? { unresolvedAttempt } : {}), ...(activeLock ? { activeLock } : {}), safeToReleaseTerminalLock, processDisposition }
   }
 
   exportTsv(runId: string, path: string): void {
