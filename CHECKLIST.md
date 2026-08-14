@@ -651,9 +651,9 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 - [x] Retain stable patch row id `autoresearch`.
 - [x] Retain module name `dsh-autoresearch`.
 - [x] Retain complete Loader defaults in patch config.
-- [ ] Chunk 09 documentation dependency: document current installed-profile prerequisites for the jobs registry plus `dsh-tool-jobs`; Chunk 08 must validate the real composition.
-- [ ] Chunk 09 documentation dependency: document the subprocess provider requirement; Chunk 08 must validate the real composition and failure path.
-- [ ] Chunk 09 documentation dependency: document the core Agent registry/runtime and child setup requirement, with no subagent provider; Chunk 08 must validate the real composition and failure path.
+- [x] Chunk 09 documentation dependency: document current installed-profile prerequisites for the jobs registry plus `dsh-tool-jobs`; Chunk 08 validated the real composition.
+- [x] Chunk 09 documentation dependency: document the subprocess provider requirement; Chunk 08 validated the real composition and failure path.
+- [x] Chunk 09 documentation dependency: document the core Agent registry/runtime and child setup requirement, with no subagent provider; Chunk 08 validated the real composition and failure path.
 - [x] Chunk 08 composition dependency: verify activation is opt-in through real profile installation; the keyless base profile omitted autoresearch and the assembled installed layer activated it.
 - [x] Chunk 08 composition dependency: verify service ordering is expressed by injection, not YAML row order, through real Harness composition; the equivalent profile entries were deliberately reversed, `autoresearch` followed `jobs` in row order, and injection still produced a successful boot and end-to-end run.
 
@@ -786,57 +786,59 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 - [x] Record final post-`896d440aeeb50697b8159724779ddb1b30115f81` checklist update as separate accounting-only commit `d53fea5dfd94e194616b2c2fbaa898d28db5f896` (`docs: record complete integration verification`).
 - [x] Record post-`2a8ed8eed4337fbe1615e51e0a3283bfc1a60b8e` accounting-only commit `d33df24e3733494a1734b30e66e658eec56e1b14` (`docs: record restart reconciliation verification`) as complete and separate from implementation work.
 - [x] Record post-`a591dca237580e4cf3e5cbfc550a36334ddc643b` accounting-only commit `ff3a136c8f270d781d2a3ce8722ee1e641234139` as complete and separate from implementation work; the definitive accounting review was clean with zero findings.
+- [x] Record Chunk 08 closure-accounting commit `454de4c5b31dd0dfdc8f81d9fd917b940e623126` (`docs: close real composition chunk`) as complete and separate from implementation and prior accounting commits.
 
 # Chunk 09 — `09-complete-docs-and-release-gate`
 
 ## Documentation
 
-- [ ] Rewrite README from prompt-enforced workflow description to host-enforced controller contract.
-- [ ] Document installation with `dsh plugin --profile <name> add <package-or-tarball>`.
-- [ ] Document profile composition prerequisites.
-- [ ] Document opt-in activation and stable patch row.
-- [ ] Document every deployment configuration field/default/limit.
-- [ ] Document immutable tool/run policy inputs.
-- [ ] Document argv evaluator format.
-- [ ] Document strict final-line JSON metric protocol.
-- [ ] Document minimize/maximize strict improvement and tie rejection.
-- [ ] Document baseline and `baseline-blocked` semantics.
-- [ ] Document state root/tracker/artifact/TSV locations.
-- [ ] Document SQLite authority and TSV compatibility-only role.
-- [ ] Document dedicated branch/worktree and caller-worktree safety.
-- [ ] Document candidate commits/audit refs for accepted/rejected work.
-- [ ] Document recovery/resume by `run_id` and immutable run-id-bearing branch/worktree identity.
-- [ ] Document evaluator spawn PID/attempt evidence, the prohibition on post-restart PID-only signalling, safe rerun only with proof the entire provider-owned process tree is quiescent, parent-death insufficiency, and uncertain-descendant `blocked` behavior.
-- [ ] Document interruption handling and other blocked reconciliation cases.
-- [ ] Document cancellation, mandatory Agent handle disposal, terminal persistence before lock release, and quiescent job completion.
-- [ ] Document retention/explicit cleanup policy and same-tag reuse with retained run-id-bearing worktrees.
-- [ ] Document canonical foreground/background/run result unions.
-- [ ] Document security boundary: host authority, argv, environment, mutable scope, provenance.
-- [ ] Document whole-row patch override behavior.
-- [ ] Document migration from recovered 0.1.0 workflow behavior.
-- [ ] Add complete temporary-repository example matching actual schema/defaults.
+- [x] Rewrite README from prompt-enforced workflow description to host-enforced controller contract.
+- [x] Document installation with `dsh plugin --profile <name> add <package-or-tarball>`.
+- [x] Document profile composition prerequisites.
+- [x] Document opt-in activation and stable patch row.
+- [x] Document every deployment configuration field/default/limit.
+- [x] Document immutable tool/run policy inputs.
+- [x] Document argv evaluator format.
+- [x] Document strict final-line JSON metric protocol.
+- [x] Document minimize/maximize strict improvement and tie rejection.
+- [x] Document baseline and `baseline-blocked` semantics.
+- [x] Document state root/tracker/artifact/TSV locations.
+- [x] Document SQLite authority and TSV compatibility-only role.
+- [x] Document dedicated branch/worktree and caller-worktree safety.
+- [x] Document candidate commits/audit refs for accepted/rejected work.
+- [x] Document recovery/resume by `run_id` and immutable run-id-bearing branch/worktree identity.
+- [x] Document evaluator spawn PID/attempt evidence, the prohibition on post-restart PID-only signalling, safe rerun only with proof the entire provider-owned process tree is quiescent, parent-death insufficiency, and uncertain-descendant `blocked` behavior.
+- [x] Document interruption handling and other blocked reconciliation cases.
+- [x] Document cancellation, mandatory Agent handle disposal, terminal persistence before lock release, and quiescent job completion.
+- [x] Document retention/explicit cleanup policy and same-tag reuse with retained run-id-bearing worktrees.
+- [x] Document canonical foreground/background/run result unions.
+- [x] Document security boundary: host authority, argv, environment, mutable scope, provenance, and the requirement for an external OS sandbox for untrusted code.
+- [x] Document whole-row patch override behavior.
+- [x] Document migration from recovered 0.1.0 workflow behavior.
+- [x] Add complete temporary-repository example matching actual schema/defaults.
 
 ## Final package/release gate
 
-- [ ] Finalize repository/homepage/bugs/keywords/publishConfig metadata.
-- [ ] Verify ESM root export.
-- [ ] Verify `./invariant` export.
-- [ ] Verify explicit files allowlist.
-- [ ] Verify README/LICENSE/patch/lib/package.json present in tarball.
-- [ ] Verify no source-only local paths.
-- [ ] Verify no runtime local-link dependency closure.
-- [ ] Run clean registry-backed frozen install.
-- [ ] Run typecheck.
-- [ ] Run focused unit/behavior/integration tests.
-- [ ] Run required coverage gate.
-- [ ] Run build.
-- [ ] Run actual pack.
-- [ ] Inspect packed manifest and contents.
-- [ ] Install tarball into separate consumer/profile fixture without Harness checkout.
-- [ ] Run `dsh plugin --profile <name> add <tarball-or-package>` against the packed artifact.
-- [ ] Run `dsh --profile <name> --dump-config` and observe the `autoresearch` row/defaults.
-- [ ] Load plugin from installed profile.
+- [x] Finalize repository/homepage/bugs/keywords/publishConfig metadata.
+- [x] Verify ESM root export.
+- [x] Verify `./invariant` export.
+- [x] Verify explicit files allowlist.
+- [x] Verify README/LICENSE/patch/lib/package.json present in tarball.
+- [x] Verify no source-only local paths.
+- [x] Verify no runtime or self local-link dependency closure.
+- [x] Run clean registry-backed frozen install.
+- [x] Run typecheck.
+- [x] Run focused unit/behavior/integration tests.
+- [x] Run required coverage gate.
+- [x] Run build.
+- [x] Run actual pack.
+- [x] Inspect packed manifest and contents.
+- [x] Install tarball into separate consumer/profile fixture without Harness checkout.
+- [x] Run `dsh plugin --profile <name> add <tarball-or-package>` against the packed artifact.
+- [x] Run `dsh --profile <name> --dump-config` and observe the `autoresearch` row/defaults.
+- [x] Load plugin from installed profile.
 - [ ] Execute temporary-repository smoke run.
+- [x] Record final post-`b978619b89ce589f4a3eb95d9509d78e4f7f4309` gates: `pnpm install --frozen-lockfile` passed; `pnpm run typecheck` passed; Vitest passed 11 files / 271 tests; `pnpm run test:coverage` passed the focused per-file coverage thresholds; `pnpm run build` passed; `pnpm pack` produced `dsh-autoresearch-0.1.0.tgz`; `pnpm run release:smoke -- ./dsh-autoresearch-0.1.0.tgz` passed with `{"ok":true,"tarball":"dsh-autoresearch-0.1.0.tgz","profile":"autoresearch-release-smoke","files":58}` after packed-profile installation, config dump, and separate consumer installation; installed imports proved root exports exactly `Config,apply,inject,name` and the `./invariant` entry loaded; the packed runtime manifest contained no runtime/self `link:`, `file:`, or `workspace:` references or source-tree paths.
 
 ## Final smoke observations
 
@@ -864,12 +866,12 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 
 ## Chunk 09 implementation commit gate
 
-- [ ] Commit documentation, metadata finalization, and release fixtures.
+- [x] Commit documentation, metadata finalization, and release fixtures in `b978619b89ce589f4a3eb95d9509d78e4f7f4309` (`docs(release): complete autoresearch release guidance`).
 
 ## Chunk 09 tracker-accounting gate
 
-- [ ] Record Chunk 09 implementation commit full SHA after it exists.
-- [ ] Confirm Chunk 09 implementation plus all Chunk 01–08 implementation commits and their separate tracker-accounting commits are reviewable; do not require the not-yet-created Chunk 09 accounting commit to confirm itself.
+- [x] Record Chunk 09 implementation commit `b978619b89ce589f4a3eb95d9509d78e4f7f4309`.
+- [x] Confirm Chunk 09 implementation plus all Chunk 01–08 implementation commits and their separate tracker-accounting commits are reviewable; the not-yet-created Chunk 09 accounting commit is not required to confirm itself.
 - [ ] Commit the Chunk 09 checklist update separately from the implementation commit.
 
 # Final split review
