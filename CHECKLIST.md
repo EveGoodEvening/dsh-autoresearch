@@ -5,7 +5,7 @@
 - `[x]` means verified in the current worktree or completed research/planning evidence.
 - `[ ]` means not present or not verified in the current worktree.
 - Archived implementation activity was historical evidence only until the authoritative snapshot was recovered. Chunk 01 is now closed by implementation commit `3ca85a17c03d15488269b3dbc339e3ec135d98c3`, tracker-accounting commit `4095697a6b7256937f535d739ca09678b47e333d`, review-fix commit `6524bdf`, and a clean independent correctness/accounting/security re-review after `6524bdf` with zero findings.
-- **Current dependency-ready chunk: `02-fix-publishability-and-package-contract`.** Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` and separate tracker-accounting commit `fa4bf06ef24b590a81f883037b940f18d97c5cfc` have landed. Chunk 02 remains current only for post-commit review/fix closure, including verification and independent re-review of the prepack fix; do not begin a later chunk.
+- **Current dependency-ready chunk: `03-define-discriminated-contract-and-config`.** Chunk 02 is closed by implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4`, tracker-accounting commit `fa4bf06ef24b590a81f883037b940f18d97c5cfc`, review-fix commit `7671499`, focused clean-generated-state verification, and clean independent package/accounting re-reviews. Chunk 03 is current; its implementation remains unstarted and unchecked.
 
 ## Established research and planning state
 
@@ -100,7 +100,7 @@
 - [x] Complete an independent correctness, accounting, and security re-review after `6524bdf`; the re-review returned clean with zero findings.
 - [x] Close Chunk 01 with implementation blob commit `3ca85a17c03d15488269b3dbc339e3ec135d98c3`, tracker-accounting commit `4095697a6b7256937f535d739ca09678b47e333d`, and review-fix commit `6524bdf` recorded.
 
-# Chunk 02 — `02-fix-publishability-and-package-contract` (CURRENT — REVIEW CLOSURE OPEN)
+# Chunk 02 — `02-fix-publishability-and-package-contract` (CLOSED)
 
 ## Package/dependency work
 
@@ -146,22 +146,30 @@
 
 ## Chunk 02 review gate
 
-Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before the required independent review gate. The post-commit review/fix closure is repairing that process miss; leave every finding below open until the prepack fix is verified and independently re-reviewed.
+Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before the required independent review gate. The post-commit review/fix closure repaired that process miss with review-fix commit `7671499`, focused verification, and clean independent re-review.
 
-- [ ] Review dependency identity and peer/dev mirroring.
-- [ ] Review packed manifest rather than only source manifest.
-- [ ] Review absence of source-only paths/local links.
-- [ ] Review scope: no controller/tracker redesign mixed into packaging fix.
+- [x] Review dependency identity and peer/dev mirroring.
+- [x] Review packed manifest rather than only source manifest.
+- [x] Review absence of source-only paths/local links.
+- [x] Review scope: no controller/tracker redesign mixed into packaging fix.
 
 ## Chunk 02 implementation commit gate
 
-- [ ] Confirm every Chunk 02 required pre-commit item is complete. Historical assertion intentionally remains unchecked: `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before the independent review gate, so post-commit review/fix closure must repair the miss rather than retroactively claiming pre-commit completion.
+- [~] Confirm every Chunk 02 required pre-commit item is complete. — OBSOLETE: this historical pre-commit assertion was permanently missed because `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before independent review; it was not performed and is replaced by the auditable post-commit review/fix, verification, and re-review evidence recorded below.
 - [x] Commit publishability/package contract separately from recovery and redesign as `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` (`fix(package): make autoresearch plugin publishable`).
 
 ## Chunk 02 tracker-accounting gate
 
 - [x] Record Chunk 02 implementation commit full SHA after it exists: `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4`.
 - [x] Commit the checklist update separately from the Chunk 02 implementation commit as tracker-accounting commit `fa4bf06ef24b590a81f883037b940f18d97c5cfc`.
+
+## Chunk 02 post-commit closure
+
+- [x] Record the review-fix commit: `7671499`.
+- [x] Verify the review fix from clean generated state: focused typecheck passed, the 2-file / 5-test suite passed, and the prepack build and pack passed.
+- [x] Complete independent package re-review after `7671499`; all four Chunk 02 review lenses were clean.
+- [x] Complete independent accounting re-review; the remaining Chunk 02 accounting finding is addressed by the obsolete historical assertion and replacement post-commit evidence above.
+- [x] Close Chunk 02 only after its implementation, tracker-accounting, review-fix, focused verification, package re-review, and accounting re-review evidence is recorded.
 
 # Chunk 03 — `03-define-discriminated-contract-and-config`
 
