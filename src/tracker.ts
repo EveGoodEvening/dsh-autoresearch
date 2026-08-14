@@ -61,6 +61,17 @@ export interface AttemptOutcome {
   providerAttemptId?: string; providerPid?: number; providerIdentity?: string; spawnedAt?: string; exitedAt?: string
   exitCode?: number | null; signal?: string | null; timedOut?: boolean; processTreeQuiescent?: boolean; failureCode?: string; failureMessage?: string
 }
+export interface AttemptOutcomeCheckpoint {
+  readonly facts: AttemptOutcome
+  readonly artifacts: readonly ArtifactRecord[]
+  readonly outcome?: unknown
+}
+export interface RecoverableBlockedEvidence {
+  readonly code: string
+  readonly evidence: readonly string[]
+}
+
+
 export interface RecoveryState {
   run: Record<string, SQLOutputValue>; unresolvedExperiment?: Record<string, SQLOutputValue>; unresolvedAttempt?: Record<string, SQLOutputValue>
   activeLock?: Record<string, SQLOutputValue>; safeToReleaseTerminalLock: boolean; processDisposition: 'none' | 'quiescent' | 'uncertain'
@@ -145,23 +156,48 @@ export class DurableTracker {
     this.transaction(() => {
       const attempt = this.database.prepare('SELECT * FROM attempts WHERE attempt_id = ?').get(attemptId)
       if (!attempt) throw new TrackerTransitionError(`unknown attempt ${attemptId}`)
-      const mapping: readonly [keyof AttemptOutcome, string, (value: unknown) => unknown][] = [
-        ['providerAttemptId','provider_attempt_id',identity], ['providerPid','provider_pid',identity], ['providerIdentity','provider_identity',identity], ['spawnedAt','spawned_at',identity],
-        ['exitedAt','exited_at',identity], ['exitCode','exit_code',identity], ['signal','signal',identity], ['timedOut','timed_out',booleanInteger],
-        ['processTreeQuiescent','process_tree_quiescent',booleanInteger], ['failureCode','failure_code',identity], ['failureMessage','failure_message',identity],
-      ]
-      const assignments: string[] = []; const values: unknown[] = []
-      for (const [property, column, convert] of mapping) {
-        if (!Object.prototype.hasOwnProperty.call(facts, property)) continue
-        const next = convert(facts[property]); const previous = attempt[column]
-        if (previous !== null && previous !== next && !(column === 'process_tree_quiescent' && previous === 0 && next === 1)) throw new TrackerTransitionError(`attempt observation conflicts with durable ${column}`)
-        assignments.push(`${column} = ?`); values.push(next)
-      }
-      if (assignments.length === 0) return
-      assignments.push('updated_at = ?'); values.push(updatedAt, attemptId)
-      this.database.prepare(`UPDATE attempts SET ${assignments.join(', ')} WHERE attempt_id = ?`).run(...values as SQLOutputValue[])
+      this.mergeAttemptObservation(attempt, facts, updatedAt)
     })
   }
+  checkpointRun(runId: string, facts: TransitionFacts, at = new Date().toISOString()): number {
+    return this.transaction(() => {
+      const run = this.requireRun(runId)
+      const state = String(run['state']) as RunDurableState
+      if (RUN_TERMINAL[state]) throw new TrackerTransitionError('same-state checkpoints require a nonterminal run')
+      this.validateAndInsertArtifacts(runId, null, facts.artifacts ?? [])
+      this.database.prepare('UPDATE runs SET updated_at = ?, blocked_code = COALESCE(?, blocked_code) WHERE run_id = ?').run(at, facts.blockedCode ?? null, runId)
+      return this.insertTransition(runId, null, 'run', state, state, facts, at)
+    })
+  }
+  checkpointRecoverableBlocked(runId: string, blocked: RecoverableBlockedEvidence, at = new Date().toISOString()): number {
+    if (!blocked.code.trim() || blocked.evidence.length === 0 || blocked.evidence.some(item => !item.trim())) throw new TrackerTransitionError('recoverable blocked checkpoint requires typed non-empty evidence')
+    return this.transaction(() => {
+      const run = this.requireRun(runId)
+      const state = String(run['state']) as RunDurableState
+      if (RUN_TERMINAL[state]) throw new TrackerTransitionError('recoverable blocked checkpoint requires a nonterminal run')
+      if (!this.database.prepare('SELECT 1 FROM active_locks WHERE run_id = ? AND released_at IS NULL').get(runId) || this.isRunQuiescent(runId)) throw new TrackerTransitionError('recoverable blocked checkpoint requires an active lock and uncertain process disposition')
+      const outcome = { kind: 'recoverable-blocked', evidence: [...blocked.evidence] }
+      this.database.prepare('UPDATE runs SET updated_at = ?, blocked_code = ? WHERE run_id = ?').run(at, blocked.code, runId)
+      return this.insertTransition(runId, null, 'run', state, state, { blockedCode: blocked.code, outcome }, at)
+    })
+  }
+
+
+  recordAttemptOutcome(attemptId: string, checkpoint: AttemptOutcomeCheckpoint, updatedAt = new Date().toISOString()): number {
+    return this.transaction(() => {
+      const attempt = this.database.prepare('SELECT * FROM attempts WHERE attempt_id = ?').get(attemptId)
+      if (!attempt) throw new TrackerTransitionError(`unknown attempt ${attemptId}`)
+      this.mergeAttemptObservation(attempt, checkpoint.facts, updatedAt)
+      const runId = String(attempt['run_id'])
+      const experimentId = String(attempt['experiment_id'])
+      this.validateAndInsertArtifacts(runId, experimentId, checkpoint.artifacts)
+      const run = this.requireRun(runId)
+      const state = String(run['state']) as RunDurableState
+      if (RUN_TERMINAL[state]) throw new TrackerTransitionError('attempt outcome requires a nonterminal run')
+      return this.insertTransition(runId, experimentId, 'run', state, state, { outcome: checkpoint.outcome ?? checkpoint.facts, artifacts: checkpoint.artifacts }, updatedAt)
+    })
+  }
+
 
   transitionRun(runId: string, to: RunDurableState, facts: TransitionFacts = {}, at = new Date().toISOString()): number {
     return this.transaction(() => {
@@ -246,6 +282,23 @@ export class DurableTracker {
   private transaction<T>(operation: () => T): T { this.database.exec('BEGIN IMMEDIATE'); try { const result = operation(); this.database.exec('COMMIT'); return result } catch (error) { try { this.database.exec('ROLLBACK') } catch { /* transaction may already be aborted */ }; throw error } }
   private requireRun(runId: string): Record<string, SQLOutputValue> { const row = this.getRun(runId); if (!row) throw new TrackerTransitionError(`unknown run ${runId}`); return row }
   private requireExperiment(experimentId: string): Record<string, SQLOutputValue> { const row = this.database.prepare('SELECT * FROM experiments WHERE experiment_id = ?').get(experimentId); if (!row) throw new TrackerTransitionError(`unknown experiment ${experimentId}`); return row }
+  private mergeAttemptObservation(attempt: Record<string, SQLOutputValue>, facts: AttemptOutcome, updatedAt: string): void {
+    const mapping: readonly [keyof AttemptOutcome, string, (value: unknown) => unknown][] = [
+      ['providerAttemptId','provider_attempt_id',identity], ['providerPid','provider_pid',identity], ['providerIdentity','provider_identity',identity], ['spawnedAt','spawned_at',identity],
+      ['exitedAt','exited_at',identity], ['exitCode','exit_code',identity], ['signal','signal',identity], ['timedOut','timed_out',booleanInteger],
+      ['processTreeQuiescent','process_tree_quiescent',booleanInteger], ['failureCode','failure_code',identity], ['failureMessage','failure_message',identity],
+    ]
+    const assignments: string[] = []; const values: unknown[] = []
+    for (const [property, column, convert] of mapping) {
+      if (!hasOwn(facts, property)) continue
+      const next = convert(facts[property]); const previous = attempt[column]
+      if (previous !== null && previous !== next && !(column === 'process_tree_quiescent' && previous === 0 && next === 1)) throw new TrackerTransitionError(`attempt observation conflicts with durable ${column}`)
+      assignments.push(`${column} = ?`); values.push(next)
+    }
+    if (assignments.length === 0) return
+    assignments.push('updated_at = ?'); values.push(updatedAt, attempt['attempt_id'])
+    this.database.prepare(`UPDATE attempts SET ${assignments.join(', ')} WHERE attempt_id = ?`).run(...values as SQLOutputValue[])
+  }
   private isRunQuiescent(runId: string): boolean { return !this.database.prepare('SELECT 1 FROM attempts WHERE run_id = ? AND process_tree_quiescent IS NOT 1 LIMIT 1').get(runId) }
   private validateAndInsertArtifacts(runId: string, experimentId: string | null, artifacts: readonly ArtifactRecord[]): void {
     const statement = this.database.prepare(`INSERT INTO artifacts (artifact_id, run_id, experiment_id, attempt_id, kind, location, size_bytes, sha256, owner, retention, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)

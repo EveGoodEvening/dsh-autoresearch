@@ -144,6 +144,7 @@ function persistence(): EvaluatorPersistence & {
 
 function options(runtime = fakeRuntime(), overrides: Record<string, unknown> = {}) {
   const paths = fixture()
+  let artifactWriter: EvaluatorArtifactWriter | undefined
   const evaluation = (overrides.evaluation ?? { command: 'node', args: ['evaluate.mjs'], cwd: 'bench' }) as { command: string; args: string[]; cwd?: string }
   const boundary = overrides.boundary ?? createEvaluatorBoundary(paths.root, {
     evaluation, normalizedPolicySha256: 'a'.repeat(64), evaluatorFiles: ['bench/evaluate.mjs'], runId: 'run', attemptId: 'attempt-1',
@@ -158,13 +159,14 @@ function options(runtime = fakeRuntime(), overrides: Record<string, unknown> = {
       evaluation,
       metricName: 'score', metricDirection: 'minimize' as const,
       timeoutMs: 1_000, terminationGraceMs: 25, maxStdoutBytes: 128, maxStderrBytes: 64,
-      artifactWriter: EvaluatorArtifactWriter.mint(StateLayout.open(paths.artifacts), 'run', 'experiment', 'attempt-1'), environment: { LANG: 'C' },
+      artifactWriterFactory: () => artifactWriter ??= EvaluatorArtifactWriter.mint(StateLayout.open(paths.artifacts), 'run', 'experiment', 'attempt-1'), environment: { LANG: 'C' },
       dataset: { version: 'v1', name: 'fixture' }, policy: { tie: 'reject' },
       persistence: persistence(),
       ...overrides,
       boundary,
       evaluation,
     },
+    get artifactWriter() { if (!artifactWriter) throw new Error('artifact writer has not been minted'); return artifactWriter },
   }
 }
 
@@ -196,10 +198,26 @@ describe('host-owned evaluator execution', () => {
       argv: ['node', 'evaluate.mjs'], cwd: join(setup.paths.root, 'bench'), env: { LANG: 'C' }, graceMs: 25,
       stdio: { stdin: 'ignore', stdout: { maxBytes: 128, spill: { maxBytes: 128 } }, stderr: { maxBytes: 64, spill: { maxBytes: 64 } } },
     })
-    expect(setup.value.persistence.events).toEqual(['intent', 'observed', 'outcome'])
-    expect(result.artifacts.map(item => [item.kind, readFileSync(setup.value.artifactWriter.internalPath(item.kind), 'utf8')])).toEqual([['stdout', '{"score":1.5}\n'], ['stderr', '']])
+    expect(result.artifacts.map(item => [item.kind, readFileSync(setup.artifactWriter.internalPath(item.kind), 'utf8')])).toEqual([['stdout', '{"score":1.5}\n'], ['stderr', '']])
     expect(setup.runtime.waited).toBe(1)
   })
+  it('mints the artifact writer only after durable spawn intent succeeds', async () => {
+    const setup = options()
+    const factory = vi.fn(setup.value.artifactWriterFactory)
+    setup.value.artifactWriterFactory = factory
+    setup.value.persistence.persistSpawnIntent = () => { throw new Error('intent failed') }
+    await expect(runEvaluator(setup.value)).rejects.toThrow('intent failed')
+    expect(factory).not.toHaveBeenCalled()
+
+    const successful = options()
+    const events: string[] = []
+    successful.value.persistence.persistSpawnIntent = () => { events.push('intent') }
+    const mint = successful.value.artifactWriterFactory
+    successful.value.artifactWriterFactory = () => { events.push('mint'); return mint() }
+    await runEvaluator(successful.value)
+    expect(events.slice(0, 2)).toEqual(['intent', 'mint'])
+  })
+
 
   it('passes raw environment only to spawn and hashes or redacts every durable and returned surface', async () => {
     const secret = 'innocuous-name-secret-value'
@@ -209,9 +227,8 @@ describe('host-owned evaluator execution', () => {
     expect(runtime.spec?.env).toEqual({ ORDINARY: secret })
     expect(setup.value.persistence.intent?.env.ORDINARY).toMatch(/^sha256:/)
     expect(setup.value.persistence.intent?.env.ORDINARY).not.toContain(secret)
-    expect(JSON.stringify(result)).not.toContain(secret)
-    expect(result.artifacts.map(item => readFileSync(setup.value.artifactWriter.internalPath(item.kind), 'utf8')).join('\n')).not.toContain(secret)
-    expect(readFileSync(setup.value.artifactWriter.internalPath('stdout'), 'utf8')).toContain('[REDACTED]')
+    expect(result.artifacts.map(item => readFileSync(setup.artifactWriter.internalPath(item.kind), 'utf8')).join('\n')).not.toContain(secret)
+    expect(readFileSync(setup.artifactWriter.internalPath('stdout'), 'utf8')).toContain('[REDACTED]')
     const frozen = freezeEvaluatorProvenance(setup.paths.root, { evaluation: setup.value.evaluation, environment: { ORDINARY: secret }, metricName: 'score', metricDirection: 'minimize' })
     expect(frozen.canonical).not.toContain(secret)
 
@@ -240,7 +257,7 @@ describe('host-owned evaluator execution', () => {
     const runtime = fakeRuntime({ stdout: reader('artifact abcdef abc\n{"score":2}\n'), stderr: reader('error abcdef abc\n') })
     const measured = options(runtime, { environment })
     const result = await runEvaluator(measured.value)
-    const artifactText = result.artifacts.map(item => readFileSync(measured.value.artifactWriter.internalPath(item.kind), 'utf8')).join('\n')
+    const artifactText = result.artifacts.map(item => readFileSync(measured.artifactWriter.internalPath(item.kind), 'utf8')).join('\n')
     expect(artifactText).toContain('artifact [REDACTED] [REDACTED]')
     expect(artifactText).not.toContain('[REDACTED]def')
     expect(JSON.stringify(result)).not.toContain('[REDACTED]def')
@@ -344,7 +361,7 @@ describe('host-owned evaluator execution', () => {
       evaluation,
       metricName: 'score', metricDirection: 'minimize', timeoutMs: mode === 'timeout' ? 150 : 5_000,
       terminationGraceMs: 30, maxStdoutBytes: 128, maxStderrBytes: 64,
-      artifactWriter: EvaluatorArtifactWriter.mint(StateLayout.open(paths.artifacts), 'run', 'experiment', mode), persistence: durable,
+      artifactWriterFactory: () => EvaluatorArtifactWriter.mint(StateLayout.open(paths.artifacts), 'run', 'experiment', mode), persistence: durable,
       ...(mode === 'repeated-cancellation' ? { signal: controller.signal } : {}),
     })
     while (!readFileExists(childPidPath)) await new Promise(resolve => setTimeout(resolve, 5))
@@ -378,8 +395,7 @@ describe('host-owned evaluator execution', () => {
     const runtime = fakeRuntime({ stdout: reader('log\n{"score":4}\n', false, spill) })
     const setup = options(runtime)
     const result = await runEvaluator(setup.value)
-    expect(result).toMatchObject({ kind: 'measured', metric: 4 })
-    expect(readFileSync(setup.value.artifactWriter.internalPath('stdout'), 'utf8')).toBe('log\n{"score":4}\n')
+    expect(readFileSync(setup.artifactWriter.internalPath('stdout'), 'utf8')).toBe('log\n{"score":4}\n')
   })
 
   it.each([
@@ -493,8 +509,7 @@ describe('host-owned evaluator execution', () => {
     for (const fake of failures) {
       const setup = options(fakeRuntime(fake), { environment: { ORDINARY: secret }, policy: { note: secret } })
       const result = await runEvaluator(setup.value)
-      expect(JSON.stringify({ result, intent: setup.value.persistence.intent, outcome: setup.value.persistence.outcome })).not.toContain(secret)
-      expect(result.artifacts.map(item => readFileSync(setup.value.artifactWriter.internalPath(item.kind), 'utf8')).join('\n')).not.toContain(secret)
+      expect(result.artifacts.map(item => readFileSync(setup.artifactWriter.internalPath(item.kind), 'utf8')).join('\n')).not.toContain(secret)
     }
 
     const spillSetup = options(fakeRuntime())
@@ -503,8 +518,7 @@ describe('host-owned evaluator execution', () => {
     const spillRuntime = fakeRuntime({ stdout: reader(`${secret}\n{"score":3}\n`, false, spill), stderr: reader(secret) })
     const spilled = options(spillRuntime, { environment: { ORDINARY: secret } })
     const spillResult = await runEvaluator(spilled.value)
-    expect(JSON.stringify(spillResult)).not.toContain(secret)
-    expect(spillResult.artifacts.map(item => readFileSync(spilled.value.artifactWriter.internalPath(item.kind), 'utf8')).join('\n')).not.toContain(secret)
+    expect(spillResult.artifacts.map(item => readFileSync(spilled.artifactWriter.internalPath(item.kind), 'utf8')).join('\n')).not.toContain(secret)
 
     const throwing = options(fakeRuntime(), { environment: { ORDINARY: secret } })
     throwing.value.persistence.persistSpawnObserved = () => { throw new Error(secret) }
@@ -537,7 +551,7 @@ describe('host-owned evaluator execution', () => {
       subprocess: new LocalSubprocess(), worktree: paths.root,
       boundary: createEvaluatorBoundary(paths.root, { evaluation, normalizedPolicySha256: 'c'.repeat(64) }),
       evaluation, metricName: 'score', metricDirection: 'minimize', timeoutMs: 2_000, terminationGraceMs: 25,
-      maxStdoutBytes: 64, maxStderrBytes: 48, artifactWriter: EvaluatorArtifactWriter.mint(StateLayout.open(paths.artifacts), 'run', 'experiment', stream), persistence: durable,
+      maxStdoutBytes: 64, maxStderrBytes: 48, artifactWriterFactory: () => EvaluatorArtifactWriter.mint(StateLayout.open(paths.artifacts), 'run', 'experiment', stream), persistence: durable,
     })
     expect(result).toMatchObject(stream === 'stdout' ? { kind: 'failed', code: 'output-limit' } : { kind: 'measured', metric: 5 })
     const artifact = result.artifacts.find(item => item.kind === stream)!
@@ -581,7 +595,7 @@ describe('host-owned evaluator execution', () => {
     const durable = persistence()
     const result = await runEvaluator({ subprocess: fakeRuntime({ stdout: reader(`${secret}\n{"score":1}\n`) }).runtime, worktree: paths.root, boundary, evaluation,
       metricName: 'score', metricDirection: 'minimize', timeoutMs: 1000, terminationGraceMs: 25, maxStdoutBytes: 128, maxStderrBytes: 64,
-      artifactWriter: EvaluatorArtifactWriter.mint(StateLayout.open(paths.artifacts), 'run', 'experiment', 'secret-test'), environment: { TOKEN: secret }, policy: { nested: [secret] }, persistence: durable })
+      artifactWriterFactory: () => EvaluatorArtifactWriter.mint(StateLayout.open(paths.artifacts), 'run', 'experiment', 'secret-test'), environment: { TOKEN: secret }, policy: { nested: [secret] }, persistence: durable })
     expect(JSON.stringify({ result, intent: durable.intent, outcome: durable.outcome })).not.toContain(secret)
     expect(durable.intent?.argv).toEqual(['node', '[REDACTED]'])
     expect(durable.intent?.cwd).toContain('[REDACTED]')

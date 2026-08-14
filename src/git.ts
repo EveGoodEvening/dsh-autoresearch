@@ -27,6 +27,16 @@ export interface CandidateSnapshot { readonly parentCommit: string; readonly cha
 export interface GitConfigSnapshot { readonly logicalPath: string; readonly path: string; readonly exists: boolean; readonly sha256?: string }
 export interface GitConfigBaseline { readonly files: readonly GitConfigSnapshot[]; readonly allowedPaths: readonly string[] }
 export interface CandidateCommit { readonly parentCommit: string; readonly candidateCommit: string; readonly auditRef: string; readonly changedPaths: readonly string[] }
+export interface PreparedCandidateTree extends CandidateCommit {}
+export interface RunGitInspection {
+  readonly acceptedCommit?: string
+  readonly branchCommit?: string
+  readonly headCommit?: string
+  readonly auditCommits: readonly string[]
+  readonly worktreeRegistered: boolean
+  readonly registeredBranch?: string
+}
+
 
 export async function resolveGitExecutable(ctx: GitContext, configured: string, signal?: AbortSignal): Promise<string> {
   if (!isAbsolute(configured) && /[\\/]/u.test(configured)) throw new TypeError('Configured Git executable must be a bare name or absolute path')
@@ -155,25 +165,50 @@ export function validateCandidate(snapshot: CandidateSnapshot, policy: Pick<Norm
   if (violations.length) throw new GitBoundaryError('candidate-policy-violation', 'Candidate changed forbidden paths', violations)
   return [...new Set([...snapshot.changed.map((change) => normalizeRepoPath(change.path)), ...snapshot.ignoredUntracked.map(normalizeRepoPath)])].sort()
 }
-
-export async function commitCandidate(ctx: GitContext, executable: string, worktree: string, identity: RunGitIdentity, experimentId: string, snapshot: CandidateSnapshot, validatedPaths: readonly string[], options: Omit<GitCommandOptions, 'cwd'>): Promise<CandidateCommit> {
+export async function prepareCandidateTree(ctx: GitContext, executable: string, worktree: string, identity: RunGitIdentity, experimentId: string, snapshot: CandidateSnapshot, validatedPaths: readonly string[], options: Omit<GitCommandOptions, 'cwd'>): Promise<PreparedCandidateTree> {
   await enforceGitConfigBaseline(ctx, executable, worktree, snapshot.gitConfig, options)
   const invoke = (args: readonly string[], env?: Readonly<Record<string, string | undefined>>) => runGit(ctx, executable, args, { ...options, cwd: worktree, ...(env ? { env } : {}) })
-  const auditRef = `${identity.candidateRefPrefix}${safeIdentity(experimentId, 'experimentId')}`; const current = (await invoke(['rev-parse', '--verify', 'HEAD^{commit}'])).stdout.trim()
+  const auditRef = `${identity.candidateRefPrefix}${safeIdentity(experimentId, 'experimentId')}`
+  const current = (await invoke(['rev-parse', '--verify', 'HEAD^{commit}'])).stdout.trim()
   if (current !== snapshot.parentCommit) throw new GitBoundaryError('candidate-parent-moved', 'Accepted worktree HEAD moved after candidate snapshot')
-  const existingAudit = await readOptionalRef(ctx, executable, auditRef, worktree, options)
-  if (existingAudit) { await verifyRecoverableCandidate(invoke, existingAudit, snapshot, validatedPaths, experimentId); await requireWorktreeMatches(invoke, existingAudit); return { parentCommit: snapshot.parentCommit, candidateCommit: existingAudit, auditRef, changedPaths: [...validatedPaths] } }
-  const directory = await mkdtemp(join(tmpdir(), 'autoresearch-index-')); const indexEnv = { GIT_INDEX_FILE: join(directory, 'index') }
+  const directory = await mkdtemp(join(tmpdir(), 'autoresearch-index-'))
+  const indexEnv = { GIT_INDEX_FILE: join(directory, 'index') }
   try {
-    await invoke(['read-tree', snapshot.parentCommit], indexEnv); await invoke(['add', '-f', '--', ...validatedPaths], indexEnv)
-    const staged = parseNameStatus((await invoke(['diff', '--cached', '--name-status', '-z'], indexEnv)).stdout); if (!sameSet(staged, validatedPaths)) throw new GitBoundaryError('candidate-stage-mismatch', 'Staged paths differ from validated paths', staged)
-    const tree = (await invoke(['write-tree'], indexEnv)).stdout.trim(); const parentDate = (await invoke(['show', '-s', '--format=%aI', snapshot.parentCommit])).stdout.trim()
+    await invoke(['read-tree', snapshot.parentCommit], indexEnv)
+    await invoke(['add', '-f', '--', ...validatedPaths], indexEnv)
+    const staged = parseNameStatus((await invoke(['diff', '--cached', '--name-status', '-z'], indexEnv)).stdout)
+    if (!sameSet(staged, validatedPaths)) throw new GitBoundaryError('candidate-stage-mismatch', 'Staged paths differ from validated paths', staged)
+    const tree = (await invoke(['write-tree'], indexEnv)).stdout.trim()
+    const parentDate = (await invoke(['show', '-s', '--format=%aI', snapshot.parentCommit])).stdout.trim()
     const commitEnv = { ...indexEnv, GIT_AUTHOR_NAME: 'dsh-autoresearch', GIT_AUTHOR_EMAIL: 'autoresearch@localhost', GIT_COMMITTER_NAME: 'dsh-autoresearch', GIT_COMMITTER_EMAIL: 'autoresearch@localhost', GIT_AUTHOR_DATE: parentDate, GIT_COMMITTER_DATE: parentDate }
-    const candidateCommit = (await invoke(['commit-tree', tree, '-p', snapshot.parentCommit, '-m', `autoresearch candidate ${experimentId}`], commitEnv)).stdout.trim(); requireSha(candidateCommit, 'candidate commit')
-    await verifyRecoverableCandidate(invoke, candidateCommit, snapshot, validatedPaths, experimentId); await requireWorktreeMatches(invoke, candidateCommit); await invoke(['update-ref', auditRef, candidateCommit, ZERO_SHA])
-    return { parentCommit: snapshot.parentCommit, candidateCommit, auditRef, changedPaths: [...validatedPaths] }
+    const candidateCommit = (await invoke(['commit-tree', tree, '-p', snapshot.parentCommit, '-m', `autoresearch candidate ${experimentId}`], commitEnv)).stdout.trim()
+    const prepared = { parentCommit: snapshot.parentCommit, candidateCommit, auditRef, changedPaths: [...validatedPaths] }
+    await verifyCandidateTree(ctx, executable, worktree, experimentId, snapshot, prepared, options)
+    return prepared
   } finally { await rm(directory, { recursive: true, force: true }) }
 }
+
+export async function verifyCandidateTree(ctx: GitContext, executable: string, worktree: string, experimentId: string, snapshot: CandidateSnapshot, candidate: PreparedCandidateTree, options: Omit<GitCommandOptions, 'cwd'>): Promise<void> {
+  const invoke = (args: readonly string[], env?: Readonly<Record<string, string | undefined>>) => runGit(ctx, executable, args, { ...options, cwd: worktree, ...(env ? { env } : {}) })
+  if (candidate.parentCommit !== snapshot.parentCommit) throw new GitBoundaryError('candidate-lineage-invalid', 'Prepared candidate parent differs from the durable snapshot')
+  await verifyRecoverableCandidate(invoke, candidate.candidateCommit, snapshot, candidate.changedPaths, experimentId)
+  await requireWorktreeMatches(invoke, candidate.candidateCommit)
+}
+
+
+export async function commitCandidate(ctx: GitContext, executable: string, worktree: string, identity: RunGitIdentity, experimentId: string, snapshot: CandidateSnapshot, validatedPaths: readonly string[], options: Omit<GitCommandOptions, 'cwd'>): Promise<CandidateCommit> {
+  const auditRef = `${identity.candidateRefPrefix}${safeIdentity(experimentId, 'experimentId')}`
+  const existingAudit = await readOptionalRef(ctx, executable, auditRef, worktree, options)
+  if (existingAudit) {
+    const recovered = { parentCommit: snapshot.parentCommit, candidateCommit: existingAudit, auditRef, changedPaths: [...validatedPaths] }
+    await verifyCandidateTree(ctx, executable, worktree, experimentId, snapshot, recovered, options)
+    return recovered
+  }
+  const prepared = await prepareCandidateTree(ctx, executable, worktree, identity, experimentId, snapshot, validatedPaths, options)
+  await runGit(ctx, executable, ['update-ref', prepared.auditRef, prepared.candidateCommit, ZERO_SHA], { ...options, cwd: worktree })
+  return prepared
+}
+
 
 export async function reconcileAcceptedHead(ctx: GitContext, executable: string, worktree: string, identity: RunGitIdentity, expectedCommit: string, options: Omit<GitCommandOptions, 'cwd'>): Promise<void> {
   requireSha(expectedCommit, 'expected accepted commit'); await rejectExecutableGitConfig(ctx, executable, worktree, options); const invoke = (args: readonly string[], extra?: Pick<GitCommandOptions, 'stdinData'>) => runGit(ctx, executable, args, { ...options, ...extra, cwd: worktree }); const branchRef = `refs/heads/${identity.branch}`
@@ -192,6 +227,15 @@ export async function reconcileRejectedHead(ctx: GitContext, executable: string,
   const accepted = await readOptionalRef(ctx, executable, identity.acceptedRef, worktree, options); const branch = await readOptionalRef(ctx, executable, branchRef, worktree, options); const head = (await invoke(['rev-parse', '--verify', 'HEAD^{commit}'])).stdout.trim()
   if (accepted !== expectedAcceptedCommit || branch !== expectedAcceptedCommit || head !== expectedAcceptedCommit) throw new GitBoundaryError('rejected-reconcile-identity', 'Accepted ref, branch, and HEAD are not the rejection target')
   await invoke(['read-tree', '--reset', '-u', expectedAcceptedCommit]); await invoke(['clean', '-ffdx']); await verifyExactWorktree(ctx, executable, worktree, expectedAcceptedCommit, options)
+}
+
+export async function inspectRunGitState(ctx: GitContext, executable: string, discovery: RepositoryDiscovery, identity: RunGitIdentity, options: Omit<GitCommandOptions, 'cwd'>): Promise<RunGitInspection> {
+  const acceptedCommit = await readOptionalRef(ctx, executable, identity.acceptedRef, discovery.repository, options)
+  const branchCommit = await readOptionalRef(ctx, executable, `refs/heads/${identity.branch}`, discovery.repository, options)
+  const auditCommits = (await runGit(ctx, executable, ['for-each-ref', '--format=%(objectname)', identity.candidateRefPrefix], { ...options, cwd: discovery.repository })).stdout.split('\n').filter(Boolean)
+  const registered = parseWorktreeList((await runGit(ctx, executable, ['worktree', 'list', '--porcelain'], { ...options, cwd: discovery.repository })).stdout).find(item => item.path === identity.worktree)
+  const headCommit = registered ? await readOptionalRef(ctx, executable, 'HEAD^{commit}', identity.worktree, options) : undefined
+  return { ...(acceptedCommit ? { acceptedCommit } : {}), ...(branchCommit ? { branchCommit } : {}), ...(headCommit ? { headCommit } : {}), auditCommits, worktreeRegistered: registered !== undefined, ...(registered?.branch ? { registeredBranch: registered.branch } : {}) }
 }
 
 export function releaseTerminalRunLock(tracker: DurableTracker, runId: string): boolean { return tracker.releaseActiveLock(runId) }

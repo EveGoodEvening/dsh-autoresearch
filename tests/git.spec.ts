@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { SubprocessHandle, SubprocessOutputReader, SubprocessOutcome, SubprocessSpawnSpec } from '@deepseek-ai/dsh-subprocess'
 import { DurableTracker } from '../src/tracker.ts'
-import { acquireRunLock, allocateRunWorktree, captureGitConfigBaseline, commitCandidate, discoverRepository, durableGitIdentity, GitBoundaryError, makeRunGitIdentity, reconcileAcceptedHead, reconcileRejectedHead, recoverTerminalRunLock, releaseTerminalRunLock, removeRunWorktree, resolveGitExecutable, runGit, snapshotCandidate, validateCandidate, verifyExactWorktree, type GitContext } from '../src/git.ts'
+import { acquireRunLock, allocateRunWorktree, captureGitConfigBaseline, commitCandidate, discoverRepository, durableGitIdentity, GitBoundaryError, inspectRunGitState, makeRunGitIdentity, prepareCandidateTree, reconcileAcceptedHead, reconcileRejectedHead, recoverTerminalRunLock, releaseTerminalRunLock, removeRunWorktree, resolveGitExecutable, runGit, snapshotCandidate, validateCandidate, verifyCandidateTree, verifyExactWorktree, type GitContext } from '../src/git.ts'
 
 const roots: string[] = []
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
@@ -196,6 +196,18 @@ describe('host-owned Git boundary', () => {
     const faulty = faultingGit(f.root, `update-ref ${f.identity.candidateRefPrefix}recover`); await expect(commitCandidate(f.ctx, faulty, f.identity.worktree, f.identity, 'recover', snapshot, paths, commandOptions)).rejects.toMatchObject({ code: 'git-command-failed' }); expect(ref(f.identity.worktree, 'HEAD')).toBe(before)
     const recovered = await commitCandidate(f.ctx, 'git', f.identity.worktree, f.identity, 'recover', snapshot, paths, commandOptions); expect(recovered.candidateCommit).not.toBe(before); expect(ref(f.root, recovered.auditRef)).toBe(recovered.candidateCommit); await expect(commitCandidate(f.ctx, 'git', f.identity.worktree, f.identity, 'recover', snapshot, paths, commandOptions)).resolves.toEqual(recovered)
   })
+  it('prepares and verifies a complete candidate tree without publishing refs or moving HEAD', async () => {
+    const f = await createRun(); writeFileSync(join(f.identity.worktree, 'src', 'code.ts'), 'export const n = 7\n')
+    const snapshot = await snapshotCandidate(f.ctx, 'git', f.identity.worktree, f.gitConfig, commandOptions)
+    const before = await inspectRunGitState(f.ctx, 'git', f.discovery, f.identity, commandOptions)
+    const prepared = await prepareCandidateTree(f.ctx, 'git', f.identity.worktree, f.identity, 'prepared', snapshot, validateCandidate(snapshot, policy()), commandOptions)
+    const after = await inspectRunGitState(f.ctx, 'git', f.discovery, f.identity, commandOptions)
+    expect(after).toEqual(before)
+    expect(() => ref(f.root, prepared.auditRef)).toThrow()
+    expect(ref(f.identity.worktree, 'HEAD')).toBe(snapshot.parentCommit)
+    await expect(verifyCandidateTree(f.ctx, 'git', f.identity.worktree, 'prepared', snapshot, prepared, commandOptions)).resolves.toBeUndefined()
+  })
+
 
   it('promotes with restart recovery and leaves every identity unchanged on failed preconditions', async () => {
     const f = await createRun(); const accepted = f.discovery.startCommit; const c = await candidate(f, 'promote', 'export const n = 2\n'); writeFileSync(join(f.identity.worktree, 'unrelated.tmp'), 'dirty\n')

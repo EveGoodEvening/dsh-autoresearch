@@ -11,6 +11,17 @@ export interface EvaluatorArtifactRecord {
   readonly sha256: string
   readonly truncated: boolean
 }
+export type EvaluatorArtifactWriterFactory = () => EvaluatorArtifactWriter
+
+export function createEvaluatorArtifactWriterFactory(layout: StateLayout, runId: string, experimentId: string, attemptId: string): EvaluatorArtifactWriterFactory {
+  let minted = false
+  return () => {
+    if (minted) throw new Error('evaluator artifact writer factory is single-use')
+    minted = true
+    return EvaluatorArtifactWriter.mint(layout, runId, experimentId, attemptId)
+  }
+}
+
 
 interface DirectoryIdentity { readonly path: string; readonly dev: number; readonly ino: number }
 

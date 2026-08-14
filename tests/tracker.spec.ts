@@ -176,6 +176,28 @@ describe('durable SQLite tracker', () => {
     expect(tracker.releaseActiveLock('run-1')).toBe(true)
     tracker.close()
   })
+  it('persists recoverable same-state blocked evidence while retaining the lock and nonterminal state', () => {
+    const tracker = DurableTracker.open(fixturePath()); tracker.createRun(initial()); tracker.acquireActiveLock('run-1', 'repo-identity', 'test'); createRunningExperiment(tracker)
+    tracker.createAttemptIntent({ attemptId: 'attempt-1', runId: 'run-1', experimentId: 'exp-0', ordinal: 1 }, { kind: 'spawn' })
+    tracker.checkpointRecoverableBlocked('run-1', { code: 'evaluator-survival-uncertain', evidence: ['provider identity unavailable'] })
+    expect(tracker.getRun('run-1')).toMatchObject({ state: 'baseline-running', terminal_at: null, terminal_quiescent: null, blocked_code: 'evaluator-survival-uncertain' })
+    expect(tracker.recoveryState('run-1')).toMatchObject({ processDisposition: 'uncertain', safeToReleaseTerminalLock: false, activeLock: { run_id: 'run-1' } })
+    expect(() => tracker.releaseActiveLock('run-1')).toThrowError(TrackerTransitionError)
+    tracker.close()
+  })
+
+  it('atomically records attempt outcome, quiescence, artifacts, and their durable checkpoint linkage', () => {
+    const tracker = DurableTracker.open(fixturePath()); tracker.createRun(initial()); createRunningExperiment(tracker)
+    tracker.createAttemptIntent({ attemptId: 'attempt-1', runId: 'run-1', experimentId: 'exp-0', ordinal: 1 }, { kind: 'spawn' })
+    expect(() => tracker.recordAttemptOutcome('attempt-1', { facts: { exitedAt: 'now', exitCode: 0, signal: null, timedOut: false, processTreeQuiescent: true }, artifacts: [artifact('wrong', { attemptId: 'missing' })] })).toThrow(/ownership/)
+    expect(tracker.recoveryState('run-1').unresolvedAttempt).toMatchObject({ exited_at: null, process_tree_quiescent: null })
+    tracker.recordAttemptOutcome('attempt-1', { facts: { exitedAt: 'now', exitCode: 0, signal: null, timedOut: false, processTreeQuiescent: true }, artifacts: [artifact()] })
+    expect(tracker.recoveryState('run-1').unresolvedAttempt).toMatchObject({ exited_at: 'now', process_tree_quiescent: 1 })
+    expect(tracker.database.prepare('SELECT artifact_id FROM artifacts').all()).toEqual([{ artifact_id: 'stdout' }])
+    expect(tracker.database.prepare('SELECT transition_id, artifact_id FROM transition_artifacts').all()).toContainEqual({ transition_id: 'run-1:5', artifact_id: 'stdout' })
+    tracker.close()
+  })
+
 
   it('enforces coherent artifact and transition ownership transactionally across experiments and runs', () => {
     const tracker = DurableTracker.open(fixturePath()); tracker.createRun(initial()); createRunningExperiment(tracker)

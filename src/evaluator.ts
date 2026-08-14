@@ -84,7 +84,7 @@ export interface EvaluatorRunOptions {
   readonly terminationGraceMs: number
   readonly maxStdoutBytes: number
   readonly maxStderrBytes: number
-  readonly artifactWriter: EvaluatorArtifactWriter
+  readonly artifactWriterFactory: () => EvaluatorArtifactWriter
   readonly environment?: Readonly<Record<string, string>>
   readonly dataset?: Readonly<Record<string, string>>
   readonly policy?: unknown
@@ -207,6 +207,7 @@ export async function runEvaluator(options: EvaluatorRunOptions): Promise<Evalua
   const argv = Object.freeze([options.evaluation.command, ...options.evaluation.args])
   const durableIntent = durableSerialize({ argv, cwd, env: persistedEnv, provenanceSha256: provenance.sha256 }, secrets) as Parameters<EvaluatorPersistence['persistSpawnIntent']>[0]
   persistSafely(() => options.persistence.persistSpawnIntent(durableIntent), secrets)
+  const artifactWriter = options.artifactWriterFactory()
   const controller = new AbortController()
   let cause: 'timeout' | 'cancelled' | undefined
   const cancel = (): void => { if (cause === undefined) cause = 'cancelled'; controller.abort() }
@@ -218,7 +219,7 @@ export async function runEvaluator(options: EvaluatorRunOptions): Promise<Evalua
     const facts: EvaluatorAttemptFacts = {
       exitedAt: now().toISOString(), exitCode: null, signal: null, timedOut: false, cancelled: true, processTreeQuiescent: true,
     }
-    const artifacts = options.artifactWriter.write(undefined, undefined, secrets)
+    const artifacts = artifactWriter.write(undefined, undefined, secrets)
     persistSafely(() => options.persistence.persistAttemptOutcome(facts, artifacts), secrets)
     return { kind: 'failed', code: 'cancelled', message: 'evaluator cancelled', provenanceSha256: provenance.sha256, exit: facts, artifacts }
   }
@@ -265,7 +266,7 @@ export async function runEvaluator(options: EvaluatorRunOptions): Promise<Evalua
   }
   const stdoutRead = handle?.collected.stdout?.readFrom(0)
   const stderrRead = handle?.collected.stderr?.readFrom(0)
-  const artifacts = options.artifactWriter.write(stdoutRead, stderrRead, secrets)
+  const artifacts = artifactWriter.write(stdoutRead, stderrRead, secrets)
   const rawFacts: EvaluatorAttemptFacts = {
     ...(handle === undefined ? {} : { providerPid: handle.pid }), ...(spawnedAt === undefined ? {} : { spawnedAt }),
     exitedAt: now().toISOString(), exitCode: outcome.exitCode, signal: outcome.signal,
