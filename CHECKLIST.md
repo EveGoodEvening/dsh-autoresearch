@@ -551,7 +551,7 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 - [x] Persist terminal/quiescent run facts, completed Git reconciliation, and artifact references before active-lock release; make release the controller's final idempotent repository action.
 
 ## Chunk 06 verification gate
-- [x] Record final post-closure-fix Chunk 06 verification after closure-fix commit `2c106113ca95fa231f6942cd6886dd1ef3af364a`: `pnpm run typecheck` passed; Vitest passed 9 files / 225 tests; `pnpm run build` passed. This supersedes the verification recorded after `aeafc7458b7c7697fc62501f1dd06ed7c62f6e46`. Independent final clean review and closure remain unchecked.
+- [x] Record final post-terminal-replay-validation Chunk 06 verification after validation commit `3e9e44c57c94ad9fcbff411d0cec485a580e9832`: `pnpm run typecheck` passed; Vitest passed 9 files / 228 tests; `pnpm run build` passed. This supersedes the verification recorded after `2c106113ca95fa231f6942cd6886dd1ef3af364a`. Independent final clean review and closure remain unchecked.
 
 - [x] Test baseline-target shortcut spawns no child.
 - [x] Test strict accepted improvement.
@@ -574,6 +574,9 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 - [x] Test budget-limited completion.
 - [x] Test the safely reconcilable nonterminal run-state matrix, including fresh initialization, matching-lock initialization reuse, ready-state replay, baseline-running crash windows, rejection of a false run-level quiescence claim without partial terminal mutation, and terminal-lock crash replay from the durable run-level quiescence fact.
 - [x] Test the safely reconcilable nonterminal experiment-state matrix, including missing/pending/running/terminal baseline states, incomplete artifacts, canonical attempt-scoped stdout/stderr artifact identity/ownership/retention/metadata, secure owner-only artifact-file recovery, candidate preparation before/after audit publication, and conservative blocking for uncertain survivors.
+- [x] Test recovered terminal evaluator evidence is validated against the canonical durable attempt artifacts before terminal lock release, and that valid failed-baseline evidence replays idempotently with the recovered stdout/stderr references.
+- [x] Test missing, tampered, or extraneous canonical terminal artifact evidence returns typed `artifact-incomplete`, retains the active lock, and does not claim terminal recovery completion.
+- [x] Test the crash-replay window after evaluator outcome and terminal experiment persistence settles the same durable baseline decision idempotently without creating another attempt or prematurely advancing run state.
 - [x] Test no duplicate candidate creation during recovery.
 - [x] Test deterministic decision replay.
 ## Chunk 06 review gate
@@ -588,16 +591,17 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 
 - [x] Integrate proposal/recovery lanes into controller.
 - [ ] Confirm all prior callers migrate to the controller clean cutover in Chunk 07; legacy workflow/tool wiring remains live and assigned to Chunk 07.
-- [x] Commit recoverable controller and focused tests in foundation commit `ca184254e3681fea00cbf53ec4d377c9803928a0`, proposal/recovery commit `b690a56f7df0b97dd5fb03d32201b8a933928718`, controller commit `99b7aa12a7036b5f8cf10c634a455779141d956f`, review-fix commit `b1a0e1b0cf9825d19ddbbed246a9ff790fdf410e`, recovery-matrix test commit `e28d78ad2edeb7158370b568539e27d6fecadc85`, final review-fix commit `2e45cbc7d04a558d8b55b4ef863a5aad083dc05c`, ownership-retention review-fix commit `afd2621fbb95ddc10d7ba3c3b15e76699cb59008`, final quiescence/disposal test commit `aeafc7458b7c7697fc62501f1dd06ed7c62f6e46`, and terminal-lock/artifact/crash-replay closure-fix commit `2c106113ca95fa231f6942cd6886dd1ef3af364a`.
+- [x] Commit recoverable controller and focused tests in foundation commit `ca184254e3681fea00cbf53ec4d377c9803928a0`, proposal/recovery commit `b690a56f7df0b97dd5fb03d32201b8a933928718`, controller commit `99b7aa12a7036b5f8cf10c634a455779141d956f`, review-fix commit `b1a0e1b0cf9825d19ddbbed246a9ff790fdf410e`, recovery-matrix test commit `e28d78ad2edeb7158370b568539e27d6fecadc85`, final review-fix commit `2e45cbc7d04a558d8b55b4ef863a5aad083dc05c`, ownership-retention review-fix commit `afd2621fbb95ddc10d7ba3c3b15e76699cb59008`, final quiescence/disposal test commit `aeafc7458b7c7697fc62501f1dd06ed7c62f6e46`, terminal-lock/artifact/crash-replay closure-fix commit `2c106113ca95fa231f6942cd6886dd1ef3af364a`, and terminal replay evidence validation commit `3e9e44c57c94ad9fcbff411d0cec485a580e9832`.
 
 ## Chunk 06 tracker-accounting gate
 
-- [x] Record Chunk 06 implementation commits: `ca184254e3681fea00cbf53ec4d377c9803928a0`, `b690a56f7df0b97dd5fb03d32201b8a933928718`, and `99b7aa12a7036b5f8cf10c634a455779141d956f`; review-fix commits: `b1a0e1b0cf9825d19ddbbed246a9ff790fdf410e`, `2e45cbc7d04a558d8b55b4ef863a5aad083dc05c`, and `afd2621fbb95ddc10d7ba3c3b15e76699cb59008`; recovery-matrix test commit: `e28d78ad2edeb7158370b568539e27d6fecadc85`; final quiescence/disposal test commit: `aeafc7458b7c7697fc62501f1dd06ed7c62f6e46`; and terminal-lock/artifact/crash-replay closure-fix commit: `2c106113ca95fa231f6942cd6886dd1ef3af364a`.
+- [x] Record Chunk 06 implementation commits: `ca184254e3681fea00cbf53ec4d377c9803928a0`, `b690a56f7df0b97dd5fb03d32201b8a933928718`, and `99b7aa12a7036b5f8cf10c634a455779141d956f`; review-fix commits: `b1a0e1b0cf9825d19ddbbed246a9ff790fdf410e`, `2e45cbc7d04a558d8b55b4ef863a5aad083dc05c`, and `afd2621fbb95ddc10d7ba3c3b15e76699cb59008`; recovery-matrix test commit: `e28d78ad2edeb7158370b568539e27d6fecadc85`; final quiescence/disposal test commit: `aeafc7458b7c7697fc62501f1dd06ed7c62f6e46`; terminal-lock/artifact/crash-replay closure-fix commit: `2c106113ca95fa231f6942cd6886dd1ef3af364a`; and terminal replay evidence validation commit: `3e9e44c57c94ad9fcbff411d0cec485a580e9832`.
 - [x] Record the earlier Chunk 06 checklist accounting commits separately from implementation and review-fix work: `9215f6a` and `16f97d06627a72281db8ec39bd116ffebc597512`.
 - [x] Record prior final-controller-recovery checklist accounting commit `a3db166c488596056d786de2697364dd6bc83377` as a separate accounting-only commit.
 - [x] Record post-`aeafc7458b7c7697fc62501f1dd06ed7c62f6e46` accounting commit `612eb4db75d7b0797f0ace79ac6847934adb54bd` (`docs: record controller quiescence verification`) as complete and separate from implementation, review-fix, and test commits.
 - [ ] Complete the independent final clean Chunk 06 review and closure.
-- [ ] Commit this new post-`2c106113ca95fa231f6942cd6886dd1ef3af364a` Chunk 06 checklist accounting update separately from the implementation, review-fix, test, closure-fix, and prior accounting commits.
+- [x] Record post-`2c106113ca95fa231f6942cd6886dd1ef3af364a` accounting commit `0abff2f38fdccf81eb2d2fa4ed62f8101060eec7` (`docs: record terminal recovery verification`) as complete and separate from implementation, review-fix, test, closure-fix, and prior accounting commits.
+- [ ] Commit this new post-`3e9e44c57c94ad9fcbff411d0cec485a580e9832` Chunk 06 checklist accounting update separately from the implementation, review-fix, test, closure-fix, validation, and prior accounting commits.
 
 # Chunk 07 — `07-wire-tool-jobs-lifecycle-and-hmr`
 
