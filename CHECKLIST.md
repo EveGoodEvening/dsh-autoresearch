@@ -5,7 +5,7 @@
 - `[x]` means verified in the current worktree or completed research/planning evidence.
 - `[ ]` means not present or not verified in the current worktree.
 - Archived implementation activity was historical evidence only until the authoritative snapshot was recovered. Chunk 01 is now closed by implementation commit `3ca85a17c03d15488269b3dbc339e3ec135d98c3`, tracker-accounting commit `4095697a6b7256937f535d739ca09678b47e333d`, review-fix commit `6524bdf`, and a clean independent correctness/accounting/security re-review after `6524bdf` with zero findings.
-- **Current dependency-ready chunk: `07-wire-tool-jobs-lifecycle-and-hmr`.** Chunk 02 is closed by implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4`, tracker-accounting commit `fa4bf06ef24b590a81f883037b940f18d97c5cfc`, review-fix commit `7671499`, focused clean-generated-state verification, and clean independent package/accounting re-reviews. Chunk 03 is closed by implementation commits `9b18630` and `e22d99a`, tracker-accounting commit `99babc5dc3432be7c078fd6e792c97164ebfb19b`, review-fix commit `5e990acb1df3bcf8b7e2612c91f38443d364d2db`, passing post-fix frozen-install/typecheck/3-file-54-test/build/pack gates, and a clean independent correctness/security/accounting re-review. Chunk 04 is closed by implementation commit `cfc2e45366961c10b97b6fab63ffea9abfb3b5dd`, tracker-accounting commit `a1fca4c61fbf241b716a8e423a12788d16e3c71d`, review-fix commits `c9ba821923cd233c8c3112a7b3cdd2b8d311ec36`, `5ada9cd`, and `e7fb2e6`, passing final typecheck/4-file-79-test/build gates, completed correctness/security/concurrency/accounting reviews, a frozen tracker API, and a clean final re-review. Chunk 05 is closed by its recorded implementation/review-fix commits, final clean Git/evaluator/security/tracker-concurrency reviews, and final tracker/accounting commit `89f50fba279e8c2156394763f1357bd9377996b7`. Chunk 06 is closed through final fix `e613e549e0fb4f40f0921ecd585c25d2dd6a9a03`, passing final typecheck/9-file-229-test/build gates, clean independent controller/recovery/security/accounting reviews, post-`3e9e44c57c94ad9fcbff411d0cec485a580e9832` accounting commit `bc09f43278c2ecc41acde60d3b2cd204d5eff466`, and zero unresolved Chunk 06 findings. Chunk 07 is current and dependency-ready; all Chunk 07 implementation and gate items remain unchecked.
+- **Current dependency-ready chunk: `08-add-real-dsh-composition-and-recovery-tests`.** Chunk 02 is closed by implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4`, tracker-accounting commit `fa4bf06ef24b590a81f883037b940f18d97c5cfc`, review-fix commit `7671499`, focused clean-generated-state verification, and clean independent package/accounting re-reviews. Chunk 03 is closed by implementation commits `9b18630` and `e22d99a`, tracker-accounting commit `99babc5dc3432be7c078fd6e792c97164ebfb19b`, review-fix commit `5e990acb1df3bcf8b7e2612c91f38443d364d2db`, passing post-fix frozen-install/typecheck/3-file-54-test/build/pack gates, and a clean independent correctness/security/accounting re-review. Chunk 04 is closed by implementation commit `cfc2e45366961c10b97b6fab63ffea9abfb3b5dd`, tracker-accounting commit `a1fca4c61fbf241b716a8e423a12788d16e3c71d`, review-fix commits `c9ba821923cd233c8c3112a7b3cdd2b8d311ec36`, `5ada9cd`, and `e7fb2e6`, passing final typecheck/4-file-79-test/build gates, completed correctness/security/concurrency/accounting reviews, a frozen tracker API, and a clean final re-review. Chunk 05 is closed by its recorded implementation/review-fix commits, final clean Git/evaluator/security/tracker-concurrency reviews, and final tracker/accounting commit `89f50fba279e8c2156394763f1357bd9377996b7`. Chunk 06 is closed through final fix `e613e549e0fb4f40f0921ecd585c25d2dd6a9a03`, passing final typecheck/9-file-229-test/build gates, clean independent controller/recovery/security/accounting reviews, post-`3e9e44c57c94ad9fcbff411d0cec485a580e9832` accounting commit `bc09f43278c2ecc41acde60d3b2cd204d5eff466`, and zero unresolved Chunk 06 findings. Chunk 07 is closed by production cutover commit `952267ba41689cf21c63092e37cb61c34ccd5e61`, lifecycle hardening commit `8b17077feaf3f9458120d1b2acf4ec6978000733`, durable startup completion commit `7a66971a5f01e8b0fd50abe807b6e9bc7037690e`, accounting commit `19edce27785f016a02614fe9b3d447343d1ecac7`, passing final verification, and a clean final independent implementation/security/accounting review. Chunk 08 is current and dependency-ready; all real composition items remain unchecked, and Chunk 09 README/documentation items remain unchecked.
 
 ## Established research and planning state
 
@@ -604,7 +604,7 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 - [x] Record post-`3e9e44c57c94ad9fcbff411d0cec485a580e9832` accounting commit `bc09f43278c2ecc41acde60d3b2cd204d5eff466` as complete and separate from implementation, review-fix, test, closure-fix, validation, and prior accounting commits.
 - [x] Record Chunk 06 closure-accounting commit `99a03707559c2d5fc02903dd215792e56848eb31` (`docs: close recoverable controller chunk`) as complete and separate from implementation, review-fix, test, validation, and prior accounting commits.
 
-# Chunk 07 — `07-wire-tool-jobs-lifecycle-and-hmr`
+# Chunk 07 — `07-wire-tool-jobs-lifecycle-and-hmr` (CLOSED)
 
 ## Plugin wiring (`src/index.ts`)
 
@@ -637,7 +637,7 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 - [x] Implement synchronous/idempotent job cancellation hook.
 - [x] Sever background lifetime from the outer tool call's `exec.signal` before releasing deferred controller execution.
 - [x] Pass the job-owned controller signal to `AutoresearchRunController`, child Agent cancellation, evaluator subprocesses, and Git subprocesses.
-- [ ] Persist cancellation intent before aborting resources.
+- [x] Persist cancellation intent before aborting resources.
 - [x] Await `AgentHandle.dispose()`, entire owned process-tree termination, and worktree reconciliation.
 - [x] Atomically persist terminal cancellation/quiescent facts without deleting evidence.
 - [x] Release repository/run-tag active lock only after terminal persistence, as the final idempotent operation.
@@ -697,8 +697,8 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 - [x] Record Chunk 07 implementation commit full SHA: `952267ba41689cf21c63092e37cb61c34ccd5e61`.
 - [x] Record separate Chunk 07 checklist-accounting commit `a0cbd7d1b819155b9debdc0ddc0e57b7951633a5` (`docs: record production cutover verification`) as complete and separate from implementation commit `952267ba41689cf21c63092e37cb61c34ccd5e61`.
 - [x] Record final post-`7a66971a5f01e8b0fd50abe807b6e9bc7037690e` verification: `pnpm run typecheck` passed; Vitest passed 8 files / 243 tests; `pnpm run build` passed; `pnpm pack` passed; built-root runtime export inspection returned exactly `Config,apply,inject,name`.
-- [ ] Complete the final independent Chunk 07 correctness/accounting review and close Chunk 07.
-- [ ] Commit this post-`7a66971a5f01e8b0fd50abe807b6e9bc7037690e` checklist accounting update separately.
+- [x] Complete the final independent Chunk 07 implementation, security, and accounting review; clean with zero findings, and close Chunk 07.
+- [x] Record separate Chunk 07 accounting commit `19edce27785f016a02614fe9b3d447343d1ecac7` as complete after durable startup commit `7a66971a5f01e8b0fd50abe807b6e9bc7037690e`.
 
 # Chunk 08 — `08-add-real-dsh-composition-and-recovery-tests`
 
