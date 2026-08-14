@@ -474,7 +474,7 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 - [x] During `setup(childCtx)`, compose the required parent preset/policy surface before publication.
 - [x] During the same setup window, register an autoresearch-only schema-validating report tool in the child scope.
 - [x] Register a matching child-scoped system-prompt section that requires exactly one report-tool submission.
-- [ ] Document in code/tests that `SubagentStartRequest` is unsuitable because it has no per-run cwd/session-meta hook, `agentOptions` cannot carry cwd, and prompt paths do not create isolation.
+- [x] Document in code/tests that `SubagentStartRequest` is unsuitable because it has no per-run cwd/session-meta hook, `agentOptions` cannot carry cwd, and prompt paths do not create isolation.
 - [x] Bound handoff size and report size.
 - [x] Supply immutable objective/policy, experiment number, best measured facts, bounded prior summary, and tracker-derived workspace facts.
 - [x] Instruct the child to inspect/edit only the isolated worktree represented by its durable cwd.
@@ -538,7 +538,7 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 - [x] Recompute target satisfaction after accepted result.
 - [x] Persist terminal experiment before next proposal.
 - [x] Stop at experiment budget.
-- [ ] Surface a host-proven post-baseline blocker separately; child blocker claims remain non-authoritative and the controller path is not yet implemented/evidenced.
+- [x] Surface a host-proven post-baseline blocker separately; child blocker claims remain non-authoritative, while proposal disposal/quiescence uncertainty transitions the run to host-authored `blocked` / `attempt-uncertain` without releasing ownership.
 - [x] Surface infrastructure/contract failure as `round-failed`.
 - [x] Handle cancellation at a quiescent durable boundary.
 - [ ] Chunk 07 clean-cutover dependency: remove `ctx.workflowEngine` production orchestration.
@@ -551,23 +551,23 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 - [x] Persist terminal/quiescent run facts, completed Git reconciliation, and artifact references before active-lock release; make release the controller's final idempotent repository action.
 
 ## Chunk 06 verification gate
-- [x] Record final post-fix Chunk 06 verification after review-fix commit `2e45cbc7d04a558d8b55b4ef863a5aad083dc05c`: `pnpm run typecheck` passed; Vitest passed 9 files / 219 tests; `pnpm run build` passed. This supersedes the prior 9 files / 214 tests and earlier stale evidence. Independent final review and closure remain unchecked.
+- [x] Record final post-test Chunk 06 verification after test commit `aeafc7458b7c7697fc62501f1dd06ed7c62f6e46`: `pnpm run typecheck` passed; Vitest passed 9 files / 223 tests; `pnpm run build` passed. This supersedes the verification recorded after `afd2621fbb95ddc10d7ba3c3b15e76699cb59008`. Independent final review and closure remain unchecked.
 
 - [x] Test baseline-target shortcut spawns no child.
 - [x] Test strict accepted improvement.
 - [x] Test equal metric rejection.
 - [x] Test regression rejection.
-- [ ] Test evaluator crash with proven prior whole-process-tree quiescence can safely rerun once.
+- [x] Test evaluator crash with proven prior whole-process-tree quiescence can safely rerun once.
 - [x] Test evaluator timeout.
 - [x] Test restart where only parent death is known becomes `blocked`, never signals the PID, and never duplicates execution while descendant survival is uncertain.
 - [x] Test policy violation.
 - [x] Test child blocker cannot self-authorize terminal status.
-- [ ] Test child metric/status/command/Git fields cannot spoof authority.
+- [x] Test child metric/status/command/Git fields cannot spoof authority: the closed report schema rejects every undeclared authority-bearing field, with an injected metric field covered as the representative schema rejection.
 - [x] Test fresh `SessionId`, durable worktree `meta.cwd`, parent/delegation metadata, and explicit inherited provider/model/optional `maxTokens` on every child.
 - [x] Test child-scoped report tool/prompt registration, exact schema validation, and rejection of missing/duplicate/malformed/stale/wrong-experiment/oversized reports.
-- [ ] Test `AgentHandle.dispose()` is awaited exactly once/idempotently for success, report failure, cancellation, controller failure, and unload.
-- [ ] Test proposal Agent/tool/process/job quiescence and exclusive worktree ownership; a scheduled late writer cannot mutate after disposal or overlap evaluator spawn.
-- [ ] Test exact start/candidate commit handoff, absence of hidden ignored/untracked inputs, and pre/post string-cwd/file identity substitution detection without claiming hostile same-UID race prevention.
+- [x] Test `AgentHandle.dispose()` is awaited exactly once/idempotently for success, report failure, cancellation, controller failure, and unload.
+- [x] Test proposal Agent/tool/process/job quiescence and exclusive worktree ownership; a scheduled late writer cannot mutate after disposal or overlap evaluator spawn.
+- [x] Test exact start/candidate commit handoff, absence of hidden ignored/untracked inputs, and pre/post string-cwd/file identity substitution detection without claiming hostile same-UID race prevention.
 - [x] Test every baseline success/blocking outcome, durable artifacts, zero-child target shortcut, and no candidate-budget consumption.
 - [x] Test terminal experiment persistence before the next child and terminal/quiescent run persistence before final lock release, including initialization and crash-window retry ordering.
 - [x] Test target behavior for minimize/maximize.
@@ -588,14 +588,15 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 
 - [x] Integrate proposal/recovery lanes into controller.
 - [ ] Confirm all prior callers migrate to the controller clean cutover in Chunk 07; legacy workflow/tool wiring remains live and assigned to Chunk 07.
-- [x] Commit recoverable controller and focused tests in foundation commit `ca184254e3681fea00cbf53ec4d377c9803928a0`, proposal/recovery commit `b690a56f7df0b97dd5fb03d32201b8a933928718`, controller commit `99b7aa12a7036b5f8cf10c634a455779141d956f`, review-fix commit `b1a0e1b0cf9825d19ddbbed246a9ff790fdf410e`, recovery-matrix test commit `e28d78ad2edeb7158370b568539e27d6fecadc85`, and final review-fix commit `2e45cbc7d04a558d8b55b4ef863a5aad083dc05c`.
+- [x] Commit recoverable controller and focused tests in foundation commit `ca184254e3681fea00cbf53ec4d377c9803928a0`, proposal/recovery commit `b690a56f7df0b97dd5fb03d32201b8a933928718`, controller commit `99b7aa12a7036b5f8cf10c634a455779141d956f`, review-fix commit `b1a0e1b0cf9825d19ddbbed246a9ff790fdf410e`, recovery-matrix test commit `e28d78ad2edeb7158370b568539e27d6fecadc85`, final review-fix commit `2e45cbc7d04a558d8b55b4ef863a5aad083dc05c`, ownership-retention review-fix commit `afd2621fbb95ddc10d7ba3c3b15e76699cb59008`, and final quiescence/disposal test commit `aeafc7458b7c7697fc62501f1dd06ed7c62f6e46`.
 
 ## Chunk 06 tracker-accounting gate
 
-- [x] Record Chunk 06 implementation commits: `ca184254e3681fea00cbf53ec4d377c9803928a0`, `b690a56f7df0b97dd5fb03d32201b8a933928718`, and `99b7aa12a7036b5f8cf10c634a455779141d956f`; review-fix commits: `b1a0e1b0cf9825d19ddbbed246a9ff790fdf410e` and `2e45cbc7d04a558d8b55b4ef863a5aad083dc05c`; and recovery-matrix test commit: `e28d78ad2edeb7158370b568539e27d6fecadc85`.
-- [x] Record the prior Chunk 06 checklist accounting commits separately from implementation and review-fix work: `9215f6a` and `16f97d06627a72281db8ec39bd116ffebc597512`.
+- [x] Record Chunk 06 implementation commits: `ca184254e3681fea00cbf53ec4d377c9803928a0`, `b690a56f7df0b97dd5fb03d32201b8a933928718`, and `99b7aa12a7036b5f8cf10c634a455779141d956f`; review-fix commits: `b1a0e1b0cf9825d19ddbbed246a9ff790fdf410e`, `2e45cbc7d04a558d8b55b4ef863a5aad083dc05c`, and `afd2621fbb95ddc10d7ba3c3b15e76699cb59008`; recovery-matrix test commit: `e28d78ad2edeb7158370b568539e27d6fecadc85`; and final quiescence/disposal test commit: `aeafc7458b7c7697fc62501f1dd06ed7c62f6e46`.
+- [x] Record the earlier Chunk 06 checklist accounting commits separately from implementation and review-fix work: `9215f6a` and `16f97d06627a72281db8ec39bd116ffebc597512`.
+- [x] Record prior final-controller-recovery checklist accounting commit `a3db166c488596056d786de2697364dd6bc83377` as a separate accounting-only commit.
 - [ ] Complete the independent final Chunk 06 review and closure.
-- [ ] Commit this new post-`2e45cbc7d04a558d8b55b4ef863a5aad083dc05c` Chunk 06 checklist accounting update separately from the implementation, review-fix, test, and prior accounting commits.
+- [ ] Commit this new post-`aeafc7458b7c7697fc62501f1dd06ed7c62f6e46` Chunk 06 checklist accounting update separately from the implementation, review-fix, test, and prior accounting commits.
 
 # Chunk 07 — `07-wire-tool-jobs-lifecycle-and-hmr`
 
