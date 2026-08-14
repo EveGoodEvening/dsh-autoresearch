@@ -106,14 +106,14 @@ describe('durable SQLite tracker', () => {
     const malformedPath = fixturePath('malformed.sqlite'); const malformed = new DatabaseSync(malformedPath); malformed.exec(`CREATE TABLE schema_metadata (singleton INTEGER PRIMARY KEY, version INTEGER NOT NULL, created_at TEXT NOT NULL) STRICT; INSERT INTO schema_metadata VALUES (1, ${TRACKER_SCHEMA_VERSION}, 'now')`); malformed.close(); chmodSync(malformedPath, 0o600); expectBlocked(malformedPath, 'tracker-schema-invalid')
   })
 
-  it('serializes competing opens while migrating an old schema', async () => {
+  it('eventually converges competing opens while migrating an old schema', async () => {
     const path = fixturePath(); const seed = new DatabaseSync(path)
     seed.exec("CREATE TABLE schema_metadata (singleton INTEGER PRIMARY KEY, version INTEGER NOT NULL, created_at TEXT NOT NULL) STRICT; INSERT INTO schema_metadata VALUES (1, 0, 'now')")
     seed.close(); chmodSync(path, 0o600)
     const barrier = new SharedArrayBuffer(8)
-    const opens = [trackerWorker('open', { path }, barrier), trackerWorker('open', { path }, barrier)]
+    const opens = Array.from({ length: 4 }, () => trackerWorker('open', { path }, barrier))
     await releaseWorkers(barrier, opens.length)
-    expect(await Promise.all(opens)).toEqual([{ ok: true, version: TRACKER_SCHEMA_VERSION }, { ok: true, version: TRACKER_SCHEMA_VERSION }])
+    expect(await Promise.all(opens)).toEqual(Array.from({ length: opens.length }, () => ({ ok: true, version: TRACKER_SCHEMA_VERSION })))
     const inspect = new DatabaseSync(path, { readOnly: true })
     expect(inspect.prepare('SELECT version FROM schema_metadata').get()).toEqual({ version: TRACKER_SCHEMA_VERSION }); inspect.close()
   }, 15_000)

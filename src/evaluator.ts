@@ -4,7 +4,7 @@ import { constants } from 'node:fs'
 import { isAbsolute, relative, resolve, sep } from 'node:path'
 import type { SubprocessHandle, SubprocessOutcome, SubprocessOutputRead, SubprocessSpawnSpec } from '@deepseek-ai/dsh-subprocess'
 import type { EvaluatorArgv } from './types.ts'
-import { EvaluatorArtifactWriter, type EvaluatorArtifactRecord } from './evaluator-artifacts.js'
+import { EvaluatorArtifactWriter, normalizeRedactionSecrets, type EvaluatorArtifactRecord } from './evaluator-artifacts.js'
 
 export const EVALUATOR_PARSER_VERSION = 'final-line-json-v1' as const
 
@@ -188,7 +188,7 @@ export async function runEvaluator(options: EvaluatorRunOptions): Promise<Evalua
   validatePositive(options.maxStderrBytes, 'maxStderrBytes')
   const now = options.now ?? (() => new Date())
   const env = explicitEnvironment(options.environment ?? {})
-  const secrets = Object.values(env)
+  const secrets = secretsOf(env)
   const root = assertBoundaryIdentity(options.worktree, options.boundary)
   assertNormalizedEvaluation(options.evaluation, options.boundary.evaluationSha256)
   const cwdIdentity = capturePathIdentity(root, options.evaluation.cwd ?? '.', 'evaluator cwd', true)
@@ -275,7 +275,7 @@ export async function runEvaluator(options: EvaluatorRunOptions): Promise<Evalua
   const facts = deepFreeze(durableSerialize(rawFacts, secrets)) as EvaluatorAttemptFacts
   persistSafely(() => options.persistence.persistAttemptOutcome(facts, artifacts), secrets)
   const base = deepFreeze({ provenanceSha256: provenance.sha256, exit: facts, artifacts })
-  if (spawnFailure !== undefined) return { kind: 'failed', code: 'spawn', message: safeErrorMessage(spawnFailure, Object.values(env)), ...base }
+  if (spawnFailure !== undefined) return { kind: 'failed', code: 'spawn', message: safeErrorMessage(spawnFailure, secrets), ...base }
   if (cause === 'cancelled') return { kind: 'failed', code: 'cancelled', message: 'evaluator cancelled', ...base }
   if (cause === 'timeout') return { kind: 'failed', code: 'timeout', message: 'evaluator timed out', ...base }
   if (!quiescent) return { kind: 'failed', code: 'signal', message: 'evaluator process tree did not become quiescent', ...base }
@@ -283,7 +283,7 @@ export async function runEvaluator(options: EvaluatorRunOptions): Promise<Evalua
   if (outcome.exitCode !== 0) return { kind: 'failed', code: 'exit', message: `evaluator exited with code ${outcome.exitCode}`, ...base }
   if (stdoutRead === undefined || stdoutRead.lossy) return { kind: 'failed', code: 'output-limit', message: 'evaluator stdout exceeded its authoritative parse limit', ...base }
   try { return { kind: 'measured', metric: parseFinalLineMetric(stdoutRead.text, options.metricName), ...base } }
-  catch (error) { return { kind: 'failed', code: 'metric-protocol', message: safeErrorMessage(error, Object.values(env)), ...base } }
+  catch (error) { return { kind: 'failed', code: 'metric-protocol', message: safeErrorMessage(error, secrets), ...base } }
 }
 
 
@@ -401,7 +401,7 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
 
 function sha256(value: string | Uint8Array): string { return createHash('sha256').update(value).digest('hex') }
 function redact(value: string, secrets: readonly string[]): string {
-  return secrets.filter(secret => secret.length > 0).reduce((text, secret) => text.split(secret).join('[REDACTED]'), value)
+  return secrets.reduce((text, secret) => text.split(secret).join('[REDACTED]'), value)
 }
 function safeErrorMessage(error: unknown, secrets: readonly string[]): string {
   return redact(error instanceof Error ? error.message : String(error), secrets)
@@ -438,7 +438,7 @@ function durableSerialize<T>(value: T, secrets: readonly string[], redactKeys = 
 }
 
 function secretsOf(environment: Readonly<Record<string, string>> | undefined): readonly string[] {
-  return Object.values(environment ?? {}).filter(secret => secret.length > 0)
+  return normalizeRedactionSecrets(Object.values(environment ?? {}))
 }
 
 function assignDurableKey<T>(target: Record<string, T>, key: string, value: T, label: string): void {

@@ -43,7 +43,8 @@ export class EvaluatorArtifactWriter {
     if (this.used) throw new TypeError('artifact writer is single-use')
     this.used = true
     this.assertParent()
-    return Object.freeze(([['stdout', stdout], ['stderr', stderr]] as const).map(([kind, output]) => this.writeOne(kind, output, secrets)))
+    const normalizedSecrets = normalizeRedactionSecrets(secrets)
+    return Object.freeze(([['stdout', stdout], ['stderr', stderr]] as const).map(([kind, output]) => this.writeOne(kind, output, normalizedSecrets)))
   }
 
   private writeOne(kind: 'stdout' | 'stderr', output: SubprocessOutputRead | undefined, secrets: readonly string[]): EvaluatorArtifactRecord {
@@ -89,8 +90,12 @@ function readSpill(path: string): string {
   } finally { closeSync(fd) }
 }
 
+export function normalizeRedactionSecrets(secrets: readonly string[]): readonly string[] {
+  return Object.freeze([...new Set(secrets.filter(secret => secret.length > 0))].sort((left, right) => right.length - left.length || left.localeCompare(right)))
+}
+
 function redact(value: string, secrets: readonly string[]): string {
-  return secrets.filter(secret => secret.length > 0).reduce((text, secret) => text.split(secret).join('[REDACTED]'), value)
+  return secrets.reduce((text, secret) => text.split(secret).join('[REDACTED]'), value)
 }
 
 function hash(value: Uint8Array): string { return createHash('sha256').update(value).digest('hex') }

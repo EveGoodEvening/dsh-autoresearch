@@ -7,6 +7,7 @@ import type { ExperimentDurableState, RunDurableState } from './types.js'
 
 export const TRACKER_SCHEMA_VERSION = 3
 export const TRACKER_BUSY_TIMEOUT_MS = 5_000
+const TRACKER_RETRY_WAIT = new Int32Array(new SharedArrayBuffer(4))
 
 const RUN_TERMINAL: Readonly<Record<RunDurableState, boolean>> = {
   initializing: false, 'baseline-running': false, ready: false, 'candidate-prepared': false, 'candidate-running': false, deciding: false,
@@ -73,18 +74,29 @@ export class DurableTracker {
 
   static open(path: string): DurableTracker {
     const layout = StateLayout.open(dirname(path)); const safePath = layout.assertContained(path)
-    let database: DatabaseSync | undefined
-    try {
-      database = new DatabaseSync(safePath, { enableForeignKeyConstraints: true, enableDoubleQuotedStringLiterals: false, timeout: TRACKER_BUSY_TIMEOUT_MS })
-      chmodSync(safePath, 0o600)
-      const tracker = new DurableTracker(safePath, database, layout)
-      tracker.configure(); tracker.migrate(); tracker.validateSchema(); tracker.secureSidecars()
-      return tracker
-    } catch (error) {
-      try { database?.close() } catch { /* preserve original failure */ }
-      if (error instanceof TrackerBlockedError) throw error
-      if (isSqliteBusyOrLocked(error)) throw new TrackerBlockedError('tracker-busy', 'tracker schema is busy after the configured timeout', error)
-      throw new TrackerBlockedError('tracker-schema-invalid', 'tracker is corrupt, malformed, or has an incompatible schema', error)
+    const deadline = Date.now() + TRACKER_BUSY_TIMEOUT_MS
+    let lastBusyError: unknown
+    let retryDelayMs = 1
+    while (true) {
+      let database: DatabaseSync | undefined
+      try {
+        const remainingMs = Math.max(1, deadline - Date.now())
+        database = new DatabaseSync(safePath, { enableForeignKeyConstraints: true, enableDoubleQuotedStringLiterals: false, timeout: remainingMs })
+        chmodSync(safePath, 0o600)
+        const tracker = new DurableTracker(safePath, database, layout)
+        tracker.configure(remainingMs); tracker.migrate(deadline); tracker.validateSchema(); tracker.secureSidecars()
+        tracker.database.exec(`PRAGMA busy_timeout = ${TRACKER_BUSY_TIMEOUT_MS}`)
+        return tracker
+      } catch (error) {
+        try { database?.close() } catch { /* preserve original failure */ }
+        if (error instanceof TrackerBlockedError) throw error
+        if (!isSqliteBusyOrLocked(error)) throw new TrackerBlockedError('tracker-schema-invalid', 'tracker is corrupt, malformed, or has an incompatible schema', error)
+        lastBusyError = error
+        const remainingMs = deadline - Date.now()
+        if (remainingMs <= 0) throw new TrackerBlockedError('tracker-busy', 'tracker schema is busy after the configured timeout', lastBusyError)
+        sleep(Math.min(retryDelayMs, remainingMs))
+        retryDelayMs = Math.min(retryDelayMs * 2, 50)
+      }
     }
   }
   close(): void { if (!this.closed) { this.database.close(); this.closed = true } }
@@ -200,9 +212,10 @@ export class DurableTracker {
     } catch (error) { try { unlinkSync(temporary) } catch { /* best effort for derived output */ }; throw error }
   }
 
-  private configure(): void { this.database.exec(`PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA busy_timeout = ${TRACKER_BUSY_TIMEOUT_MS};`) }
-  private migrate(): void {
+  private configure(busyTimeoutMs: number): void { this.database.exec(`PRAGMA foreign_keys = ON; PRAGMA busy_timeout = ${busyTimeoutMs}; PRAGMA journal_mode = WAL;`) }
+  private migrate(deadline: number): void {
     while (true) {
+      this.database.exec(`PRAGMA busy_timeout = ${Math.max(1, deadline - Date.now())}`)
       const done = this.transaction(() => {
         const metadata = this.database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='schema_metadata'").get()
         if (!metadata) {
@@ -290,6 +303,7 @@ function isSqliteBusyOrLocked(error: unknown): boolean {
   const numericCode = typeof sqliteError.errcode === 'number' ? sqliteError.errcode : typeof sqliteError.code === 'number' ? sqliteError.code : undefined
   return numericCode !== undefined && ((numericCode & 0xff) === 5 || (numericCode & 0xff) === 6)
 }
+function sleep(milliseconds: number): void { Atomics.wait(TRACKER_RETRY_WAIT, 0, 0, milliseconds) }
 function canonicalJson(value: unknown): string { return JSON.stringify(sortJson(value)) }
 function sortJson(value: unknown): unknown { if (Array.isArray(value)) return value.map(sortJson); if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, item]) => [key, sortJson(item)])); if (typeof value === 'number' && !Number.isFinite(value)) throw new TypeError('tracker JSON snapshots require finite numbers'); if (value === undefined || typeof value === 'bigint' || typeof value === 'function' || typeof value === 'symbol') throw new TypeError('tracker snapshots must be JSON values'); return value }
 function redactEnvironment(value: unknown): unknown { if (Array.isArray(value)) return value.map(redactEnvironment); if (!value || typeof value !== 'object') return value; return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, key.toLowerCase() === 'environment' && item && typeof item === 'object' && !Array.isArray(item) ? Object.fromEntries(Object.entries(item).map(([name, secret]) => [name, { sha256: createHash('sha256').update(String(secret)).digest('hex') }])) : redactEnvironment(item)])) }

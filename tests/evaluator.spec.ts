@@ -221,6 +221,38 @@ describe('host-owned evaluator execution', () => {
     expect(JSON.stringify(failing.value.persistence.outcome)).not.toContain(secret)
   })
 
+  it('redacts overlapping secrets longest-first across provenance, artifacts, and persisted failures', async () => {
+    const environment = { SHORT: 'abc', LONG: 'abcdef', EMPTY: '', DUPLICATE: 'abc' }
+    const paths = fixture()
+    const frozen = freezeEvaluatorProvenance(paths.root, {
+      evaluation: { command: 'node', args: ['value-abcdef'], cwd: 'bench' },
+      dataset: { 'key-abcdef': 'value-abcdef' },
+      environment,
+      metricName: 'score',
+      metricDirection: 'minimize',
+      policy: { 'policy-abcdef': 'value-abcdef' },
+    })
+    const provenance = JSON.parse(frozen.canonical) as { evaluation: { args: string[] }; dataset: Record<string, string> }
+    expect(provenance.evaluation.args).toEqual(['value-[REDACTED]'])
+    expect(provenance.dataset).toEqual({ 'key-[REDACTED]': 'value-[REDACTED]' })
+    expect(frozen.canonical).not.toContain('[REDACTED]def')
+
+    const runtime = fakeRuntime({ stdout: reader('artifact abcdef abc\n{"score":2}\n'), stderr: reader('error abcdef abc\n') })
+    const measured = options(runtime, { environment })
+    const result = await runEvaluator(measured.value)
+    const artifactText = result.artifacts.map(item => readFileSync(measured.value.artifactWriter.internalPath(item.kind), 'utf8')).join('\n')
+    expect(artifactText).toContain('artifact [REDACTED] [REDACTED]')
+    expect(artifactText).not.toContain('[REDACTED]def')
+    expect(JSON.stringify(result)).not.toContain('[REDACTED]def')
+
+    const failing = options(fakeRuntime({ spawnError: new Error('cannot launch abcdef abc') }), { environment })
+    const failure = await runEvaluator(failing.value)
+    expect(failure).toMatchObject({ kind: 'failed', message: 'cannot launch [REDACTED] [REDACTED]' })
+    expect(failing.value.persistence.outcome?.[0]).toMatchObject({ failureMessage: 'cannot launch [REDACTED] [REDACTED]' })
+    expect(JSON.stringify(failing.value.persistence.intent)).not.toContain('[REDACTED]def')
+    expect(JSON.stringify(failing.value.persistence.outcome)).not.toContain('[REDACTED]def')
+  })
+
   it('hashes argv, files, dataset, environment, parser, metric, direction, and policy deterministically', () => {
     const paths = fixture()
     const first = freezeEvaluatorProvenance(paths.root, { evaluation: { command: 'node', args: ['x'], cwd: 'bench' }, evaluatorFiles: ['bench/evaluate.mjs'], dataset: { z: '2', a: '1' }, environment: { B: '2', A: '1' }, metricName: 'score', metricDirection: 'maximize', policy: { tie: 'reject' } })
