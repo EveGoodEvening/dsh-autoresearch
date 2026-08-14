@@ -1,171 +1,319 @@
 # dsh-autoresearch
 
-面向 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的指标驱动自主研究插件。它把 Karpathy `autoresearch` 的实验循环实现为普通 Cordis Plugin，不修改 `agent-loop`：
+`dsh-autoresearch` is an opt-in DeepSeek Harness bundle for bounded, metric-driven software optimization. It generalizes the loop popularized by Karpathy's autoresearch:
 
-- `ctx.workflowEngine` 运行固定编排脚本；
-- `ctx.subagents` 为每次实验启动一个全新 agent；
-- 共享 Git 工作区和未提交的 TSV 结果表承担跨实验长期记忆；
-- `ctx.jobs` 默认把整轮研究作为后台任务运行；
-- `job_list`、`job_output`、`job_kill` 继续负责通用后台任务观察和停止。
+1. freeze the objective, evaluator, metric, constraints, provenance, environment, and mutable scope;
+2. measure the unmodified baseline;
+3. ask a fresh child Agent to propose one narrowly scoped candidate;
+4. commit and evaluate that candidate in a dedicated Git worktree;
+5. keep it only when its scalar metric is strictly better, otherwise return to the accepted commit;
+6. persist every decision and its evidence before continuing.
 
-## 原理
+The authority is trusted host code, not a prompt. `AutoresearchRunController` owns the run state machine, Git boundary, evaluator subprocess, metric decision, SQLite tracker, artifacts, cancellation, and recovery. The model proposes edits through a restricted child composition; it does not decide whether its candidate is accepted. This package does not modify AgentLoop and contains no workflow engine.
 
-Karpathy `autoresearch` 的核心不是某个训练脚本，而是一个受控的自动优化协议：
+## Installation and profile composition
 
-1. **缩小可变面**：只允许修改明确列出的文件；数据、评估和约束保持固定。
-2. **固定评估预算**：每个候选运行同一条命令，并受同一个墙钟超时限制。
-3. **单一可比较指标**：每次实验都产出一个标量，明确 `minimize` 或 `maximize`。
-4. **先跑基线**：第一轮不改代码，只建立当前提交的可复现实测值。
-5. **Git 作为事务边界**：候选先提交再评估；严格改善才保留，否则回退到最佳提交。
-6. **结果表作为研究记忆**：每轮把实验号、提交、指标、状态和说明写入未提交 TSV。
-7. **持续迭代**：在目标指标、实验上限或真实阻塞条件出现前，不向人类请求逐轮确认。
-
-本插件保留这些约束，同时采用 dsh 已有的工作流、subagent 和 jobs 插件完成编排。
-
-## 与原版的差异
-
-原版让同一个 agent 长时间循环。本插件每个实验使用新的 child agent，只传递有界结构化报告；Git 工作区和 TSV 才是权威状态。这样可避免长会话上下文持续膨胀，并迫使每轮重新核对实际分支、HEAD、结果表和允许修改的文件。
-
-插件仍然是提示词约束的研究执行器，不是文件系统安全边界。真正的不可信代码需要另外组合容器、远程 sandbox 或更严格的 `fs`/`shell` provider。
-
-## 安装
-
-当前实现面向 `deepseek-harness` 源码中的 `0.1.0-rc.5` API。安装到已有 profile：
+Install the published package or a packed tarball into a named profile:
 
 ```bash
-dsh plugin --profile web add /path/to/dsh-autoresearch
-dsh --profile web --dump-config
+dsh plugin --profile <name> add <tarball-or-package>
+dsh --profile <name> --dump-config
 ```
 
-源码开发时，先构建：
+For example:
 
 ```bash
-pnpm install
-pnpm run build
+dsh plugin --profile research add ./dsh-autoresearch-0.1.0.tgz
+dsh --profile research --dump-config
 ```
 
-从 Git 地址安装会执行 `prepare` 构建脚本；pnpm 10+ 需要用户显式允许该包的安装时构建。发布 npm 包或 tarball 时应预先包含 `lib/`，避免安装时构建权限。
+Installation is opt-in: a base or unrelated profile does not load autoresearch. The bundle's stable `cordis.patch.yml` row has `id: autoresearch`, `name: dsh-autoresearch`, and a complete configuration object. Confirm that the dumped profile contains that row.
 
-## 使用
+The installed profile must also provide:
 
-先保证项目本身满足以下条件：
+- the core `agents` registry/runtime with child setup support (`ctx.agents.create`); no separate subagent provider is used;
+- the `jobs` registry and `dsh-tool-jobs`, which expose `job_list`, `job_output`, and `job_kill`;
+- a `subprocess` provider capable of spawning argv directly and proving provider-owned process-tree quiescence;
+- `systemPrompt` and `tools` services;
+- the normal LLM/session services required by the parent Agent.
 
-- 位于 Git 仓库中；
-- 当前工作不会与新研究分支冲突；
-- 评估命令能稳定打印指定标量指标；
-- 评估命令自己不改变受控输入或提交研究日志；
-- `mutable_files` 足够窄，且包含完成实验所需的全部可写源码。
+The plugin declares these seams as Cordis injection dependencies: `agents`, `jobs`, `subprocess`, `systemPrompt`, and `tools`. Injection determines service readiness; YAML row order is not the dependency mechanism. Startup fails explicitly when a required service, child runtime, job registry, or generic job tool composition is missing.
 
-然后直接明确要求 dsh 启动 autoresearch，例如：
+Cordis patch overrides are whole-row replacements, not deep merges. If a profile replaces the `autoresearch` row or its `config`, repeat every field you intend to preserve.
+
+## Deployment configuration
+
+All sizes and times are positive integers. Unknown keys are rejected. The shipped patch repeats all independent defaults because a profile override replaces the whole config.
+
+| Field | Default | Meaning and limit |
+|---|---:|---|
+| `provider` | unset | Optional child Agent provider route. |
+| `model` | unset | Optional child Agent model override. |
+| `maxTokens` | unset | Optional positive child Agent token cap. |
+| `subagentProvider` | unset/ignored | Accepted only for clean migration from early 0.1.0 configuration; runtime composition uses `ctx.agents`, not a subagent service. Do not set it in new profiles. |
+| `gitExecutable` | `git` | Bare executable name or absolute Git path resolved by the subprocess provider. |
+| `stateRoot` | `dsh-autoresearch` | Safe relative directory beneath the repository Git common directory. |
+| `branchPrefix` | `autoresearch/` | Valid Git prefix ending in `/`. |
+| `resultsFile` | unset/ignored | Accepted legacy configuration only; authoritative exports use the state-root layout below. Do not set it in new profiles. |
+| `defaultMaxExperiments` | `20` | Candidate cap when the tool omits `max_experiments`; must not exceed `maxExperiments`. The baseline is separate. |
+| `maxExperiments` | `100` | Deployment maximum for a run's candidate experiments. |
+| `maxHandoffChars` | `16384` | Maximum serialized child proposal/report handoff. |
+| `maxResultChars` | `16384` | Maximum serialized canonical run result accepted from durable state. |
+| `maxStdoutBytes` | `1048576` | Authoritative evaluator stdout capture/parse limit. Overflow fails the attempt. |
+| `maxStderrBytes` | `1048576` | Evaluator stderr capture limit. |
+| `defaultTimeoutMs` | `900000` | Per-attempt wall-clock timeout when omitted; must not exceed `maxTimeoutMs`. |
+| `maxTimeoutMs` | `3600000` | Deployment maximum per-attempt timeout. |
+| `terminationGraceMs` | `5000` | Grace supplied to subprocess termination before escalation. |
+| `maxActiveRunsPerRepository` | `1` | Durable concurrent-run lock limit per repository identity. |
+| `artifactRetentionDays` | `30` | Declared artifact-retention policy horizon. Automatic age-based deletion is not currently performed; cleanup is explicit. |
+| `retainFailedArtifacts` | `true` | Declared failed-artifact retention policy. Current controller preserves failure evidence. |
+| `retainWorktrees` | `true` | Preserve run worktrees by default. |
+| `cleanupWorktreesOnSuccess` | `false` | Remove a safely terminal, quiescent worktree only when true and `retainWorktrees` is false; those two flags cannot both be true. |
+| `exportTsv` | `true` | Atomically write the deterministic compatibility TSV at terminalization. |
+| `tsvRetentionDays` | `30` | Declared TSV retention horizon. Automatic age-based deletion is not currently performed. |
+
+## Tool input
+
+`autoresearch` accepts one exact object; nested evaluator, allowlist, and provenance objects reject unknown keys.
+
+| Field | Required/default | Schema and policy |
+|---|---|---|
+| `repository` | initiating Agent cwd | Normalized repository path or cwd. Discovery is read-only before tracker creation or mutating setup. |
+| `run_tag` | exactly one of this or `resume_run_id` | Lower-case Git-safe text matching `[a-z0-9][a-z0-9._-]*`, without `..` or a trailing dot. |
+| `resume_run_id` | exactly one of this or `run_tag` | Existing durable run UUID/id. Resume reuses its immutable stored tag, branch, and worktree identity. |
+| `objective` | required | Normalized non-empty immutable optimization objective. |
+| `constraints` | `[]` | Immutable normalized text constraints. |
+| `mutable_globs` | required, non-empty | Deduplicated safe relative paths/globs; no absolute path or parent traversal. |
+| `exceptional_allowlists` | all lists `[]` | Exact object with `dependencies`, `evaluators`, `datasets`, `submodules`, and `gitConfig`, each an array of safe relative paths. Exceptions are explicit policy, not automatic trust. |
+| `evaluation` | required | Exact shell-free object `{ command: string, args: string[], cwd?: safe-relative-path }`. Empty argv elements are allowed; no shell command string is interpreted. |
+| `metric_name` | required | Scalar JSON key matching `[A-Za-z_][A-Za-z0-9_.-]*`. |
+| `metric_direction` | required | `minimize` or `maximize`. |
+| `timeout_ms` | `defaultTimeoutMs` | Positive integer no greater than `maxTimeoutMs`. |
+| `max_experiments` | `defaultMaxExperiments` | Positive integer no greater than `maxExperiments`; excludes baseline. |
+| `target` | unset | Optional finite stopping threshold. |
+| `provenance` | `{}` | Exact object with optional normalized `evaluator` and `dataset` labels. |
+| `environment` | `{}` | Explicit evaluator overrides. Keys match shell environment identifiers; values are NUL-free strings. Values are hashed/redacted in durable evidence. |
+| `mode` | `background` | `background` or `foreground`. |
+
+These normalized values are frozen as the run policy. A resume must match the durable policy; changing the objective, scope, evaluator, metric, limits, provenance, or environment is not a continuation of the same run.
+
+### Evaluator and metric protocol
+
+The provider receives argv exactly as `[evaluation.command, ...evaluation.args]`, a contained canonical cwd, an explicit scrubbed environment, no stdin, output caps, timeout, and cancellation signal. The controller captures evaluator and dataset provenance, evaluator-file identities, normalized-policy and evaluator digests, spawn intent, provider PID, spawn time, exit facts, and output artifacts.
+
+A successful evaluator must exit with code 0, without a signal or timeout, and its **last non-empty stdout line** must be one JSON object containing `metric_name` as a finite JSON number. Example:
 
 ```text
-请启动 autoresearch：
-- objective: 在固定 5 分钟训练预算下降低 val_bpb
-- run_tag: aug14-h100
-- mutable_files: [train.py]
-- evaluation_command: uv run train.py
-- metric_name: val_bpb
-- metric_direction: minimize
-- experiment_timeout_minutes: 10
-- max_experiments: 100
-- constraints:
-  - 不修改 prepare.py
-  - 不增加依赖
-  - results TSV 不提交
+training diagnostics may precede the result
+{"val_bpb":1.2345}
 ```
 
-模型会调用 `autoresearch` 工具。默认立即返回 `autoresearch-N` job id；随后可使用：
+Extra text on the final line, missing keys, strings, `null`, `NaN`, infinity, truncated/lossy stdout, nonzero exit, or an unquiesced process tree fails the attempt. Earlier output is evidence only.
+
+For `minimize`, a candidate is accepted only when `candidate < best`; for `maximize`, only when `candidate > best`. Equality is rejected. `target` uses `<=` for minimize and `>=` for maximize.
+
+The baseline is ordinal zero and does not consume the candidate budget. It establishes the first accepted metric and commit. If it cannot produce a valid metric, the run terminates as `baseline-blocked`; candidates never start without an authoritative baseline.
+
+## Controller loop and Git boundary
+
+For a fresh run, the controller:
+
+1. resolves Git and performs read-only repository discovery;
+2. creates the owner-only state root and SQLite tracker;
+3. acquires the durable controller claim and repository run lock;
+4. allocates branch `<branchPrefix><run_tag>-<run_id>` and worktree `<git-common-dir>/<stateRoot>/worktrees/<run_id>`;
+5. records and evaluates the baseline;
+6. creates a fresh child Agent for each candidate with inherited `read`, `write`, `edit`, `glob`, and `grep` tools plus one terminal `autoresearch_report` tool;
+7. verifies the diff, protected paths, Git configuration, submodules, evaluator/dataset identities, and mutable policy; commits the candidate and creates an audit ref;
+8. evaluates in trusted host code, makes the strict metric decision, persists it, and moves the accepted ref/branch as required;
+9. repeats until target, budget, cancellation, failure, or a proven blocker.
+
+The initiating checkout is discovery input only and remains unchanged. All mutation occurs in the dedicated run worktree. Protected defaults include `.git`, `.gitmodules`, package manifests/lockfiles, `cordis.patch.yml`, and Git config; exceptional changes require the corresponding explicit allowlist. Accepted and rejected candidates retain full commit SHAs and per-run audit refs under `refs/autoresearch/runs/<run_id>/accepted` and `refs/autoresearch/runs/<run_id>/candidates/…`.
+
+The branch and worktree include `run_id`, so a retained run never aliases a later run. Reusing the same `run_tag` creates a distinct identity. Cleanup is conservative: worktrees and evidence are retained by default, there is no implicit tag-based deletion, and operators should remove retained artifacts only after audit/recovery needs end. Successful automatic worktree removal requires both `cleanupWorktreesOnSuccess: true` and `retainWorktrees: false` plus a safely terminal, quiescent run.
+
+## State, tracker, artifacts, and TSV
+
+For run `<run_id>`, state lives below:
 
 ```text
-列出后台任务
-读取 autoresearch-N 输出并等待完成
-停止 autoresearch-N，原因是人工中止
+<git-common-dir>/<stateRoot>/
+  runs/<run_id>/tracker.sqlite
+  runs/<run_id>/artifacts/...
+  worktrees/<run_id>/
+  exports/<run_id>.tsv
 ```
 
-需要同步等待时，令工具参数 `run_in_background: false`。
+The owner-controlled state root is a real, non-symlink directory with mode `0700`; tracker and artifact files are mode `0600`. SQLite schema version 4 is authoritative for run identity, immutable policy/provenance digests, transitions, experiments, attempts, spawn facts, outcomes, artifacts, locks, and terminal state. Corrupt, newer, incompatible, or persistently busy trackers produce typed blocking rather than being overwritten.
 
-## Tool 参数
+The TSV is a deterministic, atomically replaced compatibility export ordered by experiment ordinal/id. It contains experiment summaries for inspection and older tooling; it is not recovery authority and must not be edited to influence a run. Artifact references include id, kind, contained location, byte size, and SHA-256. Evaluator stdout/stderr are bounded artifacts, not trusted instructions.
 
-| 参数 | 必需 | 含义 |
-|---|---:|---|
-| `objective` | 是 | 整轮研究不可变的优化目标。 |
-| `run_tag` | 是 | 新分支标签；最终分支为 `<branchPrefix><run_tag>`。只接受小写 Git-safe 文本。 |
-| `mutable_files` | 是 | 实验允许修改的相对文件或 glob；至少一个。 |
-| `evaluation_command` | 是 | 每个基线和候选都必须执行的单行命令。 |
-| `metric_name` | 是 | 从评估输出读取的标量名称。 |
-| `metric_direction` | 是 | `minimize` 或 `maximize`。 |
-| `experiment_timeout_minutes` | 是 | 每次评估的正整数墙钟上限。 |
-| `constraints` | 否 | 额外不可变限制。 |
-| `max_experiments` | 否 | 本次实验数；不得超过部署上限。 |
-| `target_metric` | 否 | 达到后提前结束的指标阈值。 |
-| `run_in_background` | 否 | 默认 `true`；设为 `false` 同步等待。 |
+## Results and job control
 
-## Plugin 配置
+Foreground success returns:
 
-`cordis.patch.yml` 提供以下默认值：
-
-| 配置 | 默认值 | 含义 |
-|---|---:|---|
-| `subagentProvider` | `spawn` | 每轮使用的全新 structured-output provider。 |
-| `maxExperiments` | `100` | 默认实验数，也是单次调用上限。 |
-| `maxHandoffChars` | `16384` | 单轮结构化报告的最大字符数。 |
-| `maxResultChars` | `16384` | 最终模型可见结果的最大字符数。 |
-| `resultsFile` | `autoresearch-results.tsv` | 未提交 TSV 结果表的相对路径。 |
-| `branchPrefix` | `autoresearch/` | 新研究分支前缀。 |
-
-profile 的 `cordis.patch.yml` 可以按 `id: autoresearch` 覆盖整段配置：
-
-```yaml
-- id: autoresearch
-  config:
-    subagentProvider: spawn
-    maxExperiments: 200
-    maxHandoffChars: 16384
-    maxResultChars: 32768
-    resultsFile: research/results.tsv
-    branchPrefix: autoresearch/
+```ts
+{ kind: 'foreground', run: AutoresearchRunResult }
 ```
 
-dsh patch 按行替换整个 `config`，不是深度合并；覆盖时需要重述所有希望保留的字段。
+Background readiness returns only after durable branch/worktree allocation:
 
-## 实验状态
+```ts
+{ kind: 'background', runId, jobId, tracker, branch, worktree }
+```
 
-每个 worker 必须返回以下状态之一：
+Background startup failure returns:
 
-- `baseline`：仅第一轮；指标为数字，候选提交等于最终 HEAD。
-- `keep`：指标严格优于之前最佳值，最终 HEAD 保留候选提交。
-- `discard`：指标未改善，最终 HEAD 已恢复最佳提交。
-- `crash`：评估失败或超时，指标为 `null`，最终 HEAD 已恢复最佳提交。
-- `blocked`：无法安全继续的具体条件；指标为 `null`，不允许用困难、不确定或暂时缺少想法冒充阻塞。
+```ts
+{ kind: 'background-start-failed', jobId, runId?, status: 'failed' | 'cancelled', reason, evidence }
+```
 
-工作流会再次校验这些关系。`keep` 与最佳指标方向不一致、`discard` 没有回退、报告过大或结构错误都会使整轮 workflow 明确失败。
+The canonical `run.status` union is:
 
-## 停止条件
+- `target-reached`: includes `target` and `best`;
+- `budget-limited`: includes `best`;
+- `baseline-blocked`: includes `baselineAttemptId`, `reason`, and evaluator `exit` facts/artifacts;
+- `blocked`: includes the last `best` and structured blocker `evidence`;
+- `round-failed`: includes `reason`, evidence, and optional `best`;
+- `cancelled`: includes `lastState`, `reason`, optional `best`, and literal `quiescent: true`.
 
-一次 run 只会因为以下原因结束：
+Every run result also includes `runId`, tracker path, counts, and artifacts. `best` is `{ metric, commit: <full-40-character-sha>, experimentId }`. Counts are `experimentsStarted`, `experimentsCompleted`, and `attempts`.
 
-- 达到 `target_metric`；
-- 达到 `max_experiments`；
-- worker 报告并证明具体 blocker；
-- child/workflow 基础设施失败；
-- 用户通过 job 或父请求取消。
+Background runs use the generic jobs controls supplied by `dsh-tool-jobs`:
 
-这是有界的“持续研究”，不是无限、不可管理的宿主循环。需要通宵运行时，把 `maxExperiments` 配成符合机器预算的明确上限。
+- `job_list` observes status;
+- `job_output` reads/waits for bounded output and the terminal result;
+- `job_kill` requests cancellation with a reason.
 
-## 已知限制
+Readiness is deferred until durable identity exists. A job is not complete merely because cancellation was requested: the evaluator's entire provider-owned process tree must be quiescent, the child Agent handle must be disposed and absent from the registry with no live child jobs, terminal state/evidence must be persisted, and only then may the run lock be released and the job settle.
 
-- 文件范围、超时命令执行和 Git 操作由 child agent 按固定协议执行；插件会校验结构化结果，但不会独立重跑命令或审计文件 diff。
-- fresh child 的完成、指标和 Git 证据仍是 worker 报告；下一轮会重新检查工作区，但没有独立 evaluator agent。
-- 结果表是进程外长期记忆，但 workflow 本身没有断点恢复；进程退出后应以现有分支和 TSV 启动新的、显式设计的续跑，而不是复用同一 `run_tag`。
-- `workflow-worker-thread` 的 worker/vm 是 API 隔离，不是安全 sandbox。
-- 默认 bundle 依赖 dsh base 已提供 `jobs`、`tool-jobs`、`subagents` 和 `workflowEngine`；裁剪过的自定义 profile 必须自行组合这些服务。
+## Cancellation, interruption, recovery, and blocked states
 
-## 开发验证
+`job_kill`, foreground abort, plugin disposal/HMR, and controller disposal all converge on the controller cancellation path. Cancellation intent is durably checkpointed. The controller terminates and awaits the evaluator through the subprocess provider, disposes the proposal Agent handle, verifies no registered child or nonterminal child job remains, writes the terminal `cancelled` row with `quiescent: true`, exports TSV when enabled, then releases safe locks.
+
+HMR/plugin disposal first unregisters the tool and prompt guidance, cancels every active controller, awaits each controller's disposal, and waits for all active background-job promises. Reload therefore does not intentionally orphan controller work.
+
+Resume with the original `run_id`:
+
+```json
+{
+  "resume_run_id": "<run-id>",
+  "objective": "the original objective",
+  "mutable_globs": ["src/model.ts"],
+  "evaluation": { "command": "node", "args": ["evaluate.mjs"] },
+  "metric_name": "score",
+  "metric_direction": "maximize"
+}
+```
+
+Recovery reconciles the SQLite state, Git HEAD/branch/worktree, accepted and candidate audit refs, experiment/attempt rows, and persisted evaluator facts before taking action. It can finish a fully evidenced attempt, accept/reject or clean up a candidate, continue from a safe state, or return a typed blocker without duplicating a candidate.
+
+A persisted PID is evidence, not post-restart authority. The plugin never signals a recorded PID solely because it still exists: PID reuse and unknown descendants make that unsafe. Safe rerun after interruption requires durable proof that the entire provider-owned evaluator process tree is quiescent. Parent death alone is insufficient. If spawn was observed but terminal process-tree evidence is missing or uncertain, recovery returns `blocked`, retains the lock/evidence as required, does not signal the PID, and does not start a duplicate evaluator. Other reconciliation blockers include ambiguous Git state, missing/mismatched refs or worktree identity, incompatible tracker schema, conflicting controller ownership, policy/provenance mismatch, and nonterminal state without sufficient evidence.
+
+## Complete temporary-repository example
+
+Create a clean repository whose evaluator prints the metric as final-line JSON:
 
 ```bash
+tmp="$(mktemp -d)"
+cd "$tmp"
+git init
+git config user.name 'Autoresearch Example'
+git config user.email 'autoresearch@example.invalid'
+printf 'export const value = 1\n' > candidate.mjs
+cat > evaluate.mjs <<'JS'
+import { value } from './candidate.mjs'
+console.log('diagnostic: deterministic example')
+console.log(JSON.stringify({ score: value }))
+JS
+git add candidate.mjs evaluate.mjs
+git commit -m baseline
+```
+
+Ask the Agent to invoke `autoresearch` with the exact input:
+
+```json
+{
+  "repository": "/absolute/path/to/the/temp/repository",
+  "run_tag": "readme-example",
+  "objective": "maximize score by editing candidate.mjs only",
+  "constraints": ["keep the evaluator deterministic", "do not add dependencies"],
+  "mutable_globs": ["candidate.mjs"],
+  "exceptional_allowlists": {
+    "dependencies": [],
+    "evaluators": [],
+    "datasets": [],
+    "submodules": [],
+    "gitConfig": []
+  },
+  "evaluation": {
+    "command": "node",
+    "args": ["evaluate.mjs"]
+  },
+  "metric_name": "score",
+  "metric_direction": "maximize",
+  "timeout_ms": 900000,
+  "max_experiments": 20,
+  "target": 2,
+  "provenance": {
+    "evaluator": "README deterministic evaluator",
+    "dataset": "none"
+  },
+  "environment": {},
+  "mode": "foreground"
+}
+```
+
+`evaluate.mjs` is protected evaluator input and is intentionally outside `mutable_globs`. In a real run, choose narrow source globs and separately allow only genuinely necessary dependency/evaluator/dataset/submodule/Git-config changes.
+
+## Security model
+
+The trusted Harness host and this controller are policy authority. Child model output, repository content, evaluator stdout/stderr, TSV files, stale PIDs, and retained worktrees are untrusted evidence.
+
+Host enforcement includes shell-free argv, closed/scrubbed Git and evaluator environments, canonical contained paths, symlink/ownership checks for state, immutable policy/provenance hashes, mutable/protected-path validation, Git-config and submodule checks, strict metric parsing/decision, bounded output, timeout/cancellation, process-tree quiescence, durable locks, and transition validation. The child receives only proposal-oriented file tools and one terminal report tool; it does not receive shell/subprocess or generic job control through that child composition.
+
+This is **not an operating-system sandbox**. Repository code and the evaluator execute with the permissions of the configured subprocess provider and may exploit the host, network, credentials, kernel, or tools available to that provider. For untrusted code, compose an external container/VM/remote sandbox and resource/network/credential controls. The plugin's mutable-path policy protects the research protocol and Git result; it cannot replace OS isolation.
+
+## Migration from recovered 0.1.0 behavior
+
+Early 0.1.0 documentation described prompt-driven workflow orchestration, a legacy child-agent service, prompt-enforced keep/discard reports, a mutable in-worktree results file, and restarting by tag. None of those is current authority. Migrate by:
+
+- composing `agents`, `jobs` + `dsh-tool-jobs`, `subprocess`, `systemPrompt`, and `tools`;
+- replacing `evaluation_command` with `{ evaluation: { command, args, cwd? } }`;
+- replacing `mutable_files` with `mutable_globs`;
+- replacing `experiment_timeout_minutes` with bounded `timeout_ms`;
+- using `target`, `mode`, explicit environment/provenance/allowlists, and `resume_run_id`;
+- treating SQLite under the Git common directory as authority and TSV as export only;
+- allowing the host controller, not the child prompt, to commit, evaluate, decide, cancel, and recover.
+
+`subagentProvider` and `resultsFile` remain accepted configuration keys only to make stale profile rows fail less abruptly; they do not restore the old architecture and should be removed when rewriting a profile.
+
+## Troubleshooting and limitations
+
+- **Plugin row absent from `--dump-config`:** install it into the same named profile you booted; installation is opt-in.
+- **Missing `ctx.agents.create`:** add the core Agent runtime with child setup support, not an old subagent provider.
+- **Missing jobs controller composition:** add the jobs registry and `dsh-tool-jobs` so all three generic job tools exist.
+- **Missing subprocess service:** add a compatible provider (normally the local provider or an external sandbox provider).
+- **`baseline-blocked`:** inspect stdout/stderr artifacts and verify exit 0 plus exact final-line JSON metric.
+- **`blocked` after restart:** inspect evidence; do not kill the recorded PID or delete locks. Establish provider-owned process-tree quiescence or resolve the stated Git/tracker mismatch, then resume by run id.
+- **Mutable-path violation:** narrow the candidate or explicitly declare the correct exceptional allowlist; do not broaden globs merely to bypass protection.
+- **Profile override lost defaults:** patch rows replace whole configs; copy the complete stable row and change only intended values.
+- **Same tag already used:** tags are labels, not identities. A fresh run gets a new run-id-bearing branch/worktree; resume an existing run only by `resume_run_id`.
+
+Current limitations: automatic age-based artifact/TSV retention is not implemented; explicit cleanup remains an operator responsibility. The controller supports one bounded scalar objective per run, serial candidates, and one evaluator attempt at a time. It does not provide distributed scheduling, multi-objective/Pareto decisions, hermetic builds, dependency caching, or an OS sandbox.
+
+## Package and development
+
+The npm package is ESM, requires Node `^22.19.0 || >=24.0.0`, exports `dsh-autoresearch` and `dsh-autoresearch/invariant`, and ships only generated `lib/` JavaScript/declarations/source maps, `cordis.patch.yml`, README, LICENSE, and package metadata. Harness packages are peers supplied by the installed profile; the sole direct runtime dependency is `@deepseek-ai/schemastery`.
+
+Repository verification commands are:
+
+```bash
+pnpm install --frozen-lockfile
 pnpm run typecheck
 pnpm run test
+pnpm run test:coverage
 pnpm run build
+pnpm pack
+node scripts/release-smoke.mjs ./dsh-autoresearch-0.1.0.tgz
 ```
-
-测试包含真实 `workflow-worker-thread` 和真实 `SubagentRuntime` 的固定三轮实验：baseline、严格改善并保留、回退非改善候选。

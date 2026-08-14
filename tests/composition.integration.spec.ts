@@ -5,9 +5,10 @@ import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { DatabaseSync } from 'node:sqlite'
 import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
+import type { SubprocessHandle } from '@deepseek-ai/dsh-subprocess'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { afterEach, describe, expect, it } from 'vitest'
-import { composeHarness, assembledPrompt, type RealHarness } from './fixtures/harness-composition.ts'
+import { COMPOSITION_TERMINATION_GRACE_MS, composeHarness, assembledPrompt, type RealHarness } from './fixtures/harness-composition.ts'
 import { calls, holdModel, releaseModel } from './fixtures/loader/model-provider.ts'
 
 const run = promisify(execFile)
@@ -59,10 +60,10 @@ function request(cwd: string, mode: 'background' | 'foreground' = 'background') 
     mode,
   }
 }
-async function waitUntil(predicate: () => boolean | Promise<boolean>, message: string): Promise<void> {
-  const deadline = Date.now() + 10_000
+async function waitUntil(predicate: () => boolean | Promise<boolean>, message: string | (() => string), timeoutMs = 10_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
   while (!(await predicate())) {
-    if (Date.now() >= deadline) throw new Error(message)
+    if (Date.now() >= deadline) throw new Error(typeof message === 'function' ? message() : message)
     const { promise, resolve } = Promise.withResolvers<void>()
     setTimeout(resolve, 10)
     await promise
@@ -77,10 +78,13 @@ async function evaluatorPid(marker: string): Promise<number> {
   return Number(text.trim())
 }
 
-function processExists(pid: number): boolean {
-  try { process.kill(pid, 0); return true } catch (error) {
-    const processError = error as NodeJS.ErrnoException
-    return processError.code !== 'ESRCH'
+async function processState(pid: number): Promise<string | undefined> {
+  try {
+    const stat = await readFile(`/proc/${pid}/stat`, 'utf8')
+    return stat.slice(stat.lastIndexOf(')') + 2).split(' ', 1)[0]
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+    throw error
   }
 }
 
@@ -101,6 +105,9 @@ function persistedBackgroundJobIds(cwd: string): string[] {
   }
   return ids
 }
+
+const COVERAGE_SETTLEMENT_OVERHEAD_MS = 10_000
+const CANCELLATION_SETTLEMENT_TIMEOUT_MS = COMPOSITION_TERMINATION_GRACE_MS * 2 + COVERAGE_SETTLEMENT_OVERHEAD_MS
 
 describe('real Loader/profile production composition', () => {
   it('boots the shipped base profile keylessly with the opt-in stable autoresearch row and providers', async () => {
@@ -147,6 +154,8 @@ describe('real Loader/profile production composition', () => {
     const marker = join(harness.root, 'ordered-evaluator.pid')
     const events: string[] = []
     let evaluatorSignal: AbortSignal | undefined
+    let evaluatorHandle: SubprocessHandle | undefined
+    let evaluatorHandleSettled = false
     const jobs = harness.ctx.jobs
     const originalStart = jobs.start.bind(jobs)
     const subprocess = harness.ctx.subprocess
@@ -169,7 +178,12 @@ describe('real Loader/profile production composition', () => {
         const returnedJobIds = events.filter(event => event.startsWith('registry-start-return:')).map(event => event.slice('registry-start-return:'.length))
         expect(returnedJobIds).not.toHaveLength(0)
         expect(persistedBackgroundJobIds(cwd)).toEqual(expect.arrayContaining(returnedJobIds))
-        if (argv.includes(holdingEvaluator)) evaluatorSignal = spec.signal
+        if (argv.includes(holdingEvaluator)) {
+          evaluatorSignal = spec.signal
+          evaluatorHandle = originalSpawn(spec)
+          void evaluatorHandle.done.finally(() => { evaluatorHandleSettled = true })
+          return evaluatorHandle
+        }
       }
       return originalSpawn(spec)
     }
@@ -187,9 +201,20 @@ describe('real Loader/profile production composition', () => {
       expect(evaluatorSignal?.aborted).toBe(false)
 
       expect(harness.ctx.jobs.kill(jobId as never, parent.agent, 'ordering test cancellation')).toBe('requested')
+      let lastProcessState: string | undefined
+      let lastJobStatus: string | undefined
       await waitUntil(() => evaluatorSignal?.aborted === true, 'job cancellation did not abort the evaluator-owned signal')
-      await waitUntil(() => !processExists(pid), 'job cancellation did not terminate the evaluator')
-      expect((await harness.ctx.jobs.wait(jobId as never, 20_000, parent.agent)).status).toBe('killed')
+      await waitUntil(async () => {
+        lastProcessState = await processState(pid)
+        lastJobStatus = harness.ctx.jobs.get(jobId as never, parent.agent).status
+        return evaluatorHandleSettled
+          && (lastProcessState === undefined || lastProcessState === 'Z')
+          && lastJobStatus === 'killed'
+      }, () => `cancellation did not settle within provider grace plus coverage overhead (${CANCELLATION_SETTLEMENT_TIMEOUT_MS}ms): process=${lastProcessState ?? 'exited'}, subprocess=${evaluatorHandleSettled ? 'settled' : 'pending'}, job=${lastJobStatus ?? 'unknown'}`, CANCELLATION_SETTLEMENT_TIMEOUT_MS)
+      expect(await evaluatorHandle?.waitForExit()).toBe(true)
+      const finalProcessState = await processState(pid)
+      if (finalProcessState !== undefined && finalProcessState !== 'Z') throw new Error(`evaluator orphan ${pid} remains live in process state ${finalProcessState}`)
+      expect((await harness.ctx.jobs.wait(jobId as never, 1, parent.agent)).status).toBe('killed')
       const result = await execution
       expect(result.isError).toBe(false)
       expect(result.value).toMatchObject({ kind: 'background', jobId })
@@ -198,7 +223,7 @@ describe('real Loader/profile production composition', () => {
       subprocess.spawn = originalSpawn
       await parent.dispose()
     }
-  }, 30_000)
+  }, 45_000)
 
   it('invokes production autoresearch through ToolRuntime with the exact real parent, child setup, evaluator, durable job, and generic controls', async () => {
     const harness = await composeHarness()
@@ -253,13 +278,19 @@ describe('real Loader/profile production composition', () => {
         evaluation: { command: process.execPath, args: [holdingEvaluator, marker] },
       }, parent.agent)
       const pid = await evaluatorPid(marker)
-      expect(processExists(pid)).toBe(true)
+      const initialProcessState = await processState(pid)
+      expect(initialProcessState).toBeDefined()
+      expect(initialProcessState).not.toBe('Z')
       expect(harness.ctx.jobs.list(parent.agent)).toEqual([expect.objectContaining({ kind: 'autoresearch', status: 'running' })])
 
       await harness.reloadAutoresearch()
       await execution
 
-      await waitUntil(() => !processExists(pid), 'evaluator process survived HMR unload')
+      let finalProcessState: string | undefined
+      await waitUntil(async () => {
+        finalProcessState = await processState(pid)
+        return finalProcessState === undefined || finalProcessState === 'Z'
+      }, () => `evaluator process survived HMR unload in process state ${finalProcessState ?? 'unknown'}`)
       expect(harness.ctx.jobs.list(parent.agent).every(job => job.status !== 'running' && job.status !== 'stopping')).toBe(true)
       expect(harness.ctx.agents.list().map(agent => agent.id)).toEqual([parent.agent.id])
     } finally {

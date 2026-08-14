@@ -14,6 +14,8 @@ const baseEntry = fileURLToPath(import.meta.resolve('@deepseek-ai/dsh-base'))
 const basePackage = join(baseEntry, '..', '..')
 const modelPlugin = fileURLToPath(new URL('./loader/model-provider.ts', import.meta.url))
 
+export const COMPOSITION_TERMINATION_GRACE_MS = 5_000
+
 export interface RealHarness {
   readonly ctx: Context
   readonly root: string
@@ -53,7 +55,9 @@ export async function composeHarness(options: { autoresearch?: boolean; omitEntr
   const selected = (options.omitEntry ? entries.filter(entry => entry.id !== options.omitEntry) : entries).toSorted((left, right) => options.reverseEntries ? right.id.localeCompare(left.id) : 0)
   const bootEntries = selected.map(entry => entry.id === 'hmr'
     ? { ...entry, config: { root: [], ignored: [], debounce: 10 } }
-    : entry)
+    : entry.id === 'autoresearch'
+      ? { ...entry, config: { ...entry.config, terminationGraceMs: COMPOSITION_TERMINATION_GRACE_MS } }
+      : entry)
   const configPath = join(profileDir, 'cordis.yml')
   await writeFile(configPath, '[]\n')
   const patches: PatchOptions[] = [{ insert: bootEntries }]

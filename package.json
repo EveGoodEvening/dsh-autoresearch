@@ -49,6 +49,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
+    "release:smoke": "node scripts/release-smoke.mjs",
     "check": "pnpm run typecheck && pnpm run test && pnpm run build"
   },
   "dsh": {
@@ -78,6 +79,7 @@
     "@deepseek-ai/cordis-plugin-hmr": "1.0.16",
     "@deepseek-ai/cordis-plugin-include": "^1.0.6",
     "@deepseek-ai/cordis-plugin-loader": "1.0.2",
+    "@deepseek-ai/dsh": "0.1.0-rc.6",
     "@deepseek-ai/dsh-agent": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-app-boot": "0.1.0-rc.6",
     "@deepseek-ai/dsh-base": "0.1.0-rc.6",
