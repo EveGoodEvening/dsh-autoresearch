@@ -50,11 +50,9 @@ All sizes and times are positive integers. Unknown keys are rejected. The shippe
 | `provider` | unset | Optional child Agent provider route. |
 | `model` | unset | Optional child Agent model override. |
 | `maxTokens` | unset | Optional positive child Agent token cap. |
-| `subagentProvider` | unset/ignored | Accepted only for clean migration from early 0.1.0 configuration; runtime composition uses `ctx.agents`, not a subagent service. Do not set it in new profiles. |
 | `gitExecutable` | `git` | Bare executable name or absolute Git path resolved by the subprocess provider. |
 | `stateRoot` | `dsh-autoresearch` | Safe relative directory beneath the repository Git common directory. |
 | `branchPrefix` | `autoresearch/` | Valid Git prefix ending in `/`. |
-| `resultsFile` | unset/ignored | Accepted legacy configuration only; authoritative exports use the state-root layout below. Do not set it in new profiles. |
 | `defaultMaxExperiments` | `20` | Candidate cap when the tool omits `max_experiments`; must not exceed `maxExperiments`. The baseline is separate. |
 | `maxExperiments` | `100` | Deployment maximum for a run's candidate experiments. |
 | `maxHandoffChars` | `16384` | Maximum serialized child proposal/report handoff. |
@@ -285,8 +283,6 @@ Early 0.1.0 documentation described prompt-driven workflow orchestration, a lega
 - using `target`, `mode`, explicit environment/provenance/allowlists, and `resume_run_id`;
 - treating SQLite under the Git common directory as authority and TSV as export only;
 - allowing the host controller, not the child prompt, to commit, evaluate, decide, cancel, and recover.
-
-`subagentProvider` and `resultsFile` remain accepted configuration keys only to make stale profile rows fail less abruptly; they do not restore the old architecture and should be removed when rewriting a profile.
 
 ## Troubleshooting and limitations
 

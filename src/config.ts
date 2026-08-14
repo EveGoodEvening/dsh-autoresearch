@@ -5,11 +5,9 @@ export interface Config {
   provider?: string
   model?: string
   maxTokens?: number
-  subagentProvider?: string
   gitExecutable?: string
   stateRoot?: string
   branchPrefix?: string
-  resultsFile?: string
   defaultMaxExperiments?: number
   maxExperiments?: number
   maxHandoffChars?: number
@@ -82,11 +80,9 @@ export const Config: z<Config> = z.object({
   provider: z.string(),
   model: z.string(),
   maxTokens: positive(),
-  subagentProvider: z.string(),
   gitExecutable: z.string().default(DEFAULT_CONFIG.gitExecutable),
   stateRoot: z.string().default(DEFAULT_CONFIG.stateRoot),
   branchPrefix: z.string().default(DEFAULT_CONFIG.branchPrefix),
-  resultsFile: z.string(),
   defaultMaxExperiments: positive(),
   maxExperiments: positive().default(DEFAULT_CONFIG.maxExperiments),
   maxHandoffChars: positive().default(DEFAULT_CONFIG.maxHandoffChars),
@@ -106,7 +102,7 @@ export const Config: z<Config> = z.object({
 })
 
 const CONFIG_KEYS = new Set([
-  'provider', 'model', 'maxTokens', 'subagentProvider', 'gitExecutable', 'stateRoot', 'branchPrefix', 'resultsFile',
+  'provider', 'model', 'maxTokens', 'gitExecutable', 'stateRoot', 'branchPrefix',
   'defaultMaxExperiments', 'maxExperiments', 'maxHandoffChars', 'maxResultChars',
   'maxStdoutBytes', 'maxStderrBytes', 'defaultTimeoutMs', 'maxTimeoutMs',
   'terminationGraceMs', 'maxActiveRunsPerRepository', 'artifactRetentionDays',
@@ -116,8 +112,6 @@ const CONFIG_KEYS = new Set([
 
 export function resolveConfig(config: Config = {}): ResolvedConfig {
   rejectUnknown(config as Record<string, unknown>, CONFIG_KEYS, 'Config')
-  if (config.subagentProvider !== undefined) normalizedText(config.subagentProvider, 'subagentProvider')
-  if (config.resultsFile !== undefined) safeRelativePath(config.resultsFile, 'resultsFile')
   const maxExperiments = positiveInteger(config.maxExperiments ?? DEFAULT_CONFIG.maxExperiments, 'maxExperiments')
   const maxTimeoutMs = positiveInteger(config.maxTimeoutMs ?? DEFAULT_CONFIG.maxTimeoutMs, 'maxTimeoutMs')
   const resolved: ResolvedConfig = {

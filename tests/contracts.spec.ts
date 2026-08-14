@@ -185,6 +185,10 @@ describe('configuration and policy normalization', () => {
     })
   })
 
+  it.each(['subagentProvider', 'resultsFile'] as const)('rejects removed deployment key %s', (key) => {
+    expect(() => resolveConfig({ [key]: 'legacy-value' } as never)).toThrow(`Config: unknown key "${key}"`)
+  })
+
   it('normalizes omitted run defaults down to configured deployment caps', () => {
     const config = resolveConfig({ maxExperiments: 7, maxTimeoutMs: 8_000 })
     expect(config.defaultMaxExperiments).toBe(7)
