@@ -10,7 +10,11 @@ const state = vi.hoisted(() => ({
     run: ReturnType<typeof vi.fn>
     cancel: ReturnType<typeof vi.fn>
     dispose: ReturnType<typeof vi.fn>
+    constructorSignal: AbortSignal
   }>,
+  releaseTool: vi.fn(),
+  releasePrompt: vi.fn(),
+  startError: undefined as Error | undefined,
   runResult: {
     status: 'budget-limited', runId: 'run-1', tracker: '/tracker.sqlite',
     counts: { experimentsStarted: 0, experimentsCompleted: 0, attempts: 1 },
@@ -25,10 +29,12 @@ vi.mock('../src/controller.js', () => ({
     readonly cancel = vi.fn()
     readonly dispose = vi.fn(async () => undefined)
     readonly run = vi.fn(async () => state.runResult)
-    constructor() { state.controllers.push(this) }
+    readonly constructorSignal: AbortSignal
+    constructor(_ctx: unknown, options: { signal: AbortSignal }) { this.constructorSignal = options.signal; state.controllers.push(this) }
   },
 }))
 
+import { normalizeRunPolicy, resolveConfig } from '../src/config.ts'
 import { apply, inject } from '../src/index.ts'
 
 interface Harness {
@@ -55,9 +61,9 @@ function harness(): Harness {
   const ctx = {
     agents: { create: vi.fn() },
     subprocess: {},
-    systemPrompt: { section(section: Harness['prompt']) { prompt = section; return vi.fn() } },
-    tools: { register(definition: ToolDefinition) { tool = definition; return vi.fn() } },
-    jobs: { start(spec: JobStart) { thisJob = spec; thisHooks = spec.run(); return 'autoresearch-1' } },
+    systemPrompt: { section(section: Harness['prompt']) { prompt = section; return state.releasePrompt } },
+    tools: { register(definition: ToolDefinition) { tool = definition; return state.releaseTool } },
+    jobs: { start(spec: JobStart) { if (state.startError) throw state.startError; thisJob = spec; thisHooks = spec.run(); return 'autoresearch-1' } },
     effect(factory: () => () => Promise<void>) { cleanup = factory(); return cleanup },
   }
   apply(ctx as unknown as Context, {})
@@ -74,6 +80,17 @@ const execution = (signal = new AbortController().signal) => ({ agent: parent, s
 beforeEach(() => {
   state.controllers.length = 0
   state.runResult = { status: 'budget-limited', runId: 'run-1', tracker: '/tracker.sqlite', counts: { experimentsStarted: 0, experimentsCompleted: 0, attempts: 1 }, artifacts: [], best: { metric: 1, commit: 'a'.repeat(40), experimentId: 'baseline' } }
+  state.releaseTool.mockClear()
+  state.releasePrompt.mockClear()
+  state.startError = undefined
+})
+
+describe('autoresearch input object validation', () => {
+  it.each(['exceptional_allowlists', 'provenance', 'environment'] as const)('requires %s to be a plain object', key => {
+    for (const malformed of [7, false, 'value', [], null]) {
+      expect(() => normalizeRunPolicy({ ...input, [key]: malformed } as never, resolveConfig(), '/repo')).toThrow(`${key} must be a plain object`)
+    }
+  })
 })
 
 describe('autoresearch production wiring', () => {
@@ -104,6 +121,40 @@ describe('autoresearch production wiring', () => {
     await expect(test.hooks?.done).resolves.toMatchObject({ status: 'completed', detail: 'budget-limited' })
   })
 
+  it.each([
+    ['target-reached', 'completed'],
+    ['budget-limited', 'completed'],
+    ['baseline-blocked', 'failed'],
+    ['blocked', 'failed'],
+    ['round-failed', 'failed'],
+    ['cancelled', 'killed'],
+  ] as const)('maps %s to the generic %s job status', async (status, expected) => {
+    state.runResult = { ...state.runResult, status } as never
+    const test = harness()
+    await test.tool.execute(input, execution())
+    await expect(test.hooks?.done).resolves.toMatchObject({ status: expected, detail: status })
+  })
+
+  it('keeps the background run independent from the outer tool signal', async () => {
+    const outer = new AbortController()
+    const test = harness()
+    await test.tool.execute(input, execution(outer.signal))
+    outer.abort(new Error('tool turn ended'))
+    expect(state.controllers[0]?.constructorSignal.aborted).toBe(false)
+    expect(state.controllers[0]?.cancel).not.toHaveBeenCalled()
+    await expect(test.hooks?.done).resolves.toMatchObject({ status: 'completed' })
+  })
+
+  it('returns a typed failure when job registration throws without orphaning a controller', async () => {
+    state.startError = new Error('registry unavailable')
+    const test = harness()
+    await expect(test.tool.execute(input, execution())).resolves.toEqual({
+      kind: 'background-start-failed', jobId: 'unregistered', status: 'failed', reason: 'registry unavailable',
+      evidence: [{ code: 'startup-failed', message: 'registry unavailable', artifacts: [] }],
+    })
+    expect(state.controllers).toHaveLength(0)
+  })
+
   it('uses synchronous idempotent cancellation and maps settled cancellation to killed', async () => {
     state.runResult = { ...state.runResult, status: 'cancelled', lastState: 'ready', reason: 'stop', quiescent: true } as never
     const test = harness()
@@ -114,11 +165,14 @@ describe('autoresearch production wiring', () => {
     await expect(test.hooks?.done).resolves.toMatchObject({ status: 'killed', detail: 'cancelled' })
   })
 
-  it('settles completed background resources before plugin unload', async () => {
+  it('unregisters once and repeatedly unloads without duplicate cancellation or release', async () => {
     const test = harness()
     await test.tool.execute(input, execution())
     await expect(test.hooks?.done).resolves.toMatchObject({ status: 'completed' })
     await test.dispose()
-    expect(state.controllers[0]?.dispose).toHaveBeenCalled()
+    await test.dispose()
+    expect(state.controllers[0]?.dispose).toHaveBeenCalledOnce()
+    expect(state.releaseTool).toHaveBeenCalledOnce()
+    expect(state.releasePrompt).toHaveBeenCalledOnce()
   })
 })

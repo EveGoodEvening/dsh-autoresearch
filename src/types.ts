@@ -55,24 +55,40 @@ export const AUTORESEARCH_TOOL_PARAMETERS = {
   objective: { type: 'string', required: true, description: 'Immutable optimization objective.' },
   constraints: { type: 'array', items: { type: 'string' }, description: 'Immutable policy constraints.' },
   mutable_globs: { type: 'array', required: true, items: { type: 'string' }, description: 'Narrow relative mutable paths or globs.' },
-  exceptional_allowlists: { type: 'json', description: 'Explicit dependency, evaluator, dataset, submodule, and Git-config path exceptions.' },
-  evaluation: { type: 'json', required: true, description: 'Shell-free evaluator argv: { command, args, cwd? }.' },
+  exceptional_allowlists: { type: 'object', additionalProperties: false, properties: { dependencies: { type: 'array', items: { type: 'string' } }, evaluators: { type: 'array', items: { type: 'string' } }, datasets: { type: 'array', items: { type: 'string' } }, submodules: { type: 'array', items: { type: 'string' } }, gitConfig: { type: 'array', items: { type: 'string' } } }, description: 'Explicit dependency, evaluator, dataset, submodule, and Git-config path exceptions.' },
+  evaluation: { type: 'object', required: true, additionalProperties: false, properties: { command: { type: 'string', required: true }, args: { type: 'array', required: true, items: { type: 'string' } }, cwd: { type: 'string' } }, description: 'Shell-free evaluator argv: { command, args, cwd? }.' },
   metric_name: { type: 'string', required: true, description: 'Exact final-line JSON scalar key.' },
   metric_direction: { type: 'string', required: true, enum: ['minimize', 'maximize'], description: 'Strict improvement direction.' },
   timeout_ms: { type: 'number', description: 'Per-attempt timeout bounded by deployment policy.' },
   max_experiments: { type: 'number', description: 'Candidate experiment cap; baseline is separate.' },
   target: { type: 'number', description: 'Optional finite stopping threshold.' },
-  provenance: { type: 'json', description: 'Evaluator and dataset provenance labels.' },
-  environment: { type: 'json', description: 'Explicit evaluator environment overrides.' },
+  provenance: { type: 'object', additionalProperties: false, properties: { evaluator: { type: 'string' }, dataset: { type: 'string' } }, description: 'Evaluator and dataset provenance labels.' },
+  environment: { type: 'object', additionalProperties: true, description: 'Explicit evaluator environment overrides; every value must be a string.' },
   mode: { type: 'string', enum: ['background', 'foreground'], description: 'Defaults to background.' },
 } as const
 
-/** Canonical discriminated tool-output schema. Run variants are decoded exactly by decodeRunResult. */
+const artifactSchema = { type: 'object', additionalProperties: false, properties: { artifactId: { type: 'string', required: true }, kind: { type: 'string', required: true }, location: { type: 'string', required: true }, sizeBytes: { type: 'number', required: true }, sha256: { type: 'string', required: true } } } as const
+const artifactsSchema = { type: 'array', items: artifactSchema } as const
+const bestSchema = { type: 'object', additionalProperties: false, properties: { metric: { type: 'number', required: true }, commit: { type: 'string', required: true }, experimentId: { type: 'string', required: true } } } as const
+const countsSchema = { type: 'object', additionalProperties: false, properties: { experimentsStarted: { type: 'number', required: true }, experimentsCompleted: { type: 'number', required: true }, attempts: { type: 'number', required: true } } } as const
+const evidenceSchema = { type: 'array', items: { type: 'object', additionalProperties: false, properties: { code: { type: 'string', required: true }, message: { type: 'string', required: true }, artifacts: { ...artifactsSchema, required: true } } } } as const
+const exitSchema = { type: 'object', additionalProperties: false, properties: { exitCode: { oneOf: [{ type: 'number' }, { type: 'null' }], required: true }, signal: { oneOf: [{ type: 'string' }, { type: 'null' }], required: true }, timedOut: { type: 'boolean', required: true }, stdout: { ...artifactSchema, required: true }, stderr: { ...artifactSchema, required: true } } } as const
+const runBase = { runId: { type: 'string', required: true }, tracker: { type: 'string', required: true }, counts: { ...countsSchema, required: true }, artifacts: { ...artifactsSchema, required: true } } as const
+const runSchema = { oneOf: [
+  { type: 'object', additionalProperties: false, properties: { ...runBase, status: { type: 'string', required: true, const: 'target-reached' }, target: { type: 'number', required: true }, best: { ...bestSchema, required: true } } },
+  { type: 'object', additionalProperties: false, properties: { ...runBase, status: { type: 'string', required: true, const: 'budget-limited' }, best: { ...bestSchema, required: true } } },
+  { type: 'object', additionalProperties: false, properties: { ...runBase, status: { type: 'string', required: true, const: 'baseline-blocked' }, baselineAttemptId: { type: 'string', required: true }, reason: { type: 'string', required: true }, exit: { ...exitSchema, required: true } } },
+  { type: 'object', additionalProperties: false, properties: { ...runBase, status: { type: 'string', required: true, const: 'blocked' }, best: { ...bestSchema, required: true }, evidence: { ...evidenceSchema, required: true } } },
+  { type: 'object', additionalProperties: false, properties: { ...runBase, status: { type: 'string', required: true, const: 'round-failed' }, reason: { type: 'string', required: true }, evidence: { ...evidenceSchema, required: true }, best: bestSchema } },
+  { type: 'object', additionalProperties: false, properties: { ...runBase, status: { type: 'string', required: true, const: 'cancelled' }, lastState: { type: 'string', required: true, enum: ['initializing', 'baseline-running', 'ready', 'candidate-prepared', 'candidate-running', 'deciding', 'completed', 'baseline-blocked', 'blocked', 'round-failed'] }, reason: { type: 'string', required: true }, quiescent: { type: 'boolean', required: true, const: true }, best: bestSchema } },
+] } as const
+
+/** Canonical discriminated tool-output schema. */
 export const AUTORESEARCH_TOOL_OUTPUT_SCHEMA = {
   oneOf: [
     { type: 'object', additionalProperties: false, properties: { kind: { type: 'string', required: true, const: 'background' }, runId: { type: 'string', required: true }, jobId: { type: 'string', required: true }, tracker: { type: 'string', required: true }, branch: { type: 'string', required: true }, worktree: { type: 'string', required: true } } },
-    { type: 'object', additionalProperties: false, properties: { kind: { type: 'string', required: true, const: 'background-start-failed' }, jobId: { type: 'string', required: true }, runId: { type: 'string' }, status: { type: 'string', required: true, enum: ['failed', 'cancelled'] }, reason: { type: 'string', required: true }, evidence: { type: 'json', required: true } } },
-    { type: 'object', additionalProperties: false, properties: { kind: { type: 'string', required: true, const: 'foreground' }, run: { type: 'json', required: true } } },
+    { type: 'object', additionalProperties: false, properties: { kind: { type: 'string', required: true, const: 'background-start-failed' }, jobId: { type: 'string', required: true }, runId: { type: 'string' }, status: { type: 'string', required: true, enum: ['failed', 'cancelled'] }, reason: { type: 'string', required: true }, evidence: { ...evidenceSchema, required: true } } },
+    { type: 'object', additionalProperties: false, properties: { kind: { type: 'string', required: true, const: 'foreground' }, run: { ...runSchema, required: true } } },
   ],
 } as const
 export interface NormalizedRunPolicy {

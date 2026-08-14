@@ -585,7 +585,7 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 - [x] Complete an independent controller review of intent/outcome ordering around side effects; clean with zero findings after final fix `e613e549e0fb4f40f0921ecd585c25d2dd6a9a03`.
 - [x] Complete an independent security review of acceptance/target logic and strict host authority; clean with zero findings after final fix `e613e549e0fb4f40f0921ecd585c25d2dd6a9a03`.
 - [x] Complete an independent recovery review for idempotence and evidence preservation; clean with zero findings after final fix `e613e549e0fb4f40f0921ecd585c25d2dd6a9a03`.
-- [x] Chunk 07 clean-cutover dependency (workflow/dependency/schema cleanup): review removal of obsolete workflow code, runtime dependencies, compatibility schema, and comments after the clean cutover.
+- [ ] Chunk 07/09 clean-cutover dependency: review removal of obsolete workflow code, runtime dependencies, compatibility schema, comments, and shipped README/current composition guidance after Chunk 09 documentation migration.
 
 ## Chunk 06 implementation commit gate
 
@@ -621,23 +621,23 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 - [x] Return canonical foreground result union.
 - [x] Start background jobs by default with `owner: exec.agent`.
 - [x] Honor explicit foreground mode.
-- [x] In the synchronous LocalJobRegistry `run()` callback, create the job-owned `AbortController`, idempotent cancellation hook, deferred execution gate, `done` promise, and readiness promise without starting controller work.
+- [ ] In the synchronous LocalJobRegistry `run()` callback, create the job-owned `AbortController`, idempotent cancellation hook, deferred execution gate, `done` promise, and readiness promise without starting controller work.
 - [x] Call `ctx.jobs.start`, receive the returned job id, and durably record it before releasing the deferred execution gate.
-- [x] Ensure failures before gate release settle `done` and readiness without orphaning resources.
+- [ ] Ensure failures before gate release settle `done` and readiness without orphaning resources.
 - [x] Run durable initialization under the job-owned signal after gate release; resolve readiness only after tracker, run-id-bearing branch, and worktree facts are committed.
 - [x] Return background `{ kind, runId, jobId, tracker, branch, worktree }` only from the readiness result.
 - [x] Return typed startup failure/cancellation when initialization fails before readiness; do not fabricate tracker/branch/worktree values.
 - [x] Declare `autoresearch` job kind through type augmentation.
 - [x] Use generic jobs control rather than private job tools.
-- [x] Require compatible jobs controller/tool composition.
-- [x] Map `target-reached`, `budget-limited`, and proven `blocked` to completed jobs.
+- [ ] Chunk 08 composition dependency: require and verify compatible jobs registry plus generic jobs-tool composition through the real Harness stack.
+- [ ] Map `target-reached` and `budget-limited` to completed jobs, and map every uncertain `blocked` result to failed while preserving its canonical durable result.
 - [x] Map `baseline-blocked` and `round-failed` to failed jobs.
 - [x] Map plugin-internal cancellation to Harness job outcome status `killed` while preserving the plugin result variant `cancelled`.
 - [x] Ensure job `done` waits for controller/child-dispose/process/tracker/Git quiescence and resolves only after cleanup, not merely after cancellation is requested.
 - [x] Implement synchronous/idempotent job cancellation hook.
 - [x] Sever background lifetime from the outer tool call's `exec.signal` before releasing deferred controller execution.
 - [x] Pass the job-owned controller signal to `AutoresearchRunController`, child Agent cancellation, evaluator subprocesses, and Git subprocesses.
-- [x] Persist cancellation intent before aborting resources.
+- [ ] Persist cancellation intent before aborting resources.
 - [x] Await `AgentHandle.dispose()`, entire owned process-tree termination, and worktree reconciliation.
 - [x] Atomically persist terminal cancellation/quiescent facts without deleting evidence.
 - [x] Release repository/run-tag active lock only after terminal persistence, as the final idempotent operation.
@@ -651,17 +651,17 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 - [x] Retain stable patch row id `autoresearch`.
 - [x] Retain module name `dsh-autoresearch`.
 - [x] Retain complete Loader defaults in patch config.
-- [x] Document/validate installed profile requires jobs registry plus `dsh-tool-jobs`.
-- [x] Document/validate subprocess provider requirement.
-- [x] Document/validate core Agent registry/runtime and child setup requirement; no subagent provider is required.
-- [x] Ensure activation is opt-in through profile installation.
-- [x] Ensure service ordering is expressed by injection, not YAML row order.
+- [ ] Chunk 09 documentation dependency: document current installed-profile prerequisites for the jobs registry plus `dsh-tool-jobs`; Chunk 08 must validate the real composition.
+- [ ] Chunk 09 documentation dependency: document the subprocess provider requirement; Chunk 08 must validate the real composition and failure path.
+- [ ] Chunk 09 documentation dependency: document the core Agent registry/runtime and child setup requirement, with no subagent provider; Chunk 08 must validate the real composition and failure path.
+- [ ] Chunk 08 composition dependency: verify activation is opt-in through real profile installation.
+- [ ] Chunk 08 composition dependency: verify service ordering is expressed by injection, not YAML row order, through real Harness composition.
 
 ## Chunk 07 verification gate
 
 - [x] Test foreground tool result.
-- [x] Test background tool result waits for durable readiness facts.
-- [x] Test LocalJobRegistry ordering: `run()` remains synchronous, controller work stays gated until returned job id is durably recorded, then starts under the job-owned signal.
+- [ ] Test background tool result waits for durable readiness facts.
+- [ ] Test actual LocalJobRegistry ordering: `run()` remains synchronous, controller work stays gated until returned job id is durably recorded, then starts under the job-owned signal.
 - [ ] Test typed initialization failure/cancellation before readiness and no orphaned resources.
 - [ ] Test background job output consumption.
 - [ ] Test generic job list/output/kill compatibility.
@@ -669,7 +669,7 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 - [ ] Test missing/incompatible core Agent registry/runtime or child setup capability fails clearly.
 - [x] Test cancellation idempotence.
 - [ ] Test a registered background job survives the outer tool call's `exec.signal` abort.
-- [x] Test child creation derives `parentSession`/delegation/model route from `exec.agent`, background job start receives `owner: exec.agent`, and the tracker records the same authority identity.
+- [ ] Test child creation derives `parentSession`/delegation/model route from `exec.agent`, background job start receives `owner: exec.agent`, and a real controller-created tracker run row records the same authority identity.
 - [x] Test fresh child durable cwd is the canonical isolated worktree and differs from the caller workspace.
 - [x] Test plugin cancellation maps to Harness job status `killed`.
 - [x] Test cancellation/job completion waits for mandatory Agent handle disposal and whole-process-tree quiescence.
@@ -693,7 +693,7 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 ## Chunk 07 tracker-accounting gate
 
 - [x] Record Chunk 07 implementation commit full SHA: `952267ba41689cf21c63092e37cb61c34ccd5e61`.
-- [ ] Commit the checklist update separately from the Chunk 07 implementation commit.
+- [x] Record separate Chunk 07 checklist-accounting commit `a0cbd7d1b819155b9debdc0ddc0e57b7951633a5` (`docs: record production cutover verification`) as complete and separate from implementation commit `952267ba41689cf21c63092e37cb61c34ccd5e61`.
 
 # Chunk 08 — `08-add-real-dsh-composition-and-recovery-tests`
 

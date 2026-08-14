@@ -40,11 +40,17 @@ export class AutoresearchRunController {
   private cancelReason = 'cancelled'
   private jobId?: string
   private readySettled = false
-  private tracker?: DurableTracker
+  private runtime: Runtime | undefined
+  private cancellationRequested = false
+  private cancellationPersisted = false
   private quiescenceFailure?: ProposalAgentError
 
   constructor(private readonly ctx: Context, private readonly options: AutoresearchRunControllerOptions) {
-    this.ready = new Promise((resolve, reject) => { this.resolveReady = resolve; this.rejectReady = reject })
+    this.ready = new Promise((resolve, reject) => {
+      this.resolveReady = resolve
+      this.rejectReady = reject
+    })
+    void this.ready.catch(() => undefined)
     const abort = () => this.cancel(String(options.signal.reason ?? 'cancelled'))
     options.signal.addEventListener('abort', abort, { once: true })
     if (options.signal.aborted) abort()
@@ -52,14 +58,26 @@ export class AutoresearchRunController {
 
   setJobId(jobId: string): void { if (this.runPromise) throw new Error('job id must be assigned before controller execution'); if (this.jobId !== undefined) throw new Error('job id is already assigned'); this.jobId = normalizedReason(jobId) }
   run(): Promise<AutoresearchRunResult> { return this.runPromise ??= this.execute() }
-  cancel(reason = 'cancelled'): void { if (this.aborter.signal.aborted) return; this.cancelReason = normalizedReason(reason); this.aborter.abort(new Error(this.cancelReason)) }
+
+  cancel(reason = 'cancelled'): void {
+    if (!this.cancellationRequested) {
+      this.cancellationRequested = true
+      this.cancelReason = normalizedReason(reason)
+    }
+    this.persistCancellationIntent()
+    if (this.runtime && !this.aborter.signal.aborted) this.aborter.abort(new Error(this.cancelReason))
+  }
   async dispose(): Promise<void> { this.cancel('controller disposed'); if (this.runPromise) await this.runPromise.catch(() => undefined); else if (!this.readySettled) { this.readySettled = true; this.rejectReady(new Error('controller disposed before start')) } }
 
   private async execute(): Promise<AutoresearchRunResult> {
     let runtime: Runtime | undefined
     try {
       runtime = await this.initialize()
-      this.tracker = runtime.tracker
+      this.runtime = runtime
+      if (this.cancellationRequested) {
+        this.persistCancellationIntent()
+        this.aborter.abort(new Error(this.cancelReason))
+      }
       // Readiness is published by drive() only after durable branch/worktree allocation.
       return await this.drive(runtime)
     } catch (error) {
@@ -68,34 +86,51 @@ export class AutoresearchRunController {
       throw error
     } finally {
       runtime?.tracker.close()
+      this.runtime = undefined
     }
   }
 
   private async initialize(): Promise<Runtime> {
-    let policy = normalizeRunPolicy(this.options.input, this.options.config, String(this.options.parent.session.header.cwd))
-    const gitOptions = { timeoutMs: policy.timeoutMs, graceMs: this.options.config.terminationGraceMs, maxStdoutBytes: this.options.config.maxStdoutBytes, maxStderrBytes: this.options.config.maxStderrBytes }
-    const gitExecutable = await resolveGitExecutable(this.ctx, this.options.config.gitExecutable, this.aborter.signal)
-    const discovery = await discoverRepository(this.ctx, gitExecutable, policy.repository, { ...gitOptions, signal: this.aborter.signal })
-    const runId = policy.resumeRunId ?? randomUUID()
-    const trackerPath = join(discovery.gitCommonDir, this.options.config.stateRoot, 'runs', runId, 'tracker.sqlite')
-    const tracker = DurableTracker.open(trackerPath)
-    const existing = tracker.getRun(runId)
-    let runTag = policy.runTag
-    if (policy.resumeRunId) {
-      if (!existing) throw new Error(`resume run ${runId} has no durable tracker row`)
-      runTag = String(existing['run_tag'])
-      policy = { ...canonicalPolicy(policy), runTag }
+    let tracker: DurableTracker | undefined
+    try {
+      let policy = normalizeRunPolicy(this.options.input, this.options.config, String(this.options.parent.session.header.cwd))
+      const gitOptions = { timeoutMs: policy.timeoutMs, graceMs: this.options.config.terminationGraceMs, maxStdoutBytes: this.options.config.maxStdoutBytes, maxStderrBytes: this.options.config.maxStderrBytes }
+      const gitExecutable = await resolveGitExecutable(this.ctx, this.options.config.gitExecutable, this.aborter.signal)
+      const discovery = await discoverRepository(this.ctx, gitExecutable, policy.repository, { ...gitOptions, signal: this.aborter.signal })
+      const runId = policy.resumeRunId ?? randomUUID()
+      const trackerPath = join(discovery.gitCommonDir, this.options.config.stateRoot, 'runs', runId, 'tracker.sqlite')
+      tracker = DurableTracker.open(trackerPath)
+      const existing = tracker.getRun(runId)
+      let runTag = policy.runTag
+      if (policy.resumeRunId) {
+        if (!existing) throw new Error(`resume run ${runId} has no durable tracker row`)
+        runTag = String(existing['run_tag'])
+        policy = { ...canonicalPolicy(policy), runTag }
+      }
+      if (!runTag) throw new TypeError('run tag is unavailable')
+      const identityPolicy = canonicalPolicy(policy)
+      const policySha256 = hash(identityPolicy)
+      const discoveryBoundary = createEvaluatorBoundary(discovery.repository, { evaluation: policy.evaluation, normalizedPolicySha256: policySha256 })
+      const provenance = freezeEvaluatorProvenance(discovery.repository, provenanceInput(identityPolicy, policySha256, discoveryBoundary.evaluationSha256))
+      const provenanceSha256 = provenance.sha256
+      const identity = makeRunGitIdentity(this.options.config, discovery, runTag, runId)
+      if (!existing) tracker.createRun({ runId, repositoryId: discovery.repositoryId, repository: discovery.repository, gitCommonDir: discovery.gitCommonDir, callerCwd: discovery.callerCwd, startCommit: discovery.startCommit, runTag, branch: identity.branch, worktree: identity.worktree, agentId: String(this.options.parent.id), sessionId: String(this.options.parent.session.header.id), policy: identityPolicy, policySha256, provenance, provenanceSha256 })
+      if (this.jobId !== undefined) tracker.checkpointRun(runId, { outcome: { kind: 'background-job-registered', jobId: this.jobId } })
+      const runtime = { runId, policy: identityPolicy, discovery, identity, tracker, gitExecutable, policySha256, provenanceSha256, gitOptions }
+      tracker = undefined
+      return runtime
+    } catch (error) {
+      tracker?.close()
+      throw error
     }
-    if (!runTag) throw new TypeError('run tag is unavailable')
-    const identityPolicy = canonicalPolicy(policy)
-    const policySha256 = hash(identityPolicy)
-    const discoveryBoundary = createEvaluatorBoundary(discovery.repository, { evaluation: policy.evaluation, normalizedPolicySha256: policySha256 })
-    const provenance = freezeEvaluatorProvenance(discovery.repository, provenanceInput(identityPolicy, policySha256, discoveryBoundary.evaluationSha256))
-    const provenanceSha256 = provenance.sha256
-    const identity = makeRunGitIdentity(this.options.config, discovery, runTag, runId)
-    if (!existing) tracker.createRun({ runId, repositoryId: discovery.repositoryId, repository: discovery.repository, gitCommonDir: discovery.gitCommonDir, callerCwd: discovery.callerCwd, startCommit: discovery.startCommit, runTag, branch: identity.branch, worktree: identity.worktree, agentId: String(this.options.parent.id), sessionId: String(this.options.parent.session.header.id), policy: identityPolicy, policySha256, provenance, provenanceSha256 })
-    if (this.jobId !== undefined) tracker.checkpointRun(runId, { outcome: { kind: 'background-job-registered', jobId: this.jobId } })
-    return { runId, policy: identityPolicy, discovery, identity, tracker, gitExecutable, policySha256, provenanceSha256, gitOptions }
+  }
+  private persistCancellationIntent(): void {
+    const runtime = this.runtime
+    if (!runtime || this.cancellationPersisted) return
+    const state = String(runtime.tracker.getRun(runtime.runId)?.['state'] ?? '')
+    if (['completed', 'baseline-blocked', 'blocked', 'round-failed', 'cancelled'].includes(state)) return
+    runtime.tracker.checkpointRun(runtime.runId, { intent: { kind: 'cancellation', reason: this.cancelReason } })
+    this.cancellationPersisted = true
   }
 
   private async drive(runtime: Runtime): Promise<AutoresearchRunResult> {
@@ -272,7 +307,7 @@ export class AutoresearchRunController {
       if (directive.kind === 'terminal') return this.returnTerminal(r, directive)
       throw new Error(`terminal cancellation reconciliation returned ${directive.kind}`)
     }
-    r.tracker.checkpointRun(r.runId, { intent: { kind: 'cancellation', reason: this.cancelReason } })
+    this.persistCancellationIntent()
     const unresolved = r.tracker.recoveryState(r.runId).unresolvedExperiment
     const best = optionalBest(r.tracker, r.runId)
     if (unresolved && ['baseline-pending','running'].includes(String(unresolved['state']))) r.tracker.commitTerminalExperiment(String(unresolved['experiment_id']), 'cancelled', { failureCode: 'cancelled', failureMessage: this.cancelReason })

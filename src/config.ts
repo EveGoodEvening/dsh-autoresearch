@@ -196,7 +196,7 @@ function exactEvaluation(value: AutoresearchToolInput['evaluation']): Normalized
 }
 
 function normalizeAllowlists(value: AutoresearchToolInput['exceptional_allowlists']): ExceptionalPathPolicy {
-  const source = value ?? {}
+  const source = optionalPlainObject(value, 'exceptional_allowlists') as Partial<ExceptionalPathPolicy>
   rejectUnknown(source as Record<string, unknown>, new Set(['dependencies', 'evaluators', 'datasets', 'submodules', 'gitConfig']), 'exceptional_allowlists')
   return {
     dependencies: normalizedList(source.dependencies ?? [], 'exceptional_allowlists.dependencies', true),
@@ -206,8 +206,9 @@ function normalizeAllowlists(value: AutoresearchToolInput['exceptional_allowlist
     gitConfig: normalizedList(source.gitConfig ?? [], 'exceptional_allowlists.gitConfig', true),
   }
 }
-function normalizeProvenance(value: AutoresearchToolInput['provenance']): NormalizedRunPolicy['provenance'] { const source = value ?? {}; rejectUnknown(source as Record<string, unknown>, new Set(['evaluator', 'dataset']), 'provenance'); return { ...optionalText(source.evaluator, 'evaluator', 'provenance.evaluator'), ...optionalText(source.dataset, 'dataset', 'provenance.dataset') } }
-function normalizeEnvironment(value: AutoresearchToolInput['environment']): Readonly<Record<string, string>> { const output: Record<string, string> = {}; for (const [key, item] of Object.entries(value ?? {}).sort(([a], [b]) => a.localeCompare(b))) { if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(key)) throw new TypeError(`invalid environment key ${key}`); if (typeof item !== 'string' || /\0/u.test(item)) throw new TypeError(`environment.${key} must be a NUL-free string`); output[key] = item } return output }
+function normalizeProvenance(value: AutoresearchToolInput['provenance']): NormalizedRunPolicy['provenance'] { const source = optionalPlainObject(value, 'provenance') as Record<string, unknown>; rejectUnknown(source, new Set(['evaluator', 'dataset']), 'provenance'); return { ...optionalText(source['evaluator'], 'evaluator', 'provenance.evaluator'), ...optionalText(source['dataset'], 'dataset', 'provenance.dataset') } }
+function normalizeEnvironment(value: AutoresearchToolInput['environment']): Readonly<Record<string, string>> { const source = optionalPlainObject(value, 'environment'); const output: Record<string, string> = {}; for (const [key, item] of Object.entries(source).sort(([a], [b]) => a.localeCompare(b))) { if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(key)) throw new TypeError(`invalid environment key ${key}`); if (typeof item !== 'string' || /\0/u.test(item)) throw new TypeError(`environment.${key} must be a NUL-free string`); output[key] = item } return output }
+function optionalPlainObject(value: unknown, label: string): Record<string, unknown> { if (value === undefined) return {}; if (value === null || typeof value !== 'object' || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) throw new TypeError(`${label} must be a plain object`); return value as Record<string, unknown> }
 function normalizedList(values: readonly unknown[], label: string, paths = false, allowEmpty = false): string[] { const result = values.map((value, index) => paths ? safeRelativePath(value, `${label}[${index}]`) : normalizedText(value, `${label}[${index}]`, allowEmpty)); return [...new Set(result)] }
 function normalizedText(value: unknown, label: string, allowEmpty = false): string { if (typeof value !== 'string' || value !== value.trim() || (!allowEmpty && value.length === 0) || /[\0\r\n]/u.test(value)) throw new TypeError(`${label} must be normalized text`); return value }
 function normalizedPath(value: unknown, label: string): string { const result = normalizedText(value, label); if (/\0/u.test(result)) throw new TypeError(`${label} contains NUL`); return result }

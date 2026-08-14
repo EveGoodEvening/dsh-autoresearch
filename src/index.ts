@@ -35,6 +35,7 @@ export const inject = ['agents', 'jobs', 'subprocess', 'systemPrompt', 'tools']
 const DESCRIPTION = 'Run a bounded, baseline-first metric optimization loop in an isolated Git worktree. Trusted host code owns evaluation, metric decisions, persistence, cancellation, and recovery.'
 const GUIDANCE = 'Use autoresearch only when the direct human explicitly requests autonomous metric-driven experimentation. Require one scalar metric, a shell-free evaluator command plus argv, and a narrow mutable path set. Runs are background jobs by default and can be inspected or stopped with the generic job tools. Do not invoke it for ordinary coding or open-ended research.'
 
+
 interface Deferred<T> {
   readonly promise: Promise<T>
   resolve(value: T): void
@@ -67,7 +68,7 @@ function jobOutcome(result: AutoresearchRunResult, maxResultChars: number): JobO
   const output = JSON.stringify(result)
   const detail = result.status
   if (result.status === 'cancelled') return { status: 'killed', detail, output }
-  if (result.status === 'baseline-blocked' || result.status === 'round-failed') return { status: 'failed', detail, output }
+  if (result.status === 'baseline-blocked' || result.status === 'blocked' || result.status === 'round-failed') return { status: 'failed', detail, output }
   return { status: 'completed', detail, output: output.length <= maxResultChars ? output : JSON.stringify({ status: result.status, runId: result.runId, tracker: result.tracker }) }
 }
 
@@ -117,64 +118,82 @@ export function apply(ctx: Context, config: AutoresearchConfig = {}): void {
 
       const gate = deferred<void>()
       const readiness = deferred<AutoresearchToolResult>()
-      const ownedAbort = new AbortController()
       let controller: AutoresearchRunController | undefined
+      let hooks: { cancel(value?: string): void; done: Promise<JobOutcome> } | undefined
       let jobId = ''
       let cancelled = false
+      let cancellationApplied = false
       let cancelReason = 'autoresearch job killed'
 
-      const id = ctx.jobs.start({
-        kind: 'autoresearch',
-        label: `autoresearch: ${input.objective}`,
-        owner: parent as Agent,
-        outputLimitBytes: resolved.maxResultChars,
-        run: () => {
-          controller = new AutoresearchRunController(ctx, { config: resolved, input, parent, signal: ownedAbort.signal })
-          active.add(controller)
-          const done = (async (): Promise<JobOutcome> => {
-            try {
-              await gate.promise
-              controller!.setJobId(jobId)
-              if (cancelled) controller!.cancel(cancelReason)
-              const running = controller!.run()
+      try {
+        const id = ctx.jobs.start({
+          kind: 'autoresearch',
+          label: `autoresearch: ${input.objective}`,
+          owner: parent as Agent,
+          outputLimitBytes: resolved.maxResultChars,
+          run: () => {
+            controller = new AutoresearchRunController(ctx, { config: resolved, input, parent, signal: new AbortController().signal })
+            active.add(controller)
+            const done = (async (): Promise<JobOutcome> => {
               try {
-                const ready = await controller!.ready
-                readiness.resolve({ kind: 'background', jobId, ...ready })
+                await gate.promise
+                controller!.setJobId(jobId)
+                if (cancelled) controller!.cancel(cancelReason)
+                const running = controller!.run()
+                try {
+                  const ready = await controller!.ready
+                  readiness.resolve({ kind: 'background', jobId, ...ready })
+                } catch (error) {
+                  readiness.resolve(startupFailure(jobId, error, cancelled))
+                }
+                return jobOutcome(await running, resolved.maxResultChars)
               } catch (error) {
-                readiness.resolve(startupFailure(jobId, error, ownedAbort.signal.aborted))
+                readiness.resolve(startupFailure(jobId, error, cancelled))
+                const failure = startupFailure(jobId, error, cancelled)
+                return { status: cancelled ? 'killed' : 'failed', detail: reason(error), output: JSON.stringify(failure) }
+              } finally {
+                if (controller) {
+                  await controller.dispose()
+                  active.delete(controller)
+                }
               }
-              return jobOutcome(await running, resolved.maxResultChars)
-            } catch (error) {
-              readiness.resolve(startupFailure(jobId, error, ownedAbort.signal.aborted))
-              return { status: ownedAbort.signal.aborted ? 'killed' : 'failed', detail: reason(error), output: JSON.stringify(startupFailure(jobId, error, ownedAbort.signal.aborted)) }
-            } finally {
-              if (controller) {
-                await controller.dispose()
-                active.delete(controller)
-              }
+            })()
+            hooks = {
+              cancel(value?: string) {
+                if (cancellationApplied) return
+                if (!cancelled) {
+                  cancelled = true
+                  cancelReason = value ?? cancelReason
+                }
+                controller!.cancel(cancelReason)
+                cancellationApplied = true
+              },
+              done,
             }
-          })()
-          return {
-            cancel(value?: string) {
-              if (cancelled) return
-              cancelled = true
-              cancelReason = value ?? cancelReason
-              controller!.cancel(cancelReason)
-              ownedAbort.abort(new Error(cancelReason))
-            },
-            done,
-          }
-        },
-      })
-      jobId = String(id)
-      gate.resolve()
-      return await readiness.promise as never
+            return hooks
+          },
+        })
+        jobId = String(id)
+        gate.resolve()
+        return await readiness.promise as never
+      } catch (error) {
+        cancelled = true
+        cancelReason = reason(error)
+        controller?.cancel(cancelReason)
+        gate.resolve()
+        if (hooks) await hooks.done.catch(() => undefined)
+        else if (controller) { await controller.dispose(); active.delete(controller) }
+        return startupFailure(jobId || 'unregistered', error, false) as never
+      }
     },
     presentCall: args => presentCall(args as unknown as AutoresearchToolInput),
     presentResult: () => ({ card: 'generic' }),
   }))
 
+  let released = false
   ctx.effect(() => async () => {
+    if (released) return
+    released = true
     releaseTool()
     releasePrompt()
     const settling = [...active].map(async controller => { controller.cancel('autoresearch plugin disposed'); await controller.dispose() })
