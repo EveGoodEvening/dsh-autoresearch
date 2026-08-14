@@ -291,52 +291,54 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 
 ## SQLite schema and repositories
 
-- [ ] Create `src/tracker.ts`.
-- [ ] Use built-in `node:sqlite`.
-- [ ] Verify exact `node:sqlite` APIs on the supported Node engine floor.
-- [ ] Create explicit schema version table/metadata.
-- [ ] Enable foreign keys on every connection.
-- [ ] Enable WAL.
-- [ ] Create `runs` table with complete identity, policy, state, timestamps, and best/terminal facts.
-- [ ] Create `experiments` table with full lineage, command, exit, metric, decision, and failure facts.
-- [ ] Create `artifacts` table with kind/location/size/hash/ownership/retention facts.
-- [ ] Create `transitions` table with monotonic sequence and from/to intent/outcome facts.
-- [ ] Add required indexes and uniqueness constraints.
-- [ ] Implement first-use atomic creation after allowed read-only repository/common-directory/start-SHA discovery.
-- [ ] Implement idempotent reopen.
-- [ ] Implement forward transactional migrations only.
-- [ ] Refuse unknown newer schema with typed `blocked` reason.
-- [ ] Store discovered repository identity and immutable start SHA in the initial run row.
-- [ ] Require initial run creation before lock acquisition, ref/branch/worktree allocation, evaluator spawn, or any other mutating/allocating setup side effect.
-- [ ] Implement transactional state-transition validation.
-- [ ] Implement atomic transition plus associated facts/artifact references.
-- [ ] Keep agent/process waits outside transactions.
-- [ ] Implement immutable policy/provenance snapshots.
-- [ ] Implement repository/run-tag active-lock identity and immutable run-id-bearing branch/worktree records needed for reconciliation.
-- [ ] Persist evaluator spawn intent, provider-observed PID, and attempt facts; document PID as diagnostic only without provider-supported stable recovery identity.
-- [ ] Implement queries for unresolved experiment and conservative recovery state, including terminal-owner stale-lock release.
-- [ ] Implement deterministic TSV compatibility export.
-- [ ] Rebuild TSV atomically after terminal experiment commits.
-- [ ] Ensure TSV is never read as recovery/decision authority.
+- [x] Create `src/tracker.ts`.
+- [x] Use built-in `node:sqlite`.
+- [x] Verify exact `node:sqlite` APIs on the supported Node engine floor.
+- [x] Create explicit schema version table/metadata.
+- [x] Enable foreign keys on every connection.
+- [x] Enable WAL.
+- [x] Create `runs` table with complete identity, policy, state, timestamps, and best/terminal facts.
+- [x] Create `experiments` table with full lineage, command, exit, metric, decision, and failure facts.
+- [x] Create `artifacts` table with kind/location/size/hash/ownership/retention facts.
+- [x] Create `transitions` table with monotonic sequence and from/to intent/outcome facts.
+- [x] Add required indexes and uniqueness constraints.
+- [x] Implement first-use atomic creation after allowed read-only repository/common-directory/start-SHA discovery.
+- [x] Implement idempotent reopen.
+- [x] Implement forward transactional migrations only.
+- [x] Refuse unknown newer schema with typed `blocked` reason.
+- [x] Store discovered repository identity and immutable start SHA in the initial run row.
+- [x] Require initial run creation before lock acquisition, ref/branch/worktree allocation, evaluator spawn, or any other mutating/allocating setup side effect.
+- [x] Implement transactional state-transition validation.
+- [x] Implement atomic transition plus associated facts/artifact references.
+- [x] Keep agent/process waits outside transactions.
+- [x] Implement immutable policy/provenance snapshots.
+- [x] Implement repository/run-tag active-lock identity and immutable run-id-bearing branch/worktree records needed for reconciliation.
+- [x] Persist evaluator spawn intent, provider-observed PID, and attempt facts; document PID as diagnostic only without provider-supported stable recovery identity.
+- [x] Implement queries for unresolved experiment and conservative recovery state, including terminal-owner stale-lock release.
+- [x] Implement deterministic TSV compatibility export.
+- [x] Rebuild TSV atomically after terminal experiment commits.
+- [x] Ensure TSV is never read as recovery/decision authority.
 
 ## Chunk 04 verification gate
 
-- [ ] Test first tracker creation after read-only repository discovery.
-- [ ] Test foreign keys enabled.
-- [ ] Test WAL enabled.
-- [ ] Test idempotent reopen.
-- [ ] Test forward migration.
-- [ ] Test refusal of newer schema.
-- [ ] Test monotonic transition ordering.
-- [ ] Test invalid transition rejection.
-- [ ] Test atomic experiment/result/artifact writes.
-- [ ] Test crash between persisted intent and observed outcome.
-- [ ] Test transaction rollback leaves no partial authority.
-- [ ] Test evaluator spawn intent/PID/attempt persistence.
-- [ ] Test terminal state is durable before lock release and a stale lock owned by a terminal run is safely releasable.
-- [ ] Test deterministic TSV export.
-- [ ] Test TSV rebuild from SQLite.
-- [ ] Test recovery succeeds with TSV absent/corrupted.
+- [x] Test first tracker creation after read-only repository discovery.
+- [x] Test foreign keys enabled.
+- [x] Test WAL enabled.
+- [x] Test idempotent reopen.
+- [x] Test forward migration.
+- [x] Test refusal of newer schema.
+- [x] Test monotonic transition ordering.
+- [x] Test invalid transition rejection.
+- [x] Test atomic experiment/result/artifact writes.
+- [x] Test crash between persisted intent and observed outcome.
+- [x] Test transaction rollback leaves no partial authority.
+- [x] Test evaluator spawn intent/PID/attempt persistence.
+- [x] Test terminal state is durable before lock release and a stale lock owned by a terminal run is safely releasable.
+- [x] Test deterministic TSV export.
+- [x] Test TSV rebuild from SQLite.
+- [x] Test recovery succeeds with TSV absent/corrupted.
+
+- [x] Record focused Chunk 04 verification: `pnpm run typecheck` passed; Vitest passed 4 files / 61 tests; `pnpm run build` passed.
 
 ## Chunk 04 review gate
 
@@ -348,11 +350,11 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 ## Chunk 04 implementation commit gate
 
 - [ ] Confirm tracker API is frozen enough for Git/evaluator lanes.
-- [ ] Commit tracker and focused tests.
+- [x] Commit tracker and focused tests as `cfc2e45366961c10b97b6fab63ffea9abfb3b5dd` (`feat(tracker): add durable autoresearch state`).
 
 ## Chunk 04 tracker-accounting gate
 
-- [ ] Record Chunk 04 implementation commit full SHA after it exists.
+- [x] Record Chunk 04 implementation commit full SHA after it exists: `cfc2e45366961c10b97b6fab63ffea9abfb3b5dd`.
 - [ ] Commit the checklist update separately from the Chunk 04 implementation commit.
 
 # Chunk 05 — `05-build-host-git-and-evaluator-boundaries`
