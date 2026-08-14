@@ -1,11 +1,13 @@
 import { spawn } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { SubprocessHandle, SubprocessOutcome, SubprocessOutputRead, SubprocessOutputReader, SubprocessSpawnSpec } from '@deepseek-ai/dsh-subprocess'
-import { captureEvaluatorWorktreeIdentity, freezeEvaluatorProvenance, parseFinalLineMetric, runEvaluator } from '../src/evaluator.ts'
+import { createEvaluatorBoundary, freezeEvaluatorProvenance, parseFinalLineMetric, runEvaluator } from '../src/evaluator.ts'
 import type { EvaluatorPersistence } from '../src/evaluator.ts'
+import { EvaluatorArtifactWriter } from '../src/evaluator-artifacts.ts'
+import { StateLayout } from '../src/state-layout.ts'
 
 interface FakeOptions {
   stdout?: SubprocessOutputRead
@@ -22,7 +24,7 @@ afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: 
 
 function fixture(): { root: string; artifacts: string } {
   const root = mkdtempSync(join(tmpdir(), 'autoresearch-evaluator-')); roots.push(root)
-  const artifacts = join(root, '.artifacts')
+  const artifacts = mkdtempSync(join(tmpdir(), 'autoresearch-artifacts-')); roots.push(artifacts)
   mkdirSync(join(root, 'bench'))
   writeFileSync(join(root, 'bench', 'evaluate.mjs'), 'fixture evaluator\n')
   return { root, artifacts }
@@ -143,11 +145,9 @@ function persistence(): EvaluatorPersistence & {
 function options(runtime = fakeRuntime(), overrides: Record<string, unknown> = {}) {
   const paths = fixture()
   const evaluation = (overrides.evaluation ?? { command: 'node', args: ['evaluate.mjs'], cwd: 'bench' }) as { command: string; args: string[]; cwd?: string }
-  const boundary = overrides.boundary ?? {
-    worktree: captureEvaluatorWorktreeIdentity(paths.root),
-    normalizedEvaluation: evaluation,
-    normalizedPolicySha256: 'a'.repeat(64),
-  }
+  const boundary = overrides.boundary ?? createEvaluatorBoundary(paths.root, {
+    evaluation, normalizedPolicySha256: 'a'.repeat(64), evaluatorFiles: ['bench/evaluate.mjs'], runId: 'run', attemptId: 'attempt-1',
+  })
   return {
     runtime,
     paths,
@@ -158,8 +158,8 @@ function options(runtime = fakeRuntime(), overrides: Record<string, unknown> = {
       evaluation,
       metricName: 'score', metricDirection: 'minimize' as const,
       timeoutMs: 1_000, terminationGraceMs: 25, maxStdoutBytes: 128, maxStderrBytes: 64,
-      artifactDirectory: paths.artifacts, artifactPrefix: 'attempt-1', environment: { LANG: 'C' },
-      evaluatorFiles: ['bench/evaluate.mjs'], dataset: { version: 'v1', name: 'fixture' }, policy: { tie: 'reject' },
+      artifactWriter: EvaluatorArtifactWriter.mint(StateLayout.open(paths.artifacts), 'run', 'experiment', 'attempt-1'), environment: { LANG: 'C' },
+      dataset: { version: 'v1', name: 'fixture' }, policy: { tie: 'reject' },
       persistence: persistence(),
       ...overrides,
       boundary,
@@ -308,11 +308,11 @@ describe('host-owned evaluator execution', () => {
     const evaluation = { command: process.execPath, args: ['-e', script], cwd: 'bench' }
     const pending = runEvaluator({
       subprocess: new LocalSubprocess(), worktree: paths.root,
-      boundary: { worktree: captureEvaluatorWorktreeIdentity(paths.root), normalizedEvaluation: evaluation, normalizedPolicySha256: 'b'.repeat(64) },
+      boundary: createEvaluatorBoundary(paths.root, { evaluation, normalizedPolicySha256: 'b'.repeat(64) }),
       evaluation,
       metricName: 'score', metricDirection: 'minimize', timeoutMs: mode === 'timeout' ? 150 : 5_000,
       terminationGraceMs: 30, maxStdoutBytes: 128, maxStderrBytes: 64,
-      artifactDirectory: paths.artifacts, artifactPrefix: mode, persistence: durable,
+      artifactWriter: EvaluatorArtifactWriter.mint(StateLayout.open(paths.artifacts), 'run', 'experiment', mode), persistence: durable,
       ...(mode === 'repeated-cancellation' ? { signal: controller.signal } : {}),
     })
     while (!readFileExists(childPidPath)) await new Promise(resolve => setTimeout(resolve, 5))
@@ -344,7 +344,7 @@ describe('host-owned evaluator execution', () => {
     const spill = join(paths.root, 'spill.log')
     writeFileSync(spill, 'log\n{"score":4}\n')
     const runtime = fakeRuntime({ stdout: reader('log\n{"score":4}\n', false, spill) })
-    const setup = options(runtime, { artifactDirectory: paths.artifacts })
+    const setup = options(runtime)
     const result = await runEvaluator(setup.value)
     expect(result).toMatchObject({ kind: 'measured', metric: 4 })
     expect(readFileSync(result.artifacts[0]!.location, 'utf8')).toBe('log\n{"score":4}\n')
@@ -405,7 +405,7 @@ describe('host-owned evaluator execution', () => {
 
   it('binds cwd and argv to the frozen normalized policy and immutable controller worktree identity', async () => {
     const mismatchedPolicy = options(fakeRuntime(), { evaluation: { command: 'node', args: ['evaluate.mjs'], cwd: 'bench' } })
-    mismatchedPolicy.value.boundary = { ...mismatchedPolicy.value.boundary, normalizedEvaluation: { command: 'node', args: ['other.mjs'], cwd: 'bench' } }
+    mismatchedPolicy.value.boundary = createEvaluatorBoundary(mismatchedPolicy.paths.root, { evaluation: { command: 'node', args: ['other.mjs'], cwd: 'bench' }, normalizedPolicySha256: 'a'.repeat(64), evaluatorFiles: ['bench/evaluate.mjs'] })
     await expect(runEvaluator(mismatchedPolicy.value)).rejects.toThrow(/frozen normalized policy/)
     expect(mismatchedPolicy.runtime.spec).toBeUndefined()
 
@@ -503,9 +503,9 @@ describe('host-owned evaluator execution', () => {
     const durable = persistence()
     const result = await runEvaluator({
       subprocess: new LocalSubprocess(), worktree: paths.root,
-      boundary: { worktree: captureEvaluatorWorktreeIdentity(paths.root), normalizedEvaluation: evaluation, normalizedPolicySha256: 'c'.repeat(64) },
+      boundary: createEvaluatorBoundary(paths.root, { evaluation, normalizedPolicySha256: 'c'.repeat(64) }),
       evaluation, metricName: 'score', metricDirection: 'minimize', timeoutMs: 2_000, terminationGraceMs: 25,
-      maxStdoutBytes: 64, maxStderrBytes: 48, artifactDirectory: paths.artifacts, artifactPrefix: stream, persistence: durable,
+      maxStdoutBytes: 64, maxStderrBytes: 48, artifactWriter: EvaluatorArtifactWriter.mint(StateLayout.open(paths.artifacts), 'run', 'experiment', stream), persistence: durable,
     })
     expect(result).toMatchObject(stream === 'stdout' ? { kind: 'failed', code: 'output-limit' } : { kind: 'measured', metric: 5 })
     const artifact = result.artifacts.find(item => item.kind === stream)!
@@ -514,6 +514,85 @@ describe('host-owned evaluator execution', () => {
     expect(durable.outcome?.[1].find(item => item.kind === stream)).toMatchObject({ truncated: true })
   })
 
+
+  it('owns a deeply frozen evaluation snapshot and detects original alias mutation by digest', async () => {
+    const setup = options()
+    const original = { command: 'node', args: ['evaluate.mjs'], cwd: 'bench' }
+    const boundary = createEvaluatorBoundary(setup.paths.root, { evaluation: original, normalizedPolicySha256: 'd'.repeat(64), evaluatorFiles: ['bench/evaluate.mjs'] })
+    original.args[0] = 'mutated.mjs'
+    original.cwd = '.'
+    expect(boundary.normalizedEvaluation).toEqual({ command: 'node', args: ['evaluate.mjs'], cwd: 'bench' })
+    expect(Object.isFrozen(boundary.normalizedEvaluation)).toBe(true)
+    expect(Object.isFrozen(boundary.normalizedEvaluation.args)).toBe(true)
+    setup.value.evaluation = original
+    setup.value.boundary = boundary
+    await expect(runEvaluator(setup.value)).rejects.toThrow(/policy digest/)
+    expect(setup.runtime.spec).toBeUndefined()
+  })
+
+  it('exposes and immediately revalidates an immutable declared-file manifest before spawn', async () => {
+    const setup = options()
+    expect(setup.value.boundary.declaredFiles).toEqual([expect.objectContaining({ path: 'bench/evaluate.mjs', sha256: expect.stringMatching(/^[0-9a-f]{64}$/) })])
+    expect(Object.isFrozen(setup.value.boundary.declaredFiles)).toBe(true)
+    writeFileSync(join(setup.paths.root, 'bench', 'evaluate.mjs'), 'changed after boundary\n')
+    await expect(runEvaluator(setup.value)).rejects.toThrow(/declared evaluator file changed/)
+    expect(setup.runtime.spec).toBeUndefined()
+  })
+
+  it('redacts secret aliases in argv, cwd, nested policy, persistence errors, results, logs, and artifact metadata', async () => {
+    const secret = 'secret-cwd-token'
+    const paths = fixture()
+    mkdirSync(join(paths.root, secret))
+    writeFileSync(join(paths.root, secret, 'evaluate.mjs'), 'fixture\n')
+    const evaluation = { command: 'node', args: [secret], cwd: secret }
+    const boundary = createEvaluatorBoundary(paths.root, { evaluation, normalizedPolicySha256: 'e'.repeat(64), evaluatorFiles: [`${secret}/evaluate.mjs`] })
+    const durable = persistence()
+    const result = await runEvaluator({ subprocess: fakeRuntime({ stdout: reader(`${secret}\n{"score":1}\n`) }).runtime, worktree: paths.root, boundary, evaluation,
+      metricName: 'score', metricDirection: 'minimize', timeoutMs: 1000, terminationGraceMs: 25, maxStdoutBytes: 128, maxStderrBytes: 64,
+      artifactWriter: EvaluatorArtifactWriter.mint(StateLayout.open(paths.artifacts), 'run', 'experiment', 'secret-test'), environment: { TOKEN: secret }, policy: { nested: [secret] }, persistence: durable })
+    expect(JSON.stringify({ result, intent: durable.intent, outcome: durable.outcome })).not.toContain(secret)
+    expect(durable.intent?.argv).toEqual(['node', '[REDACTED]'])
+    expect(durable.intent?.cwd).toContain('[REDACTED]')
+    expect(result.artifacts.every(item => !item.location.includes(secret))).toBe(true)
+  })
+
+  it('writes artifacts exclusively under an owner-only StateLayout capability', async () => {
+    const paths = fixture()
+    const writer = EvaluatorArtifactWriter.mint(StateLayout.open(paths.artifacts), 'run', 'experiment', 'secure')
+    const result = writer.write(reader('ok'), reader('err'), [])
+    expect(result.every(item => item.location.startsWith(realpathSync(paths.artifacts)))).toBe(true)
+    expect(statSync(writer.attemptDirectory).mode & 0o077).toBe(0)
+    expect(result.every(item => (statSync(item.location).mode & 0o077) === 0)).toBe(true)
+    expect(() => writer.write(reader('again'), reader('again'), [])).toThrow(/single-use/)
+
+    const collision = EvaluatorArtifactWriter.mint(StateLayout.open(paths.artifacts), 'run', 'experiment', 'collision')
+    writeFileSync(join(collision.attemptDirectory, 'stdout.log'), 'occupied')
+    expect(() => collision.write(reader('outside'), reader(''), [])).toThrow()
+    expect(readFileSync(join(collision.attemptDirectory, 'stdout.log'), 'utf8')).toBe('occupied')
+
+    const linked = EvaluatorArtifactWriter.mint(StateLayout.open(paths.artifacts), 'run', 'experiment', 'linked')
+    const outside = mkdtempSync(join(tmpdir(), 'autoresearch-artifact-outside-')); roots.push(outside)
+    symlinkSync(join(outside, 'captured'), join(linked.attemptDirectory, 'stdout.log'))
+    expect(() => linked.write(reader('escape'), reader(''), [])).toThrow()
+    expect(() => lstatSync(join(outside, 'captured'))).toThrow()
+
+    const replaced = EvaluatorArtifactWriter.mint(StateLayout.open(paths.artifacts), 'run', 'experiment', 'replaced-parent')
+    const displaced = `${replaced.attemptDirectory}-old`
+    renameSync(replaced.attemptDirectory, displaced)
+    symlinkSync(outside, replaced.attemptDirectory, 'dir')
+    expect(() => replaced.write(reader('escape'), reader(''), [])).toThrow(/directory identity changed/)
+    expect(() => lstatSync(join(outside, 'stdout.log'))).toThrow()
+  })
+
+  it('rejects symlinked provider spills without copying them', async () => {
+    const setup = options()
+    const outside = join(setup.paths.root, 'outside-spill')
+    writeFileSync(outside, 'unsafe')
+    const spill = join(setup.paths.root, 'spill-link')
+    symlinkSync(outside, spill)
+    setup.runtime.runtime.spawn = () => fakeRuntime({ stdout: reader('unsafe', false, spill) }).runtime.spawn({ argv: ['x'], cwd: setup.paths.root, env: {}, stdio: { stdin: 'ignore', stdout: 'ignore', stderr: 'ignore' } })
+    await expect(runEvaluator(setup.value)).rejects.toThrow(/spill.*symlink/)
+  })
 
   it('supports arbitrary override names but rejects managed environment keys', async () => {
     const supported = options(fakeRuntime(), { environment: { API_TOKEN: 'supported-secret' } })

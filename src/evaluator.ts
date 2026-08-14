@@ -1,9 +1,10 @@
 import { createHash } from 'node:crypto'
-import { chmodSync, closeSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs'
+import { closeSync, fstatSync, lstatSync, openSync, readFileSync, realpathSync, statSync } from 'node:fs'
 import { constants } from 'node:fs'
 import { isAbsolute, relative, resolve, sep } from 'node:path'
 import type { SubprocessHandle, SubprocessOutcome, SubprocessOutputRead, SubprocessSpawnSpec } from '@deepseek-ai/dsh-subprocess'
 import type { EvaluatorArgv } from './types.ts'
+import { EvaluatorArtifactWriter, type EvaluatorArtifactRecord } from './evaluator-artifacts.js'
 
 export const EVALUATOR_PARSER_VERSION = 'final-line-json-v1' as const
 
@@ -23,10 +24,21 @@ export interface EvaluatorWorktreeIdentity {
   readonly ino: number
 }
 
+export interface EvaluatorDeclaredFile {
+  readonly path: string
+  readonly sha256: string
+  readonly dev: number
+  readonly ino: number
+}
+
 export interface EvaluatorBoundaryIdentity {
   readonly worktree: EvaluatorWorktreeIdentity
   readonly normalizedEvaluation: EvaluatorArgv
+  readonly evaluationSha256: string
   readonly normalizedPolicySha256: string
+  readonly declaredFiles: readonly EvaluatorDeclaredFile[]
+  readonly runId?: string
+  readonly attemptId?: string
 }
 
 export interface FrozenEvaluatorProvenance {
@@ -36,13 +48,7 @@ export interface FrozenEvaluatorProvenance {
   readonly sha256: string
 }
 
-export interface EvaluatorArtifactInput {
-  readonly kind: 'stdout' | 'stderr'
-  readonly location: string
-  readonly sizeBytes: number
-  readonly sha256: string
-  readonly truncated: boolean
-}
+export type EvaluatorArtifactInput = EvaluatorArtifactRecord
 
 export interface EvaluatorAttemptFacts {
   readonly providerPid?: number
@@ -78,10 +84,8 @@ export interface EvaluatorRunOptions {
   readonly terminationGraceMs: number
   readonly maxStdoutBytes: number
   readonly maxStderrBytes: number
-  readonly artifactDirectory: string
-  readonly artifactPrefix: string
+  readonly artifactWriter: EvaluatorArtifactWriter
   readonly environment?: Readonly<Record<string, string>>
-  readonly evaluatorFiles?: readonly string[]
   readonly dataset?: Readonly<Record<string, string>>
   readonly policy?: unknown
   readonly signal?: AbortSignal
@@ -96,24 +100,58 @@ export function captureEvaluatorWorktreeIdentity(worktree: string): EvaluatorWor
   return Object.freeze({ canonical, dev: stat.dev, ino: stat.ino })
 }
 
+export interface EvaluatorBoundaryInput {
+  readonly evaluation: EvaluatorArgv
+  readonly normalizedPolicySha256: string
+  readonly evaluatorFiles?: readonly string[]
+  readonly runId?: string
+  readonly attemptId?: string
+}
+
+/** Captures evaluator policy facts by value. The string-cwd stability guarantee assumes a trusted provider and no hostile same-UID racer. */
+export function createEvaluatorBoundary(worktree: string, input: EvaluatorBoundaryInput): EvaluatorBoundaryIdentity {
+  if (!/^[0-9a-f]{64}$/u.test(input.normalizedPolicySha256)) throw new TypeError('normalizedPolicySha256 must be a lowercase SHA-256')
+  const root = canonicalWorktree(worktree)
+  const evaluation = deepFreeze(structuredClone(input.evaluation))
+  const declaredFiles = Object.freeze([...new Set(input.evaluatorFiles ?? [])].sort().map(path => captureDeclaredFile(root, path)))
+  return Object.freeze({
+    worktree: captureEvaluatorWorktreeIdentity(root),
+    normalizedEvaluation: evaluation,
+    evaluationSha256: evaluationDigest(evaluation),
+    normalizedPolicySha256: input.normalizedPolicySha256,
+    declaredFiles,
+    ...(input.runId === undefined ? {} : { runId: input.runId }),
+    ...(input.attemptId === undefined ? {} : { attemptId: input.attemptId }),
+  })
+}
+
+export function revalidateEvaluatorBoundary(worktree: string, boundary: EvaluatorBoundaryIdentity): void {
+  const root = assertBoundaryIdentity(worktree, boundary)
+  for (const file of boundary.declaredFiles) {
+    const current = captureDeclaredFile(root, file.path)
+    if (current.dev !== file.dev || current.ino !== file.ino || current.sha256 !== file.sha256) throw new TypeError(`declared evaluator file changed before spawn: ${file.path}`)
+  }
+}
+
 export function freezeEvaluatorProvenance(worktree: string, input: EvaluatorProvenanceInput): FrozenEvaluatorProvenance {
   const root = canonicalWorktree(worktree)
   const fileHashes: Record<string, string> = Object.create(null) as Record<string, string>
   for (const file of [...(input.evaluatorFiles ?? [])].sort()) {
     fileHashes[file] = sha256(readContainedFile(root, file, 'evaluator file'))
   }
+  const secrets = Object.values(input.environment ?? {})
   const value = {
-    evaluation: { command: input.evaluation.command, args: [...input.evaluation.args], ...(input.evaluation.cwd === undefined ? {} : { cwd: input.evaluation.cwd }) },
+    evaluation: durableSerialize(input.evaluation, secrets),
     evaluatorFileHashes: fileHashes,
-    dataset: sortedRecord(input.dataset ?? {}),
+    dataset: durableSerialize(sortedRecord(input.dataset ?? {}), secrets),
     environment: hashedEnvironment(input.environment ?? {}),
-    metricName: input.metricName,
+    metricName: redact(input.metricName, secrets),
     metricDirection: input.metricDirection,
     parserVersion: EVALUATOR_PARSER_VERSION,
-    policySha256: sha256(canonicalJson(input.policy ?? null)),
+    policySha256: sha256(canonicalJson(durableSerialize(input.policy ?? null, secrets))),
   }
   const canonical = canonicalJson(value)
-  return { parserVersion: EVALUATOR_PARSER_VERSION, evaluatorFileHashes: fileHashes, canonical, sha256: sha256(canonical) }
+  return deepFreeze({ parserVersion: EVALUATOR_PARSER_VERSION, evaluatorFileHashes: fileHashes, canonical, sha256: sha256(canonical) })
 }
 
 export function parseFinalLineMetric(stdout: string, metricName: string): number {
@@ -152,21 +190,23 @@ export async function runEvaluator(options: EvaluatorRunOptions): Promise<Evalua
   const env = explicitEnvironment(options.environment ?? {})
   const secrets = Object.values(env)
   const root = assertBoundaryIdentity(options.worktree, options.boundary)
-  assertNormalizedEvaluation(options.evaluation, options.boundary.normalizedEvaluation)
+  assertNormalizedEvaluation(options.evaluation, options.boundary.evaluationSha256)
   const cwdIdentity = capturePathIdentity(root, options.evaluation.cwd ?? '.', 'evaluator cwd', true)
   const cwd = cwdIdentity.canonical
   const persistedEnv = hashedEnvironment(env)
+  revalidateEvaluatorBoundary(root, options.boundary)
   const provenance = freezeEvaluatorProvenance(root, {
-    evaluation: options.evaluation,
-    ...(options.evaluatorFiles === undefined ? {} : { evaluatorFiles: options.evaluatorFiles }),
+    evaluation: options.boundary.normalizedEvaluation,
+    evaluatorFiles: options.boundary.declaredFiles.map(file => file.path),
     ...(options.dataset === undefined ? {} : { dataset: options.dataset }),
     environment: env,
     metricName: options.metricName,
     metricDirection: options.metricDirection,
-    policy: { normalizedPolicySha256: options.boundary.normalizedPolicySha256, policy: options.policy ?? null },
+    policy: { normalizedPolicySha256: options.boundary.normalizedPolicySha256, evaluationSha256: options.boundary.evaluationSha256, policy: options.policy ?? null },
   })
   const argv = Object.freeze([options.evaluation.command, ...options.evaluation.args])
-  persistSafely(() => options.persistence.persistSpawnIntent({ argv, cwd, env: persistedEnv, provenanceSha256: provenance.sha256 }), secrets)
+  const durableIntent = durableSerialize({ argv, cwd, env: persistedEnv, provenanceSha256: provenance.sha256 }, secrets) as Parameters<EvaluatorPersistence['persistSpawnIntent']>[0]
+  persistSafely(() => options.persistence.persistSpawnIntent(durableIntent), secrets)
   const controller = new AbortController()
   let cause: 'timeout' | 'cancelled' | undefined
   const cancel = (): void => { if (cause === undefined) cause = 'cancelled'; controller.abort() }
@@ -178,7 +218,7 @@ export async function runEvaluator(options: EvaluatorRunOptions): Promise<Evalua
     const facts: EvaluatorAttemptFacts = {
       exitedAt: now().toISOString(), exitCode: null, signal: null, timedOut: false, cancelled: true, processTreeQuiescent: true,
     }
-    const artifacts = persistArtifacts(options.artifactDirectory, options.artifactPrefix, undefined, undefined, Object.values(env))
+    const artifacts = options.artifactWriter.write(undefined, undefined, secrets)
     persistSafely(() => options.persistence.persistAttemptOutcome(facts, artifacts), secrets)
     return { kind: 'failed', code: 'cancelled', message: 'evaluator cancelled', provenanceSha256: provenance.sha256, exit: facts, artifacts }
   }
@@ -191,6 +231,7 @@ export async function runEvaluator(options: EvaluatorRunOptions): Promise<Evalua
   let terminateOnAbort: (() => void) | undefined
   try {
     assertPathIdentity(root, cwdIdentity, 'evaluator cwd')
+    revalidateEvaluatorBoundary(root, options.boundary)
     handle = options.subprocess.spawn({
       argv, cwd, env, signal: controller.signal, graceMs: options.terminationGraceMs,
       stdio: {
@@ -223,15 +264,16 @@ export async function runEvaluator(options: EvaluatorRunOptions): Promise<Evalua
   }
   const stdoutRead = handle?.collected.stdout?.readFrom(0)
   const stderrRead = handle?.collected.stderr?.readFrom(0)
-  const artifacts = persistArtifacts(options.artifactDirectory, options.artifactPrefix, stdoutRead, stderrRead, Object.values(env))
-  const facts: EvaluatorAttemptFacts = {
+  const artifacts = options.artifactWriter.write(stdoutRead, stderrRead, secrets)
+  const rawFacts: EvaluatorAttemptFacts = {
     ...(handle === undefined ? {} : { providerPid: handle.pid }), ...(spawnedAt === undefined ? {} : { spawnedAt }),
     exitedAt: now().toISOString(), exitCode: outcome.exitCode, signal: outcome.signal,
     timedOut: cause === 'timeout', cancelled: cause === 'cancelled', processTreeQuiescent: quiescent,
-    ...(spawnFailure === undefined ? {} : { failureCode: 'spawn', failureMessage: safeErrorMessage(spawnFailure, Object.values(env)) }),
+    ...(spawnFailure === undefined ? {} : { failureCode: 'spawn', failureMessage: safeErrorMessage(spawnFailure, secrets) }),
   }
+  const facts = deepFreeze(durableSerialize(rawFacts, secrets)) as EvaluatorAttemptFacts
   persistSafely(() => options.persistence.persistAttemptOutcome(facts, artifacts), secrets)
-  const base = { provenanceSha256: provenance.sha256, exit: facts, artifacts } as const
+  const base = deepFreeze({ provenanceSha256: provenance.sha256, exit: facts, artifacts })
   if (spawnFailure !== undefined) return { kind: 'failed', code: 'spawn', message: safeErrorMessage(spawnFailure, Object.values(env)), ...base }
   if (cause === 'cancelled') return { kind: 'failed', code: 'cancelled', message: 'evaluator cancelled', ...base }
   if (cause === 'timeout') return { kind: 'failed', code: 'timeout', message: 'evaluator timed out', ...base }
@@ -256,8 +298,8 @@ function assertBoundaryIdentity(worktree: string, boundary: EvaluatorBoundaryIde
   return canonical
 }
 
-function assertNormalizedEvaluation(requested: EvaluatorArgv, normalized: EvaluatorArgv): void {
-  if (canonicalJson(requested) !== canonicalJson(normalized)) throw new TypeError('evaluator argv/cwd does not match the frozen normalized policy')
+function assertNormalizedEvaluation(requested: EvaluatorArgv, capturedDigest: string): void {
+  if (evaluationDigest(requested) !== capturedDigest) throw new TypeError('evaluator argv/cwd does not match the frozen normalized policy digest')
 }
 
 function persistSafely(action: () => void, secrets: readonly string[]): void {
@@ -333,23 +375,7 @@ function hashedEnvironment(environment: Readonly<Record<string, string>>): Reado
   return Object.freeze(Object.fromEntries(Object.entries(environment).sort(([a], [b]) => a.localeCompare(b)).map(([key, value]) => [key, `sha256:${sha256(value)}`])))
 }
 
-function persistArtifacts(directory: string, prefix: string, stdout: SubprocessOutputRead | undefined, stderr: SubprocessOutputRead | undefined, secrets: readonly string[]): readonly EvaluatorArtifactInput[] {
-  mkdirSync(directory, { recursive: true, mode: 0o700 })
-  chmodSync(directory, 0o700)
-  return ([['stdout', stdout], ['stderr', stderr]] as const).map(([kind, read]) => {
-    const destination = resolve(directory, `${safeName(prefix)}.${kind}.log`)
-    const source = read?.spillPath === undefined ? read?.text ?? '' : readFileSync(read.spillPath, 'utf8')
-    writeFileSync(destination, redact(source, secrets), { mode: 0o600 })
-    chmodSync(destination, 0o600)
-    const bytes = readFileSync(destination)
-    return { kind, location: destination, sizeBytes: statSync(destination).size, sha256: sha256(bytes), truncated: read?.lossy ?? false }
-  })
-}
 
-function safeName(value: string): string {
-  if (!/^[A-Za-z0-9._-]+$/u.test(value) || value === '.' || value === '..') throw new TypeError('artifactPrefix contains unsafe characters')
-  return value
-}
 
 function validatePositive(value: number, name: string): void {
   if (!Number.isSafeInteger(value) || value <= 0) throw new TypeError(`${name} must be a positive integer`)
@@ -375,4 +401,39 @@ function redact(value: string, secrets: readonly string[]): string {
 }
 function safeErrorMessage(error: unknown, secrets: readonly string[]): string {
   return redact(error instanceof Error ? error.message : String(error), secrets)
+}
+
+function evaluationDigest(evaluation: EvaluatorArgv): string {
+  return sha256(canonicalJson({ command: evaluation.command, args: [...evaluation.args], ...(evaluation.cwd === undefined ? {} : { cwd: evaluation.cwd }) }))
+}
+
+function captureDeclaredFile(root: string, path: string): EvaluatorDeclaredFile {
+  const identity = capturePathIdentity(root, path, 'declared evaluator file', false)
+  const bytes = readContainedFile(root, path, 'declared evaluator file')
+  return Object.freeze({ path: normalizedRelativePath(root, identity.canonical), sha256: sha256(bytes), dev: identity.dev, ino: identity.ino })
+}
+
+function normalizedRelativePath(root: string, canonical: string): string {
+  const path = relative(root, canonical).split(sep).join('/')
+  if (path === '' || path.startsWith('../')) throw new TypeError('declared evaluator file must be beneath the worktree')
+  return path
+}
+
+function durableSerialize<T>(value: T, secrets: readonly string[]): T {
+  if (typeof value === 'string') return redact(value, secrets) as T
+  if (Array.isArray(value)) return value.map(item => durableSerialize(item, secrets)) as T
+  if (value !== null && typeof value === 'object') {
+    const result: Record<string, unknown> = Object.create(null) as Record<string, unknown>
+    for (const [key, item] of Object.entries(value)) result[key] = durableSerialize(item, secrets)
+    return result as T
+  }
+  return value
+}
+
+function deepFreeze<T>(value: T): T {
+  if (value !== null && typeof value === 'object' && !Object.isFrozen(value)) {
+    for (const item of Object.values(value)) deepFreeze(item)
+    Object.freeze(value)
+  }
+  return value
 }

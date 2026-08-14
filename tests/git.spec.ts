@@ -1,11 +1,11 @@
 import { execFileSync, spawn } from 'node:child_process'
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { SubprocessHandle, SubprocessOutputReader, SubprocessOutcome, SubprocessSpawnSpec } from '@deepseek-ai/dsh-subprocess'
 import { DurableTracker } from '../src/tracker.ts'
-import { acquireRunLock, allocateRunWorktree, captureGitConfigBaseline, commitCandidate, discoverRepository, durableGitIdentity, GitBoundaryError, makeRunGitIdentity, reconcileAcceptedHead, reconcileRejectedHead, recoverTerminalRunLock, releaseTerminalRunLock, removeRunWorktree, runGit, snapshotCandidate, validateCandidate, type GitContext } from '../src/git.ts'
+import { acquireRunLock, allocateRunWorktree, captureGitConfigBaseline, commitCandidate, discoverRepository, durableGitIdentity, GitBoundaryError, makeRunGitIdentity, reconcileAcceptedHead, reconcileRejectedHead, recoverTerminalRunLock, releaseTerminalRunLock, removeRunWorktree, resolveGitExecutable, runGit, snapshotCandidate, validateCandidate, verifyExactWorktree, type GitContext } from '../src/git.ts'
 
 const roots: string[] = []
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
@@ -26,9 +26,11 @@ class LocalHandle implements SubprocessHandle {
 }
 class LocalSubprocess {
   readonly specs: SubprocessSpawnSpec[] = []; readonly handles: LocalHandle[] = []
+  async resolveExecutable(command: string): Promise<string> { return execFileSync('which', [command]).toString().trim() }
   spawn(spec: SubprocessSpawnSpec): SubprocessHandle {
     this.specs.push(spec); const stdout: Buffer[] = []; const stderr: Buffer[] = []
-    const child = spawn(spec.argv[0]!, spec.argv.slice(1), { cwd: spec.cwd, env: spec.env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] })
+    const child = spawn(spec.argv[0]!, spec.argv.slice(1), { cwd: spec.cwd, env: spec.env, detached: true, stdio: [typeof spec.stdio.stdin === 'object' ? 'pipe' : 'ignore', 'pipe', 'pipe'] })
+    if (typeof spec.stdio.stdin === 'object') child.stdin.end(spec.stdio.stdin.data)
     child.stdout.on('data', (chunk: Buffer) => stdout.push(chunk)); child.stderr.on('data', (chunk: Buffer) => stderr.push(chunk))
     const handle = new LocalHandle(child, stdout, stderr, typeof spec.stdio.stdout === 'object' ? spec.stdio.stdout.maxBytes : 0, typeof spec.stdio.stderr === 'object' ? spec.stdio.stderr.maxBytes : 0)
     this.handles.push(handle); spec.signal?.addEventListener('abort', () => handle.terminate(), { once: true }); return handle
@@ -46,9 +48,11 @@ function fixture() {
 function policy(mutableGlobs = ['src/**'], gitConfig: string[] = []) { return { mutableGlobs, exceptionalAllowlists: { dependencies: [], evaluators: [], datasets: [], submodules: [], gitConfig }, evaluation: { command: 'evaluate.mjs', args: [] }, provenance: {} } }
 function faultingGit(root: string, match: string): string {
   const script = join(root, `fault-git-${Math.random().toString(16).slice(2)}.cjs`); const marker = `${script}.fired`
-  writeFileSync(script, `#!/usr/bin/env node\nconst { existsSync, writeFileSync } = require('node:fs'); const { spawnSync } = require('node:child_process'); const args = process.argv.slice(2); if (!existsSync(${JSON.stringify(marker)}) && args.join(' ').includes(${JSON.stringify(match)})) { writeFileSync(${JSON.stringify(marker)}, '1'); process.stderr.write('injected git failure\\n'); process.exit(91) } const result = spawnSync('git', args, { stdio: 'inherit', env: process.env }); process.exit(result.status ?? 1)\n`)
+  writeFileSync(script, `#!/usr/bin/env node\nconst { existsSync, writeFileSync, readFileSync } = require('node:fs'); const { spawnSync } = require('node:child_process'); const args = process.argv.slice(2); const input = readFileSync(0); if (!existsSync(${JSON.stringify(marker)}) && (args.join(' ') + '\\n' + input).includes(${JSON.stringify(match)})) { writeFileSync(${JSON.stringify(marker)}, '1'); process.stderr.write('injected git failure\\n'); process.exit(91) } const result = spawnSync('git', args, { stdio: ['pipe', 'inherit', 'inherit'], input, env: process.env }); process.exit(result.status ?? 1)\n`)
   chmodSync(script, 0o700); return script
 }
+function markerCommand(path: string): string { return `${process.execPath} -e "require('fs').writeFileSync(${JSON.stringify(path)},'ran')"` }
+
 function ref(root: string, name: string): string { return execFileSync('git', ['-C', root, 'rev-parse', '--verify', name]).toString().trim() }
 async function createRun(f = fixture(), runTag = 'speed', runId = 'run-001', limit = 2) {
   const discovery = await discoverRepository(f.ctx, 'git', f.root, commandOptions); const identity = makeRunGitIdentity({ branchPrefix: 'autoresearch/', stateRoot: 'state' }, discovery, runTag, runId)
@@ -72,8 +76,27 @@ describe('host-owned Git boundary', () => {
     const { root, ctx, subprocess } = fixture(); writeFileSync(join(root, 'dirty.txt'), 'caller work\n'); const before = execFileSync('git', ['-C', root, 'status', '--porcelain=v1']).toString()
     const discovery = await discoverRepository(ctx, 'git', join(root, 'src'), commandOptions)
     expect(discovery.startCommit).toMatch(/^[0-9a-f]{40}$/); expect(discovery.repository).toBe(root); expect(execFileSync('git', ['-C', root, 'status', '--porcelain=v1']).toString()).toBe(before)
-    expect(subprocess.specs.every((spec) => spec.env?.GIT_CONFIG_GLOBAL === '/dev/null' && spec.env?.GIT_TERMINAL_PROMPT === '0' && spec.argv.includes('core.hooksPath=/dev/null'))).toBe(true)
+    expect(subprocess.specs.every((spec) => spec.env?.GIT_CONFIG_GLOBAL === '/dev/null' && spec.env?.GIT_TERMINAL_PROMPT === '0' && spec.env?.GIT_DIR === undefined && spec.argv.includes('core.hooksPath=/dev/null') && spec.argv.includes('core.fsmonitor=false'))).toBe(true)
     expect(execFileSync('git', ['-C', root, 'worktree', 'list', '--porcelain']).toString().match(/^worktree /gmu)).toHaveLength(1)
+  })
+
+  it('resolves the configured executable through the provider and makes host controls non-overridable', async () => {
+    const { root, ctx, subprocess } = fixture(); process.env.GIT_DIR = '/attacker/repository'
+    try {
+      const executable = await resolveGitExecutable(ctx, 'git'); expect(executable).toContain('/git')
+      await expect(runGit(ctx, executable, ['rev-parse', '--is-inside-work-tree'], { ...commandOptions, cwd: root, env: { GIT_CONFIG_GLOBAL: '/attacker/config' } as never })).rejects.toThrow('Unsupported Git environment override')
+      await runGit(ctx, executable, ['rev-parse', '--is-inside-work-tree'], { ...commandOptions, cwd: root, env: { GIT_INDEX_FILE: join(root, '.temporary-index') } })
+      const spec = subprocess.specs.at(-1)!; expect(spec.env?.GIT_DIR).toBeUndefined(); expect(spec.env?.GIT_CONFIG_GLOBAL).toBe('/dev/null'); expect(spec.env?.GIT_INDEX_FILE).toBe(join(root, '.temporary-index'))
+    } finally { delete process.env.GIT_DIR }
+  })
+
+  it('rejects includes and every executable config surface before helpers can run', async () => {
+    for (const key of ['core.fsmonitor', 'core.hooksPath', 'filter.evil.clean', 'filter.evil.smudge', 'filter.evil.process', 'diff.evil.command', 'diff.evil.textconv', 'merge.evil.driver']) {
+      const f = fixture(); const marker = join(f.root, `${key.replaceAll('.', '-')}.marker`); execFileSync('git', ['-C', f.root, 'config', key, markerCommand(marker)])
+      await expect(discoverRepository(f.ctx, 'git', f.root, commandOptions)).rejects.toMatchObject({ code: 'git-config-unsafe' }); expect(existsSync(marker)).toBe(false)
+    }
+    const f = fixture(); const marker = join(f.root, 'included.marker'); const included = join(f.root, 'included.config'); writeFileSync(included, `[core]\n\tfsmonitor = ${markerCommand(marker)}\n`); execFileSync('git', ['-C', f.root, 'config', 'include.path', included])
+    await expect(discoverRepository(f.ctx, 'git', f.root, commandOptions)).rejects.toMatchObject({ code: 'git-config-unsafe' }); expect(existsSync(marker)).toBe(false)
   })
 
   it('binds allocation to durable immutable identity and preserves dirty caller state', async () => {
@@ -123,6 +146,13 @@ describe('host-owned Git boundary', () => {
     expect(() => validateCandidate(rename, policy(['src/**']))).toThrowError(expect.objectContaining({ evidence: expect.arrayContaining(['forbidden.policy: outside mutable paths']) }))
   })
 
+  it('names an unstaged protected path and state in policy evidence', async () => {
+    const base = fixture(); writeFileSync(join(base.root, 'package.json'), '{}\n'); execFileSync('git', ['-C', base.root, 'add', 'package.json']); execFileSync('git', ['-C', base.root, 'commit', '-m', 'add package manifest']); const f = await createRun(base)
+    writeFileSync(join(f.identity.worktree, 'package.json'), '{"changed":true}\n')
+    const snapshot = await snapshotCandidate(f.ctx, 'git', f.identity.worktree, f.gitConfig, commandOptions); expect(snapshot.changed.find((item) => item.path === 'package.json')).toMatchObject({ staged: false, unstaged: true, untracked: false })
+    expect(() => validateCandidate(snapshot, policy(['**']))).toThrowError(expect.objectContaining({ code: 'candidate-policy-violation', evidence: expect.arrayContaining(['package.json: protected surface']) }))
+  })
+
   it('denies and narrowly allows real submodule gitlink changes', async () => {
     const f = await createRun(); execFileSync('git', ['-C', f.identity.worktree, 'update-index', '--add', '--cacheinfo', '160000', f.discovery.startCommit, 'vendor/sub'])
     const snapshot = await snapshotCandidate(f.ctx, 'git', f.identity.worktree, f.gitConfig, commandOptions); expect(snapshot.changed[0]?.submodule).toBe(true); expect(() => validateCandidate(snapshot, policy(['**']))).toThrowError(expect.objectContaining({ code: 'candidate-policy-violation' }))
@@ -135,6 +165,7 @@ describe('host-owned Git boundary', () => {
     const allowed = await captureGitConfigBaseline(f.ctx, 'git', f.identity.worktree, policy(['src/**'], ['.git/config']), commandOptions); execFileSync('git', ['-C', f.identity.worktree, 'config', 'autoresearch.changed', 'again']); await expect(snapshotCandidate(f.ctx, 'git', f.identity.worktree, allowed, commandOptions)).resolves.toBeDefined()
     execFileSync('git', ['-C', f.identity.worktree, 'config', 'filter.evil.clean', 'touch /tmp/evil']); await expect(captureGitConfigBaseline(f.ctx, 'git', f.identity.worktree, policy(['src/**'], ['.git/config']), commandOptions)).rejects.toMatchObject({ code: 'git-config-unsafe' })
     execFileSync('git', ['-C', f.identity.worktree, 'config', '--unset-all', 'filter.evil.clean']); execFileSync('git', ['-C', f.identity.worktree, 'config', 'extensions.worktreeConfig', 'true'])
+    const marker = join(f.root, 'worktree-fsmonitor.marker'); execFileSync('git', ['-C', f.identity.worktree, 'config', '--worktree', 'core.fsmonitor', markerCommand(marker)]); await expect(captureGitConfigBaseline(f.ctx, 'git', f.identity.worktree, policy(), commandOptions)).rejects.toMatchObject({ code: 'git-config-unsafe' }); expect(existsSync(marker)).toBe(false); execFileSync('git', ['-C', f.identity.worktree, 'config', '--worktree', '--unset-all', 'core.fsmonitor'])
     const worktreeBaseline = await captureGitConfigBaseline(f.ctx, 'git', f.identity.worktree, policy(), commandOptions); execFileSync('git', ['-C', f.identity.worktree, 'config', '--worktree', 'autoresearch.worktree', 'changed'])
     await expect(snapshotCandidate(f.ctx, 'git', f.identity.worktree, worktreeBaseline, commandOptions)).rejects.toMatchObject({ code: 'git-config-mutated', evidence: ['.git/config.worktree'] })
     const allowedWorktree = await captureGitConfigBaseline(f.ctx, 'git', f.identity.worktree, policy(['src/**'], ['.git/config.worktree']), commandOptions); execFileSync('git', ['-C', f.identity.worktree, 'config', '--worktree', 'autoresearch.worktree', 'again']); await expect(snapshotCandidate(f.ctx, 'git', f.identity.worktree, allowedWorktree, commandOptions)).resolves.toBeDefined()
@@ -150,15 +181,28 @@ describe('host-owned Git boundary', () => {
   it('promotes with restart recovery and leaves every identity unchanged on failed preconditions', async () => {
     const f = await createRun(); const accepted = f.discovery.startCommit; const c = await candidate(f, 'promote', 'export const n = 2\n'); writeFileSync(join(f.identity.worktree, 'unrelated.tmp'), 'dirty\n')
     await expect(reconcileAcceptedHead(f.ctx, 'git', f.identity.worktree, f.identity, c.candidateCommit, commandOptions)).rejects.toMatchObject({ code: 'accepted-reconcile-dirty' }); assertState(f, accepted)
-    rmSync(join(f.identity.worktree, 'unrelated.tmp')); const faulty = faultingGit(f.root, `update-ref ${f.identity.acceptedRef}`); await expect(reconcileAcceptedHead(f.ctx, faulty, f.identity.worktree, f.identity, c.candidateCommit, commandOptions)).rejects.toMatchObject({ code: 'git-command-failed' })
-    expect(ref(f.root, f.identity.acceptedRef)).toBe(accepted); expect(ref(f.root, `refs/heads/${f.identity.branch}`)).toBe(c.candidateCommit); expect(ref(f.identity.worktree, 'HEAD')).toBe(c.candidateCommit)
-    await reconcileAcceptedHead(f.ctx, 'git', f.identity.worktree, f.identity, c.candidateCommit, commandOptions); await reconcileAcceptedHead(f.ctx, 'git', f.identity.worktree, f.identity, c.candidateCommit, commandOptions); assertState(f, c.candidateCommit)
+    rmSync(join(f.identity.worktree, 'unrelated.tmp')); const faulty = faultingGit(f.root, `update ${f.identity.acceptedRef}`); await expect(reconcileAcceptedHead(f.ctx, faulty, f.identity.worktree, f.identity, c.candidateCommit, commandOptions)).rejects.toMatchObject({ code: 'git-command-failed' })
+    assertState(f, accepted); await reconcileAcceptedHead(f.ctx, 'git', f.identity.worktree, f.identity, c.candidateCommit, commandOptions); await reconcileAcceptedHead(f.ctx, 'git', f.identity.worktree, f.identity, c.candidateCommit, commandOptions); assertState(f, c.candidateCommit)
+    await verifyExactWorktree(f.ctx, 'git', f.identity.worktree, c.candidateCommit, commandOptions)
   })
 
   it('explicitly rejects candidates idempotently while retaining audit refs', async () => {
     const f = await createRun(); const rejected = await candidate(f, 'rejected', 'export const n = 2\n'); await reconcileRejectedHead(f.ctx, 'git', f.identity.worktree, f.identity, rejected.candidateCommit, f.discovery.startCommit, commandOptions); await reconcileRejectedHead(f.ctx, 'git', f.identity.worktree, f.identity, rejected.candidateCommit, f.discovery.startCommit, commandOptions); assertState(f, f.discovery.startCommit)
     const accepted = await candidate(f, 'accepted', 'export const n = 3\n'); await reconcileAcceptedHead(f.ctx, 'git', f.identity.worktree, f.identity, accepted.candidateCommit, commandOptions); await removeRunWorktree(f.ctx, 'git', f.discovery, f.identity, commandOptions)
     expect(ref(f.root, rejected.auditRef)).toBe(rejected.candidateCommit); expect(ref(f.root, accepted.auditRef)).toBe(accepted.candidateCommit)
+  })
+
+  it('converges after faults at every acceptance and rejection mutation while retaining detached audits', async () => {
+    for (const [ordinal, step] of ['read-tree --reset -u', 'update-ref --stdin'].entries()) {
+      const f = await createRun(fixture(), `accept-${ordinal}`, `run-accept-${ordinal}`); const c = await candidate(f, 'candidate', 'export const n = 2\n'); const faulty = faultingGit(f.root, step)
+      await expect(reconcileAcceptedHead(f.ctx, faulty, f.identity.worktree, f.identity, c.candidateCommit, commandOptions)).rejects.toMatchObject({ code: 'git-command-failed' }); expect(ref(f.root, c.auditRef)).toBe(c.candidateCommit); expect(ref(f.root, f.identity.acceptedRef)).toBe(f.discovery.startCommit)
+      await reconcileAcceptedHead(f.ctx, 'git', f.identity.worktree, f.identity, c.candidateCommit, commandOptions); assertState(f, c.candidateCommit)
+    }
+    for (const [ordinal, step] of ['read-tree --reset -u', 'clean -ffdx'].entries()) {
+      const f = await createRun(fixture(), `reject-${ordinal}`, `run-reject-${ordinal}`); const c = await candidate(f, 'candidate', 'export const n = 2\n'); writeFileSync(join(f.identity.worktree, '.ignored-extra'), 'extra'); writeFileSync(join(f.identity.worktree, '.gitignore'), '.ignored-extra\n')
+      const faulty = faultingGit(f.root, step); await expect(reconcileRejectedHead(f.ctx, faulty, f.identity.worktree, f.identity, c.candidateCommit, f.discovery.startCommit, commandOptions)).rejects.toMatchObject({ code: 'git-command-failed' }); expect(ref(f.root, c.auditRef)).toBe(c.candidateCommit)
+      await reconcileRejectedHead(f.ctx, 'git', f.identity.worktree, f.identity, c.candidateCommit, f.discovery.startCommit, commandOptions); assertState(f, f.discovery.startCommit); expect(existsSync(join(f.identity.worktree, '.ignored-extra'))).toBe(false); expect(existsSync(join(f.identity.worktree, '.gitignore'))).toBe(false)
+    }
   })
 
   it('releases only terminal quiescent locks and cleanup preserves refs', async () => {
