@@ -1,0 +1,10 @@
+- insert:
+    - id: autoresearch
+      name: dsh-autoresearch
+      config:
+        subagentProvider: spawn
+        maxExperiments: 100
+        maxHandoffChars: 16384
+        maxResultChars: 16384
+        resultsFile: autoresearch-results.tsv
+        branchPrefix: autoresearch/

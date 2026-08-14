@@ -1,0 +1,64 @@
+{
+  "name": "dsh-autoresearch",
+  "version": "0.1.0",
+  "description": "Autonomous metric-driven research plugin for DeepSeek Harness",
+  "license": "MIT",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/**/*.js",
+    "lib/**/*.d.ts",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "check": "pnpm run typecheck && pnpm run test && pnpm run build",
+    "prepare": "pnpm run build"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "link:../../deepseek-ai/deepseek-harness/vendor/schemastery"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": ">=4.0.1 <5",
+    "@deepseek-ai/dsh-jobs": ">=0.1.0-rc.5 <0.2.0",
+    "@deepseek-ai/dsh-subagent": ">=0.1.0-rc.5 <0.2.0",
+    "@deepseek-ai/dsh-system-prompt": ">=0.1.0-rc.5 <0.2.0",
+    "@deepseek-ai/dsh-tools": ">=0.1.0-rc.5 <0.2.0",
+    "@deepseek-ai/dsh-workflow": ">=0.1.0-rc.5 <0.2.0"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "link:../../deepseek-ai/deepseek-harness/vendor/cordis",
+    "@deepseek-ai/dsh-agent": "link:../../deepseek-ai/deepseek-harness/packages/core/agent",
+    "@deepseek-ai/dsh-jobs": "link:../../deepseek-ai/deepseek-harness/packages/jobs/jobs",
+    "@deepseek-ai/dsh-subagent": "link:../../deepseek-ai/deepseek-harness/packages/subagent/subagent",
+    "@deepseek-ai/dsh-session": "link:../../deepseek-ai/deepseek-harness/packages/core/session",
+    "@deepseek-ai/dsh-system-prompt": "link:../../deepseek-ai/deepseek-harness/packages/core/system-prompt",
+    "@deepseek-ai/dsh-tools": "link:../../deepseek-ai/deepseek-harness/packages/core/tools",
+    "@deepseek-ai/dsh-workflow": "link:../../deepseek-ai/deepseek-harness/packages/workflow/workflow",
+    "@deepseek-ai/dsh-workflow-worker-thread": "link:../../deepseek-ai/deepseek-harness/packages/workflow/workflow-worker-thread",
+    "@types/node": "^22.0.0",
+    "typescript": "^6.0.0",
+    "vitest": "^4.0.0"
+  },
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "packageManager": "pnpm@11.7.0"
+}
