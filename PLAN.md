@@ -360,7 +360,9 @@ Implement SQLite schema/versioning, transitions, artifacts, policy snapshots, re
 **Primary ownership split:** Git lane owns `src/git.ts` and Git fixtures/tests; evaluator lane owns `src/evaluator.ts` and process fixtures/tests.  
 **Parallel safety:** these two lanes are genuinely parallel-safe once tracker/types interfaces are frozen. They must not edit each other's files; shared contract changes go through the chunk integrator.
 
-Implement worktree/branch/lock/diff/staging/commit/audit safety and argv-only evaluator/provenance/parser/timeout/output/process-tree behavior. Integrate baseline-blocked causes.
+Implement worktree/branch/lock/diff/staging/commit/audit safety; typed inspect/prepare/publish reconciliation primitives; exact commit-backed worktree verification; and argv-only evaluator/provenance/parser/timeout/output/provider-process-tree behavior. The evaluator boundary owns immutable policy/provenance identities, canonical no-follow cwd and declared-file validation immediately before and after spawn, attempt-scoped owner-only artifact writing, and recursive secret redaction from durable/returned surfaces.
+
+**Supported threat model and Harness limit:** model-authored edits/reports, repository/worktree/config mutations, evaluator output, cancellation, and host crashes are untrusted. The DSH subprocess provider, configured Git binary/evaluator selection, controller, OS/kernel, and owner-only state root are trusted. `ctx.subprocess.spawn` accepts argv and a string `cwd`; Chunk 05 therefore proves shell-free execution, closed environment, canonical non-symlink path identities immediately pre/post spawn, provider-handle termination, and awaited provider-observable tree quiescence—not fd-bound cwd, immutable mounts, or resistance to an independent hostile same-UID racer. Deployments requiring that stronger threat model need an external sandbox/read-only execution provider and must not claim it here.
 
 ### 06 — Implement recoverable controller
 
@@ -368,7 +370,7 @@ Implement worktree/branch/lock/diff/staging/commit/audit safety and argv-only ev
 **Primary ownership:** `src/controller.ts`, `src/agent.ts`, `src/recovery.ts`, controller/recovery tests; removal of workflow production dependency/path.  
 **Parallel safety:** proposal adapter and recovery reconciler may be developed in parallel against frozen interfaces; controller integration is exclusive. No parallel edits to tracker/Git/evaluator contracts without coordinated version change.
 
-Implement the sole state owner, baseline gate, fresh worktree-bound in-host Agent proposal rounds with child-scoped validated reports, host validation/evaluation/decision, target/budget termination, durable sequencing, and resume reconciliation.
+Implement the sole state owner, baseline gate, fresh worktree-bound in-host Agent proposal rounds with child-scoped validated reports, host validation/evaluation/decision, target/budget termination, durable sequencing, and resume reconciliation. Chunk 06 must prove proposal Agent/tool/process/job quiescence and exclusive worktree ownership before every snapshot/evaluation; exact start/candidate worktree verification after child disposal; no late or concurrent writer through evaluator settlement; durable baseline/experiment/reconciliation outcomes; and terminal/quiescent persistence before lock release as the controller's final idempotent repository action.
 
 ### 07 — Wire tool, jobs, lifecycle, and HMR
 

@@ -366,134 +366,96 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 
 # Chunk 05 — `05-build-host-git-and-evaluator-boundaries`
 
+## Supported threat model and Harness limit
+
+- [x] Treat model-authored edits/reports, repository/worktree/config mutations, evaluator output, cancellation, and host crashes as untrusted and in scope.
+- [x] Treat the DSH subprocess provider, configured Git binary, configured evaluator selection, controller code, OS/kernel, and owner-only state root as trusted deployment/runtime inputs.
+- [x] Record that `ctx.subprocess.spawn` receives argv and a string `cwd`; Chunk 05 validates canonical non-symlink cwd/worktree/file identities immediately before and after spawn, terminates through the provider handle, and awaits provider-observable tree quiescence.
+- [x] Do not claim fd-bound cwd, immutable mounts, observation of deliberate daemon/`setsid` escape, or protection from an independent hostile same-UID racer. Such deployments require an external sandbox/read-only execution provider and cannot reuse the Chunk 05 claim.
+
 ## Git boundary (`src/git.ts`)
 
 - [x] Create `src/git.ts`.
 - [x] Perform read-only caller repository, Git common directory, repository identity, and immutable start-SHA discovery before tracker creation; make no lock/ref/worktree/index mutation during discovery.
-- [x] Invoke configured Git executable through `ctx.subprocess` with argv.
-- [x] Use a wall-clock timeout for every Git subprocess call.
-- [x] Require positive termination grace for Git subprocess calls.
-- [ ] Short-circuit pre-aborted Git calls before spawn; terminate the whole live Git process tree on in-flight timeout or cancellation and await quiescence.
-- [x] Await Git `waitForExit()` before command settlement.
-- [x] Enforce stdout and stderr byte caps for Git invocations.
-- [x] Use an explicit/scrubbed environment for Git invocations.
-- [x] Acquire repository/run-tag active exclusion only after the tracker/run row exists.
-- [x] Enforce `maxActiveRunsPerRepository`.
-- [x] Create dedicated branch whose identity includes `branchPrefix`, `runTag`, and immutable `run_id`.
-- [x] Create dedicated worktree whose identity includes immutable `run_id` for every run.
-- [x] Treat `runTag` only as the active exclusion key; retained terminal branches/worktrees do not collide with later runs using the same tag.
-- [ ] Reject branch/worktree identity collision unless resuming the same `run_id`; on same-run resume, verify the registered path, branch/HEAD/start commit, and accepted ref before accepting or repairing the allocation.
-- [x] Never checkout/reset/stage/clean caller worktree.
-- [x] Preserve dirty caller staged/unstaged/untracked work.
-- [x] Implement candidate-parent snapshot discovery; enforce snapshot-before-child-edit ordering in the Chunk 06 controller.
-- [x] Inspect staged changes.
-- [x] Inspect unstaged changes.
-- [x] Inspect untracked changes.
-- [x] Enforce mutable globs on host.
-- [x] Enforce protected surfaces on host.
-- [x] Reject dependency changes unless explicitly allowlisted.
-- [x] Reject submodule changes unless explicitly allowlisted.
-- [ ] Reject reportable worktree-path Git metadata changes unless explicitly allowlisted; common-directory Git config mutation detection remains unimplemented.
-- [x] Reject evaluator/dataset/policy changes unless explicitly allowlisted.
-- [x] Stage only validated paths.
-- [x] Create every candidate as a full commit.
-- [x] Record full parent/candidate SHAs.
-- [ ] Create/retain audit refs for accepted and rejected candidates with restart-safe recovery across interruption after candidate commit creation.
-- [ ] Implement idempotent accepted-HEAD reconciliation whose failed preconditions cannot partially advance the accepted ref, branch, or worktree HEAD.
-- [ ] Atomically persist terminal/quiescent run outcome before releasing the repository/run-tag active lock; make release the final idempotent operation.
+- [x] Resolve the deployment-only `gitExecutable` once through `ctx.subprocess.resolveExecutable`, reuse the canonical provider path, include it in immutable provenance, and forbid child-selected or relative-with-separator executable guesses.
+- [x] Invoke the resolved Git executable through `ctx.subprocess` with argv and a timeout for every call.
+- [x] Require positive termination grace, short-circuit pre-aborted calls, terminate the live provider-observable Git process tree on timeout/cancellation, await `waitForExit()`, and enforce stdout/stderr byte caps.
+- [x] Remove ambient `GIT_*`, expose only a typed minimal override surface, and make mandatory Git safety variables non-overridable.
+- [x] Preflight common/worktree configuration before checkout/allocation; reject includes and applicable executable helpers, and neutralize hooks/fsmonitor for every invocation. Exceptional config-path allowlisting permits file mutation only, never executable helpers.
+- [x] Acquire repository/run-tag active exclusion only after the tracker/run row exists and enforce `maxActiveRunsPerRepository`.
+- [x] Create dedicated run-id-bearing branch/worktree identities; use `runTag` only as the active exclusion key so a later run can reuse a terminal run's tag.
+- [x] Reject branch/worktree identity collision unless resuming the same `run_id`; on same-run resume, verify registered path, branch/HEAD/start commit, and accepted ref before repair/allocation.
+- [x] Never checkout/reset/stage/clean the caller worktree; preserve caller staged, unstaged, and untracked work.
+- [x] Inspect staged, unstaged, untracked, and ignored state; enforce mutable/protected/dependency/submodule/evaluator/dataset/policy/config rules; stage only validated paths.
+- [x] Expose exact start/candidate worktree verification for full commits, including branch/HEAD/ref identity, index and tracked bytes, and absence of untracked/ignored extras.
+- [x] Create every candidate as a deterministic full commit, record full parent/candidate SHAs, and retain accepted/rejected audit refs across rejection, failed publication, later promotion, and explicit cleanup.
+- [x] Expose typed inspect/prepare/publish reconciliation operations: prepare worktree/index without moving accepted refs, verify exact state, then atomically publish branch plus accepted ref; rejection restore/cleanup is retryable after audit evidence exists.
+- [x] Block unexpected state without durable repair authorization; leave the end-to-end durable reconciliation-intent/restart proof to Chunk 06.
+- [x] Reject active-lock release unless its owning run is durably terminal and quiescent; leave proof that release is the controller's final idempotent repository action to Chunk 06.
 - [x] Recover and release a stale lock only when its owning run is durably terminal.
-- [x] Implement explicit configured worktree removal/release as an operational cleanup path without deleting tracker, artifact, commit, or audit-ref evidence.
-- [x] Avoid destructive reset as sole provenance record.
+- [x] Implement explicit configured worktree removal/release without deleting tracker, artifact, commit, or audit-ref evidence; never use destructive reset as the sole provenance record.
 
 ## Evaluator boundary (`src/evaluator.ts`)
 
-- [x] Create `src/evaluator.ts`.
-- [x] Represent evaluator as command plus argv, never shell line.
-- [ ] Validate evaluator cwd against normalized policy using canonical filesystem containment, including symlink traversal.
-- [x] Build explicit/scrubbed environment.
-- [x] Prevent ambient secret forwarding.
-- [x] Freeze/hash evaluator argv.
-- [ ] Freeze/hash only evaluator files canonically contained in the isolated worktree under the defined symlink policy.
-- [x] Freeze/hash dataset/version identifiers.
-- [ ] Freeze/hash environment overrides without persisting or exposing raw values outside the live spawn call.
-- [x] Freeze/hash metric name/direction/parser version/policy.
-- [x] Persist evaluator spawn intent before calling `ctx.subprocess.spawn`.
-- [x] Persist provider-observed PID and attempt facts immediately after spawn.
-- [x] Treat PID as diagnostic evidence only; never use PID alone as ownership proof after host restart.
-- [x] Enforce stdout byte cap.
-- [x] Enforce stderr byte cap.
-- [x] Implement real wall-clock timeout.
-- [x] Require positive termination grace.
-- [ ] Short-circuit pre-aborted evaluator attempts before spawn; terminate the whole live process tree on in-flight timeout/cancel only through the provider-owned handle.
-- [x] Await `waitForExit()` before settlement.
-- [x] Persist exit code/signal/timeout facts.
-- [x] Retain bounded log artifacts.
-- [x] Parse exactly one dedicated final-line JSON object.
-- [x] Require exactly configured metric key.
-- [x] Reject missing metric.
-- [x] Reject duplicate metric/result objects.
-- [x] Reject malformed JSON.
-- [x] Reject non-finite metric.
-- [x] Treat stdout as evidence, not agent authority.
+- [x] Create `src/evaluator.ts`; represent evaluation as command plus argv, never a shell line.
+- [x] Own a structured-cloned, deeply frozen evaluator identity containing argv/cwd, normalized-policy hash, worktree identity, declared evaluator-file manifest, and evaluation/provenance digests; compare digests rather than shared live objects.
+- [x] Require relative canonical contained non-symlink cwd and declared evaluator files under the exact worktree; read files no-follow with identity checks and revalidate identities immediately before and after string-cwd spawn.
+- [x] Freeze/hash declared evaluator files, dataset/version identifiers, metric name/direction/parser version, and normalized policy.
+- [x] Build an explicit scrubbed environment and keep raw explicit environment values only in the live subprocess spec.
+- [x] Use one recursive secret-aware serializer to redact raw environment values from spawn intents, policy/provenance, experiment argv/cwd, transitions, errors, results, logs, artifacts, and metadata while retaining immutable hashes for comparison/resume.
+- [x] Accept only an attempt-scoped artifact writer minted from owner-only `StateLayout`; make writes unique, exclusive, no-follow, identity-checked, bounded, hashed, mode `0600`, and attached to the exact attempt; reject arbitrary paths, symlinks, replacement, and overwrite.
+- [x] Persist evaluator spawn intent before spawn and provider PID/attempt facts immediately after spawn; treat PID as diagnostic evidence only and never signal PID alone after restart.
+- [x] Enforce stdout/stderr caps, real wall-clock timeout, positive termination grace, and pre-abort short-circuiting; terminate only through the live provider handle and await `waitForExit()`/provider-observable tree quiescence.
+- [x] Persist exit code, signal, timeout, and bounded log artifacts.
+- [x] Parse exactly one dedicated final-line JSON object; require exactly the configured metric; reject missing, duplicate, malformed, or non-finite results; treat stdout as evidence, never agent authority.
 
-## Baseline gate
+## Chunk 06-owned orchestration dependencies
 
-- [ ] Run baseline on immutable starting commit before child creation.
-- [ ] Record baseline attempt and artifacts durably.
-- [ ] Complete target-reached without child when baseline meets target.
-- [ ] Produce `baseline-blocked` on nonzero exit.
-- [ ] Produce `baseline-blocked` on timeout.
-- [ ] Produce `baseline-blocked` on signal.
-- [ ] Produce `baseline-blocked` on malformed/missing/duplicate/non-finite metric.
-- [ ] Produce `baseline-blocked` on evaluator/config provenance mismatch.
-- [ ] Produce `baseline-blocked` on dirty protected surface/isolation failure.
-- [ ] Ensure baseline-blocked has no best/candidate/acceptance decision.
-- [ ] Ensure baseline attempt does not consume candidate experiment budget.
+- [ ] Chunk 06: prove proposal Agent, tool, process, and job quiescence; await `whenIdle()` and memoized `AgentHandle.dispose()` before any snapshot/commit/evaluation handoff.
+- [ ] Chunk 06: prove exclusive worktree ownership after child disposal, exact start/candidate commit-backed state, and no late/concurrent writer until evaluator settlement.
+- [ ] Chunk 06: run and durably settle the baseline before child creation; cover target shortcut, every baseline-blocked outcome, immutable provenance, and no candidate-budget consumption.
+- [ ] Chunk 06: persist each experiment/outcome/artifact set before admitting the next child and persist accept/reject plus reconciliation intent before applying Chunk 05 reconciliation primitives.
+- [ ] Chunk 06: prove authorized restart reconciliation converges and ambiguous/external state blocks without duplicate candidates or lost audit refs.
+- [ ] Chunk 06: atomically persist terminal/quiescent run state, completed reconciliation, and artifact references before releasing the active lock as the controller's final idempotent repository action.
+- [ ] Chunk 06: do not claim that a malicious independent same-UID racer cannot execute against string `cwd`; require an external sandbox/read-only provider for that stronger guarantee.
 
 ## Chunk 05 verification gate
-- [ ] Re-run focused Chunk 05 implementation verification after the required Git/evaluator fixes: `pnpm run typecheck`, focused Vitest suites, and `pnpm run build`.
 
-- [x] Test clean temporary Git repository setup.
-- [x] Test read-only repository discovery causes no lock/ref/worktree/index mutation and tracker creation precedes all such mutations.
-- [x] Test dirty caller work preservation.
-- [x] Test immutable `run_id` appears in branch/worktree identity.
-- [x] Test same repository/run-tag active exclusion.
-- [ ] Test a later run may reuse a terminal run's tag while the prior run-id-bearing worktree is retained.
-- [ ] Test independent run-tag worktrees.
-- [x] Test full-SHA lineage.
-- [x] Test staged protected-path violation.
-- [ ] Test unstaged protected-path violation.
-- [x] Test untracked protected-path violation.
-- [ ] Test dependency/submodule/config exceptional policies.
-- [ ] Test candidate commit recovery across commit/audit-ref interruptions and rejected audit preservation through later promotion and cleanup.
-- [x] Test exact evaluator argv/cwd/env.
-- [ ] Test stdout and stderr caps, including oversized/lossy stderr.
-- [ ] Test returned and durably persisted nonzero exit-code and signal facts.
-- [x] Test wall-clock timeout.
-- [ ] Test descendant-process termination through the live provider handle.
-- [ ] Test cancellation idempotence.
-- [x] Test Git subprocess timeout, output caps, scrubbed environment, whole-tree termination, and awaited settlement.
-- [x] Test terminal persistence precedes lock release and stale terminal-owner lock recovery is idempotent.
-- [x] Test explicit worktree cleanup removes the registered worktree while retaining durable evidence.
-- [x] Test settlement waits for whole-tree quiescence.
-- [ ] Test every baseline success/blocking outcome externally.
+- [x] Final post-fix gate passed: `pnpm run typecheck`, focused Vitest suites (`6` files / `138` tests), and `pnpm run build`.
+- [x] Test clean temporary Git repository setup and read-only discovery before tracker/mutation.
+- [x] Test dirty caller work preservation, immutable run-id branch/worktree identities, active same-tag exclusion, terminal tag reuse, and independent run-tag worktrees.
+- [x] Test same-run collision verification and full-SHA lineage.
+- [x] Test staged, unstaged, and untracked protected-path violations.
+- [x] Test dependency, submodule, common/worktree config, include, hooks/fsmonitor/filter-helper, and exceptional-path policies without executing repository-controlled helpers.
+- [x] Test deterministic candidate commit/audit recovery across preparation/publication faults, rejected audit preservation through later promotion/cleanup, and exact commit-backed worktree verification.
+- [x] Test exact evaluator argv/cwd/env, immutable alias capture, normalized policy/evaluation digests, and canonical no-follow cwd/file manifest validation.
+- [x] Test attempt artifact containment, parent/destination symlinks, collisions/replacement, owner-only modes, provider spill validation, and no writes outside state root.
+- [x] Test recursive secret redaction when the same raw value appears in env, argv, cwd, nested policy/facts, errors, logs, artifacts, and metadata.
+- [x] Test stdout/stderr caps including oversized/lossy stderr; returned and durable nonzero exit/signal/timeout facts; wall-clock timeout; pre-abort; descendant termination; cancellation idempotence; and awaited quiescence.
+- [x] Test explicit worktree cleanup retains durable tracker/artifact/commit/audit evidence and stale terminal-owner lock recovery is idempotent.
 
-## Chunk 05 review gate
+## Chunk 05 review findings and dispositions
 
-- [ ] Review every Git command for caller-worktree safety and argv use.
-- [ ] Review mutable/protected policy for all staged/unstaged/untracked paths.
-- [ ] Review evaluator for shell/secret/provenance/timeout risks.
-- [ ] Review candidate evidence survives rejection and failure.
+- [x] Prior reviews found and fixes addressed: ambient/overridable Git environment and executable repository config; non-convergent reset publication; evaluator shared-alias identity; cwd/file capability overclaim; artifact symlink/path ownership; durable secret aliases; missing unstaged-protected coverage; and under-marked tests.
+- [x] Reassign the unavailable fd-bound/string-cwd stability guarantee, proposal-resource quiescence, pre-child/baseline ordering, late-writer prevention, durable reconciliation authorization, and final lock-release ordering to Chunk 06.
+- [x] Review mutable/protected policy across staged/unstaged/untracked paths.
+- [x] Review candidate commit/audit evidence retention across rejection and failure; keep controller restart sequencing as a separate Chunk 06 review.
+- [ ] Complete a final clean independent Git command/caller-worktree/config-execution review after `185cbe2`.
+- [ ] Complete a final clean independent evaluator shell/secret/provenance/filesystem/artifact/process review after `185cbe2`.
 
-## Chunk 05 implementation commit gate
+## Chunk 05 implementation and review-fix commits
 
-- [x] Integrate parallel Git/evaluator lanes against frozen tracker/types APIs.
-- [x] Commit host Git/evaluator boundaries and focused real-behavior tests as `33acd67` (`feat(boundaries): add host Git and evaluator safety`).
+- [x] Integrate Git/evaluator lanes against frozen tracker/types APIs in `33acd67cf37d6a01de167c8c8279dcd4f3deda8f` (`feat(boundaries): add host Git and evaluator safety`).
+- [x] Record tracker-accounting commit `ad273870e3cf71676a87fc8cbb2d09b86c9cd3d2`.
+- [x] Record prior review-fix commit `118f345cb1e994d0f9e7540e8c5dd4a04b4ed932` (`fix(boundaries): harden recovery and process isolation`).
+- [x] Record implementation/review-fix commit `dffb00ebcab22a07f8c8c22e0f58bb2a706fd7a6` (`fix(boundaries): complete restart-safe host controls`).
+- [x] Record final review-fix commit `185cbe2d0159522099e2965590158cee62d8d97b` (`fix(boundaries): enforce trusted Git and evaluator state`).
 
-## Chunk 05 tracker-accounting gate
+## Chunk 05 closure and accounting
 
-- [x] Record Chunk 05 implementation commit full SHA after it exists: `33acd67cf37d6a01de167c8c8279dcd4f3deda8f`.
-- [x] Commit the checklist update separately from the Chunk 05 implementation commit as `ad273870e3cf71676a87fc8cbb2d09b86c9cd3d2`.
+- [ ] Complete final clean Git/evaluator re-reviews and record zero unresolved Chunk 05 findings.
+- [ ] Commit this final Chunk 05 tracker/accounting update separately and record its full SHA.
+- [ ] Close Chunk 05 and advance the dependency-ready status to Chunk 06 only after the clean reviews and accounting commit are recorded.
 
 # Chunk 06 — `06-implement-recoverable-controller`
 
@@ -517,6 +479,7 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 - [ ] Drive the child with `followup(...)`, await `whenIdle()`, and reject missing, duplicate, malformed, stale, wrong-experiment, or oversized reports.
 - [ ] Propagate controller cancellation through `agent.cancel(...)`.
 - [ ] Always await `AgentHandle.dispose()` in `finally` on success, report failure, cancellation, controller failure, and unload; the host remains authoritative.
+- [ ] Prove every proposal-owned tool/process/job is structured and quiescent before ownership transfer; remove background/detach capabilities or retain and await every handle so a late writer cannot survive disposal.
 
 ## Recovery (`src/recovery.ts`)
 
@@ -542,6 +505,8 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 - [ ] Block on uncertain surviving evaluator.
 - [ ] Block on external worktree/branch mutation.
 - [ ] Preserve evidence before repair/reconciliation.
+- [ ] Persist deterministic accept/reject and reconcile intent before applying Chunk 05 prepare/cleanup/ref-transaction primitives; authorize restart repair only when durable intent, audit ref, lineage, and observed Git state agree.
+- [ ] Restore and exactly reverify the recorded start/candidate commit, including no untracked or ignored extras, before resumed evaluation; admit no writer until settlement.
 
 ## Controller (`src/controller.ts`)
 
@@ -552,12 +517,15 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 - [ ] Create tracker/run row with discovered repository identity and start SHA before every mutating/allocating external setup effect.
 - [ ] Persist intent before every external side effect.
 - [ ] Persist observed outcome after every external side effect.
+- [ ] Resolve/freeze Git executable identity and normalized policy once; mint evaluator boundary identities only from those immutable facts and block resume on any executable/evaluation/policy hash mismatch.
+- [ ] After allocation, verify the dedicated worktree exactly equals `startCommit`; persist baseline intent, artifacts, and terminal outcome before creating any child. Cover target shortcut and every nonzero/timeout/signal/parser/provenance/isolation `baseline-blocked` result without consuming candidate budget.
 - [ ] Run baseline gate.
 - [ ] Handle baseline-target shortcut.
 - [ ] Request one fresh proposal at a time.
 - [ ] Validate child-authored filesystem changes on host.
 - [ ] Create candidate commit/audit record before evaluation.
 - [ ] Execute independent evaluator on recorded candidate commit.
+- [ ] Enforce event order `whenIdle -> dispose resolved -> candidate audit commit -> exact worktree verification -> declared-file revalidation -> spawn intent -> string-cwd spawn`; admit no next proposal/writer until evaluator outcome, artifacts, and terminal experiment state are durable.
 - [ ] Parse trusted metric on host.
 - [ ] Compute strict minimize acceptance with `<`.
 - [ ] Compute strict maximize acceptance with `>`.
@@ -575,6 +543,8 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 - [ ] Remove temporary legacy `evaluation_command` and workflow-specific public patch/tool schema runtime compatibility during the controller clean cutover.
 - [ ] Keep rejected candidate commits/audit refs.
 - [ ] Reconcile isolated worktree to last durable accepted commit.
+- [ ] Mint the attempt artifact writer from owner-only `StateLayout` only after durable attempt identity exists; transactionally link artifact ownership before terminal transition or the next experiment.
+- [ ] Persist terminal/quiescent run facts, completed Git reconciliation, and artifact references before active-lock release; make release the controller's final idempotent repository action.
 
 ## Chunk 06 verification gate
 
@@ -591,6 +561,10 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 - [ ] Test fresh `SessionId`, durable worktree `meta.cwd`, parent/delegation metadata, and explicit inherited provider/model/optional `maxTokens` on every child.
 - [ ] Test child-scoped report tool/prompt registration, exact schema validation, and rejection of missing/duplicate/malformed/stale/wrong-experiment/oversized reports.
 - [ ] Test `AgentHandle.dispose()` is awaited exactly once/idempotently for success, report failure, cancellation, controller failure, and unload.
+- [ ] Test proposal Agent/tool/process/job quiescence and exclusive worktree ownership; a scheduled late writer cannot mutate after disposal or overlap evaluator spawn.
+- [ ] Test exact start/candidate commit handoff, absence of hidden ignored/untracked inputs, and pre/post string-cwd/file identity substitution detection without claiming hostile same-UID race prevention.
+- [ ] Test every baseline success/blocking outcome, durable artifacts, zero-child target shortcut, and no candidate-budget consumption.
+- [ ] Test terminal experiment persistence before the next child and terminal/quiescent run persistence before final lock release, including crash/retry ordering.
 - [ ] Test target behavior for minimize/maximize.
 - [ ] Test budget-limited completion.
 - [ ] Test resume from every safely reconcilable nonterminal run state.
