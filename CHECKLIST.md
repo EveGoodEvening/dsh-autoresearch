@@ -629,7 +629,7 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 - [x] Return typed startup failure/cancellation when initialization fails before readiness; do not fabricate tracker/branch/worktree values.
 - [x] Declare `autoresearch` job kind through type augmentation.
 - [x] Use generic jobs control rather than private job tools.
-- [ ] Chunk 08 composition dependency: require and verify compatible jobs registry plus generic jobs-tool composition through the real Harness stack.
+- [x] Chunk 08 composition dependency: require and verify compatible jobs registry plus generic jobs-tool composition through the real Harness stack; proven by real profile composition with the local jobs registry and generic list/output/kill tools.
 - [x] Map `target-reached` and `budget-limited` to completed jobs, and map every uncertain `blocked` result to failed while preserving its canonical durable result.
 - [x] Map `baseline-blocked` and `round-failed` to failed jobs.
 - [x] Map plugin-internal cancellation to Harness job outcome status `killed` while preserving the plugin result variant `cancelled`.
@@ -654,7 +654,7 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 - [ ] Chunk 09 documentation dependency: document current installed-profile prerequisites for the jobs registry plus `dsh-tool-jobs`; Chunk 08 must validate the real composition.
 - [ ] Chunk 09 documentation dependency: document the subprocess provider requirement; Chunk 08 must validate the real composition and failure path.
 - [ ] Chunk 09 documentation dependency: document the core Agent registry/runtime and child setup requirement, with no subagent provider; Chunk 08 must validate the real composition and failure path.
-- [ ] Chunk 08 composition dependency: verify activation is opt-in through real profile installation.
+- [x] Chunk 08 composition dependency: verify activation is opt-in through real profile installation; the keyless base profile omitted autoresearch and the assembled installed layer activated it.
 - [ ] Chunk 08 composition dependency: verify service ordering is expressed by injection, not YAML row order, through real Harness composition.
 
 ## Chunk 07 verification gate
@@ -663,10 +663,10 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 - [x] Test background tool result waits for durable readiness facts.
 - [ ] Test actual LocalJobRegistry ordering: `run()` remains synchronous, controller work stays gated until returned job id is durably recorded, then starts under the job-owned signal; real-registry composition proof remains Chunk 08.
 - [x] Test typed initialization failure/cancellation before readiness and no orphaned resources.
-- [ ] Test background job output consumption.
-- [ ] Test generic job list/output/kill compatibility.
-- [ ] Test jobs-controller absence fails clearly.
-- [ ] Test missing/incompatible core Agent registry/runtime or child setup capability fails clearly.
+- [x] Test background job output consumption through the actual local jobs registry and generic output tool.
+- [x] Test generic job list/output/kill compatibility through real Harness composition.
+- [x] Test jobs-controller absence fails clearly; real composition without the jobs provider failed synchronously, and missing `dsh-tool-jobs` failed clearly with the registry present.
+- [x] Test missing/incompatible core Agent registry/runtime or child setup capability fails clearly; real composition without the Agent provider failed synchronously.
 - [x] Test cancellation idempotence.
 - [x] Test a registered background job survives the outer tool call's `exec.signal` abort.
 - [x] Test child creation derives `parentSession`/delegation/model route from `exec.agent`, background job start receives `owner: exec.agent`, and a real controller-created tracker run row records the same authority identity.
@@ -732,18 +732,21 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 
 ## Recovery/concurrency integration
 
-- [ ] Test deliberate interruption during baseline where entire prior evaluator process-tree quiescence is proven and safe rerun occurs once.
-- [ ] Test deliberate interruption during candidate evaluation where entire prior evaluator process-tree quiescence is proven and safe rerun occurs once.
+- [x] Test deliberate interruption during baseline where entire prior evaluator process-tree quiescence is proven and safe rerun occurs once; the public controller recovery test records quiescence before the missing outcome, permits one rerun, and then durably stops with `recovery-rerun-exhausted` rather than running a third attempt.
+- [x] Test deliberate interruption during candidate evaluation where entire prior evaluator process-tree quiescence is proven and safe rerun occurs once; restart reuses the recorded candidate commit, permits exactly one rerun, and durably terminates with `recovery-rerun-exhausted` without a third candidate attempt or duplicate candidate audit commit.
 - [x] Test restart without proof that every prior evaluator descendant is quiescent blocks without PID signalling or duplicate execution, including the parent-dead/descendant-uncertain case.
-- [ ] Test deliberate interruption during decision.
+- [x] Test deliberate interruption during decision before and after Git publication for both accept and reject; restart deterministically and idempotently reconciles the candidate decision, best commit, worktree HEAD, audit ref, single evaluator attempt, and single terminal experiment transition.
 - [x] Test restart after durable allocation through the public controller: resume by run id preserves the same run/tracker/branch/worktree identity and completes with exactly one baseline experiment and one evaluator attempt.
+- [x] Test controller ownership fencing across restart: an expired claim whose recorded process identity is still live blocks a competing controller until explicit owner release.
+- [x] Test dead-owner takeover: a mismatched process start token proves the recorded owner stale and permits a replacement controller claim.
+- [x] Test the losing controller leaves the durable run, transitions, experiments, and attempts unchanged before the owning controller releases and the lineage resumes exactly once.
 - [x] Test same repository/run-tag active exclusion through the shared SQLite authority.
 - [x] Test repository active-capacity exclusion through that same shared SQLite authority.
 - [x] Test later same-tag reuse after terminal cancellation releases the active lock, with a new immutable run id while prior run-id-bearing state remains distinct.
 - [x] Test two independent run tags concurrently through separate controller instances sharing one repository tracker.
 - [x] Verify separate immutable run-id-bearing worktrees/branches.
 - [x] Verify no caller HEAD/index/ledger interference.
-- [ ] Verify serialized promotion/tracker updates.
+- [x] Verify serialized promotion/tracker updates; two concurrent restart controllers at each decision publication window produce one successful reconciliation, one canonical Git result, one candidate attempt, and one terminal tracker transition.
 - [x] Test production cancellation plus plugin/HMR disposal with an active run: generic kill settles the job, unload waits for controller/evaluator quiescence, and the child Agent handle is disposed before completion.
 
 ## Chunk 08 verification gate
@@ -756,7 +759,7 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 - [x] Observe controller restart after allocation resumes successfully by run id without duplicating the baseline experiment or evaluator attempt.
 - [ ] Run focused per-file coverage expected by project policy.
 
-- [x] Record final post-`896d440aeeb50697b8159724779ddb1b30115f81` gates: `pnpm install --frozen-lockfile` passed; `pnpm run typecheck` passed; Vitest passed 10 files / 255 tests; `pnpm run build` passed; `pnpm pack` passed.
+- [x] Record final post-`2a8ed8eed4337fbe1615e51e0a3283bfc1a60b8e` gates: `pnpm run typecheck` passed; Vitest passed 10 files / 264 tests; `pnpm run build` passed; `pnpm pack` passed.
 
 ## Chunk 08 review gate
 
@@ -770,11 +773,15 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 
 - [x] Record earlier real DSH composition/recovery/concurrency implementation commit `3b5b819bb66ca3cc34fe561c84b8bdec324d9eb6` (`test(integration): add real dsh composition coverage`).
 - [x] Record final Loader/composition/restart implementation and test commit `896d440aeeb50697b8159724779ddb1b30115f81` (`test(integration): complete loader and restart coverage`).
+- [x] Record profile-reload/run-ownership hardening implementation commit `bf9fb505578ff8c1f296f420270b8c8d5d2aa6cc` (`fix(integration): harden profile reload and run ownership`).
+- [x] Record controller-ownership fencing implementation commit `900521fc9326e6bcfeaceaab64e6a3c5c11e9938` (`fix(integration): fence controller ownership across restart`).
+- [x] Record restart-reconciliation implementation and test commit `2a8ed8eed4337fbe1615e51e0a3283bfc1a60b8e` (`test(integration): cover restart reconciliation windows`).
 
 ## Chunk 08 tracker-accounting gate
 
 - [x] Record separate earlier Chunk 08 checklist-accounting commit `87735c734264d20ccf74db0296619b9cfb48ae29` (`docs: record real composition verification`) as complete and separate from implementation commits.
-- [ ] Commit this final post-`896d440aeeb50697b8159724779ddb1b30115f81` checklist update separately as a new accounting-only commit.
+- [x] Record final post-`896d440aeeb50697b8159724779ddb1b30115f81` checklist update as separate accounting-only commit `d53fea5dfd94e194616b2c2fbaa898d28db5f896` (`docs: record complete integration verification`).
+- [ ] Commit this post-`2a8ed8eed4337fbe1615e51e0a3283bfc1a60b8e` checklist update separately as a new accounting-only commit.
 
 # Chunk 09 — `09-complete-docs-and-release-gate`
 
