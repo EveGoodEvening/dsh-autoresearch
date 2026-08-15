@@ -2,7 +2,9 @@
 
 > Bounded, metric-driven autoresearch plugin for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness).
 
-`dsh-autoresearch` gives a DeepSeek Harness agent a single tool — `autoresearch` — that runs a **baseline-first, keep/reject optimization loop** inside an isolated Git worktree. Inspired by [Karpathy's `autoresearch`](https://github.com/karpathy/autoresearch) — an autonomous *propose → edit → run → measure → keep/revert* loop where a coding agent performs the search and a fixed mechanical metric acts as the source of truth — it enforces the discipline that makes that loop trustworthy: the agent proposes candidate changes; trusted host code owns evaluation, metric decisions, persistence, cancellation, and recovery. The model never touches the evaluator, the metric, or the database.
+`dsh-autoresearch` gives a DeepSeek Harness agent a single tool — `autoresearch` — that runs a **baseline-first, keep/reject optimization loop** inside an isolated Git worktree.
+
+The design is inspired by [Karpathy's `autoresearch`](https://github.com/karpathy/autoresearch): an autonomous *propose → edit → run → measure → keep/revert* loop where a coding agent performs the search and a fixed mechanical metric acts as the source of truth. What makes that loop trustworthy is discipline — the agent proposes candidate changes; trusted host code owns evaluation, metric decisions, persistence, cancellation, and recovery. The model never touches the evaluator, the metric, or the database.
 
 - **One scalar metric.** Strict `minimize` / `maximize` improvement against a measured baseline; no vibes.
 - **Shell-free evaluator.** Immutable `{ command, args, cwd? }` argv, final-line JSON scalar parsing, frozen provenance hashes.
