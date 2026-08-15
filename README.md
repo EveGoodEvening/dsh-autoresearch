@@ -1,6 +1,6 @@
 # dsh-autoresearch
 
-DeepSeek Harness 的可选插件：在隔离的 Git worktree 中运行**有界、指标驱动、可审计**的自动优化循环。
+DeepSeek Harness 的可选插件：将 **Karpathy-style autoresearch** 实现为在隔离 Git worktree 中运行的有界、指标驱动、可审计自动优化循环。
 
 ## 核心特性
 
