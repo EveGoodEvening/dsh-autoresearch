@@ -19,12 +19,10 @@
 
 ## Install
 
-`dsh-autoresearch` is not published to the npm registry yet. A bare package name such as `pnpm add dsh-autoresearch` asks the configured registry for that package and currently fails with `404`.
-
-Install it through DSH's profile plugin manager, not with `pnpm add` in an arbitrary project:
+Install the published package through DSH's profile plugin manager:
 
 ```sh
-dsh plugin --profile <name> add <tarball-or-package>
+dsh plugin --profile <name> add dsh-autoresearch
 dsh --profile <name> --dump-config
 ```
 
@@ -49,12 +47,6 @@ dsh --profile <name> --dump-config
 ```
 
 DSH anchors relative filesystem specs such as `.` and `./dsh-autoresearch-0.1.0.tgz` to the directory where you invoke `dsh`. The config dump should contain `id: autoresearch` and `name: dsh-autoresearch`.
-
-After the package is published to npm, the registry form will be:
-
-```sh
-dsh plugin --profile <name> add dsh-autoresearch
-```
 
 The package ships a Cordis patch row (`cordis.patch.yml`) declared via `dsh.bundle.patch` in `package.json`. DeepSeek Harness out-of-tree features ship as opt-in bundles: the stable patch inserts an ordinary Cordis plugin row whose config is **replaced whole, not deep-merged**, so every default you want must be explicit in the patch row.
 
