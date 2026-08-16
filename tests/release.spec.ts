@@ -86,7 +86,7 @@ describe('release and consumer contract', () => {
       readFile(join(root, 'LICENSE'), 'utf8'),
     ])
     expect(readme).toContain('AutoresearchRunController')
-    expect(readme).toContain('dsh plugin --profile <name> add <tarball-or-package>')
+    expect(readme).toContain('dsh plugin --profile <name> add dsh-autoresearch')
     expect(readme).toContain('dsh --profile <name> --dump-config')
     expect(readme).not.toContain('ctx.workflowEngine')
     expect(readme).not.toContain('ctx.subagents')
