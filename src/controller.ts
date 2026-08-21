@@ -17,15 +17,15 @@ import { reconcileRecovery, type RecoveredEvaluation, type RecoveredExperiment, 
 import { DurableTracker, type ArtifactRecord } from './tracker.js'
 import {
   decodeRunResult, isTargetReached, type AutoresearchRunResult, type AutoresearchToolInput,
-  type BestResult, type BlockerEvidence, type ExperimentDurableState, type NormalizedRunPolicy,
-  type ResultCounts, type RunDurableState, type RunId,
+  type BestResult, type BlockerEvidence, type DurableRunPolicy, type ExperimentDurableState,
+  type NormalizedRunPolicy, type ResultCounts, type RunDurableState, type RunId,
 } from './types.js'
 
 export interface AutoresearchRunReady { readonly runId: RunId; readonly tracker: string; readonly branch: string; readonly worktree: string }
 export interface AutoresearchRunControllerOptions { readonly config: ResolvedConfig; readonly input: AutoresearchToolInput; readonly parent: Agent; readonly signal: AbortSignal; readonly jobId?: string }
 
 interface Runtime {
-  readonly runId: string; readonly policy: NormalizedRunPolicy; readonly discovery: RepositoryDiscovery
+  readonly runId: string; readonly policy: DurableRunPolicy; readonly discovery: RepositoryDiscovery
   readonly identity: RunGitIdentity; readonly tracker: DurableTracker; readonly gitExecutable: string
   readonly policySha256: string; readonly provenanceSha256: string; readonly gitOptions: Omit<GitCommandOptions, 'cwd' | 'signal'>
   readonly claimOwner: string; readonly claimProcess: ControllerProcessIdentity
@@ -127,34 +127,34 @@ export class AutoresearchRunController {
     let tracker: DurableTracker | undefined
     let claimed: { runId: string; ownerId: string } | undefined
     try {
-      let policy = normalizeRunPolicy(this.options.input, this.options.config, String(this.options.parent.session.header.cwd))
-      const gitOptions = { timeoutMs: policy.timeoutMs, graceMs: this.options.config.terminationGraceMs, maxStdoutBytes: this.options.config.maxStdoutBytes, maxStderrBytes: this.options.config.maxStderrBytes }
+      const normalizedPolicy = normalizeRunPolicy(this.options.input, this.options.config, String(this.options.parent.session.header.cwd))
+      const gitOptions = { timeoutMs: normalizedPolicy.timeoutMs, graceMs: this.options.config.terminationGraceMs, maxStdoutBytes: this.options.config.maxStdoutBytes, maxStderrBytes: this.options.config.maxStderrBytes }
       const gitExecutable = await resolveGitExecutable(this.ctx, this.options.config.gitExecutable, this.aborter.signal)
-      const discovery = await discoverRepository(this.ctx, gitExecutable, policy.repository, { ...gitOptions, signal: this.aborter.signal })
-      const runId = policy.resumeRunId ?? randomUUID()
+      let discovery = await discoverRepository(this.ctx, gitExecutable, normalizedPolicy.repository, { ...gitOptions, signal: this.aborter.signal })
+      const runId = normalizedPolicy.resumeRunId ?? randomUUID()
       const trackerPath = join(discovery.gitCommonDir, this.options.config.stateRoot, 'runs', runId, 'tracker.sqlite')
       tracker = DurableTracker.open(trackerPath)
       const existing = tracker.getRun(runId)
-      let runTag = policy.runTag
-      if (policy.resumeRunId) {
+      let runTag = normalizedPolicy.runTag
+      if (normalizedPolicy.resumeRunId) {
         if (!existing) throw new Error(`resume run ${runId} has no durable tracker row`)
         runTag = String(existing['run_tag'])
-        policy = { ...canonicalPolicy(policy), runTag }
+        discovery = { ...discovery, startCommit: String(existing['start_commit']) }
       }
       if (!runTag) throw new TypeError('run tag is unavailable')
-      const identityPolicy = canonicalPolicy(policy)
-      const policySha256 = hash(identityPolicy)
+      const policy = canonicalPolicy(normalizedPolicy, discovery.repository, runTag)
+      const policySha256 = hash(policy)
       const discoveryBoundary = createEvaluatorBoundary(discovery.repository, { evaluation: policy.evaluation, normalizedPolicySha256: policySha256 })
-      const provenance = freezeEvaluatorProvenance(discovery.repository, provenanceInput(identityPolicy, policySha256, discoveryBoundary.evaluationSha256))
+      const provenance = freezeEvaluatorProvenance(discovery.repository, provenanceInput(policy, policySha256, discoveryBoundary.evaluationSha256))
       const provenanceSha256 = provenance.sha256
       const identity = makeRunGitIdentity(this.options.config, discovery, runTag, runId)
-      if (!existing) tracker.createRun({ runId, repositoryId: discovery.repositoryId, repository: discovery.repository, gitCommonDir: discovery.gitCommonDir, callerCwd: discovery.callerCwd, startCommit: discovery.startCommit, runTag, branch: identity.branch, worktree: identity.worktree, agentId: String(this.options.parent.id), sessionId: String(this.options.parent.session.header.id), policy: identityPolicy, policySha256, provenance, provenanceSha256 })
+      if (!existing) tracker.createRun({ runId, repositoryId: discovery.repositoryId, repository: discovery.repository, gitCommonDir: discovery.gitCommonDir, callerCwd: discovery.callerCwd, startCommit: discovery.startCommit, runTag, branch: identity.branch, worktree: identity.worktree, agentId: String(this.options.parent.id), sessionId: String(this.options.parent.session.header.id), policy, policySha256, provenance, provenanceSha256 })
       const claimOwner = randomUUID()
       const claimProcess = currentControllerProcessIdentity()
       acquireControllerClaim(tracker, runId, claimOwner, CONTROLLER_LEASE_MS, new Date(), claimProcess)
       claimed = { runId, ownerId: claimOwner }
       if (this.jobId !== undefined) tracker.checkpointRun(runId, { outcome: { kind: 'background-job-registered', jobId: this.jobId } })
-      const runtime = { runId, policy: identityPolicy, discovery, identity, tracker, gitExecutable, policySha256, provenanceSha256, gitOptions, claimOwner, claimProcess }
+      const runtime = { runId, policy, discovery, identity, tracker, gitExecutable, policySha256, provenanceSha256, gitOptions, claimOwner, claimProcess }
       this.startClaimHeartbeat(runtime)
       this.runtime = runtime
       if (this.cancellationRequested) this.persistCancellationIntent()
@@ -410,8 +410,8 @@ export class AutoresearchRunController {
   }
 }
 
-function provenanceInput(policy: NormalizedRunPolicy, policySha256: string, evaluationSha256: string) { return { evaluation: policy.evaluation, metricName: policy.metricName, metricDirection: policy.metricDirection, environment: policy.environment, policy: { normalizedPolicySha256: policySha256, evaluationSha256, policy }, ...(policy.provenance.dataset ? { dataset: { dataset: policy.provenance.dataset } } : {}) } }
-function canonicalPolicy(policy: NormalizedRunPolicy): NormalizedRunPolicy { const { resumeRunId: _resume, ...durable } = policy; return durable as NormalizedRunPolicy }
+function provenanceInput(policy: DurableRunPolicy, policySha256: string, evaluationSha256: string) { return { evaluation: policy.evaluation, metricName: policy.metricName, metricDirection: policy.metricDirection, environment: policy.environment, policy: { normalizedPolicySha256: policySha256, evaluationSha256, policy }, ...(policy.provenance.dataset ? { dataset: { dataset: policy.provenance.dataset } } : {}) } }
+function canonicalPolicy(policy: NormalizedRunPolicy, repository: string, runTag: string): DurableRunPolicy { const { resumeRunId: _resume, mode: _mode, ...durable } = policy; return { ...durable, repository, runTag } }
 function hash(value: unknown): string { return createHash('sha256').update(JSON.stringify(sort(value))).digest('hex') }
 function sort(value: unknown): unknown { if (Array.isArray(value)) return value.map(sort); if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).sort(([a],[b]) => a.localeCompare(b)).map(([k,v]) => [k, sort(v)])); return value }
 function normalizedReason(value: string): string { const text = value.trim().replace(/[\0\r\n]+/gu, ' '); return text || 'cancelled' }
@@ -424,7 +424,7 @@ function history(tracker: DurableTracker, runId: string): ProposalHistoryEntry[]
 function counts(tracker: DurableTracker, runId: string): ResultCounts { const candidates = Number(tracker.database.prepare("SELECT COUNT(*) AS n FROM experiments WHERE run_id = ? AND kind = 'candidate'").get(runId)?.['n'] ?? 0); const completed = Number(tracker.database.prepare("SELECT COUNT(*) AS n FROM experiments WHERE run_id = ? AND kind = 'candidate' AND state NOT IN ('baseline-pending','running')").get(runId)?.['n'] ?? 0); const attempts = Number(tracker.database.prepare('SELECT COUNT(*) AS n FROM attempts WHERE run_id = ?').get(runId)?.['n'] ?? 0); return { experimentsStarted: candidates, experimentsCompleted: completed, attempts } }
 interface PublicArtifact { readonly artifactId: string; readonly kind: string; readonly location: string; readonly sizeBytes: number; readonly sha256: string }
 function publicArtifact(row: Pick<ArtifactRecord, 'artifactId' | 'kind' | 'location' | 'sizeBytes' | 'sha256'>): PublicArtifact { return { artifactId: row.artifactId, kind: row.kind, location: row.location, sizeBytes: row.sizeBytes, sha256: row.sha256 } }
-function artifacts(tracker: DurableTracker, runId: string) { return (tracker.database.prepare('SELECT artifact_id, kind, location, size_bytes, sha256 FROM artifacts WHERE run_id = ? ORDER BY created_at, artifact_id').all(runId) as Record<string, unknown>[]).map(row => ({ artifactId: String(row['artifact_id']), kind: String(row['kind']), location: String(row['location']), sizeBytes: Number(row['size_bytes']), sha256: String(row['sha256']) })) }
+function artifacts(tracker: DurableTracker, runId: string) { return (tracker.database.prepare(`SELECT a.artifact_id, a.kind, a.location, a.size_bytes, a.sha256 FROM artifacts a LEFT JOIN experiments e ON e.run_id = a.run_id AND e.experiment_id = a.experiment_id LEFT JOIN attempts t ON t.run_id = a.run_id AND t.attempt_id = a.attempt_id WHERE a.run_id = ? ORDER BY COALESCE(e.ordinal, -1), COALESCE(t.ordinal, -1), a.kind, a.artifact_id`).all(runId) as Record<string, unknown>[]).map(row => ({ artifactId: String(row['artifact_id']), kind: String(row['kind']), location: String(row['location']), sizeBytes: Number(row['size_bytes']), sha256: String(row['sha256']) })) }
 function common(r: Runtime, validatedArtifacts = artifacts(r.tracker, r.runId)) { return { runId: r.runId, tracker: r.tracker.path, counts: counts(r.tracker, r.runId), artifacts: validatedArtifacts } }
 function errorEvidence(error: unknown): { code: string; message: string } { return { code: error instanceof ProposalAgentError ? error.code : String((error as { code?: unknown }).code ?? 'round-failed'), message: error instanceof Error ? error.message : String(error) } }
 function evidenceFromRun(row: Record<string, unknown>): BlockerEvidence[] { return [{ code: String(row['blocked_code'] ?? 'terminal'), message: String(row['terminal_reason'] ?? 'run terminated'), artifacts: [] }] }

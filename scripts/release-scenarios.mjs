@@ -44,7 +44,7 @@ evidence.items = {
   '853': { ok: evidence.background.listed === true && evidence.background.kill === true && evidence.background.noLiveJobs === true, background: evidence.background },
   '854': { ok: evidence.accepted.agentDisposed === true && evidence.accepted.terminalBeforeLockRelease === true && evidence.interruptionResume.processTreeQuiescent === true, retained: evidence.accepted },
   '855': { ok: evidence.interruptionResume.processTreeQuiescent === true, interruption: evidence.interruptionResume },
-  '856': { ok: evidence.interruptionResume.attempts === 1 && evidence.interruptionResume.duplicateCandidate === false, resume: evidence.interruptionResume },
+  '856': { ok: evidence.background.resumedStatus === 'budget-limited' && evidence.background.resumeResultMatches === true && evidence.background.headAdvanced === true && evidence.background.resumeCwdChanged === true && evidence.interruptionResume.resumedStatus === 'cancelled' && evidence.interruptionResume.attempts === 1 && evidence.interruptionResume.duplicateCandidate === false, resume: { background: evidence.background, interruption: evidence.interruptionResume } },
   '857': { ok: evidence.uncertainRestart.status === 'blocked' && evidence.uncertainRestart.pidSignalled === false && evidence.uncertainRestart.duplicateEvaluation === false, uncertain: evidence.uncertainRestart },
 }
 for (const [item, itemEvidence] of Object.entries(evidence.items)) {

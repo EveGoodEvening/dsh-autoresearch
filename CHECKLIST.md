@@ -853,7 +853,7 @@ Implementation commit `cf4302c0197d4dc7f77a15cc5230abf9f6d74fc4` landed before t
 - [x] Observe deferred background readiness and output through generic jobs control; item `853` emitted `listed=true`, `kill=true`, and `noLiveJobs=true`.
 - [x] Observe mandatory Agent handle disposal and cancellation resource cleanup, entire evaluator process-tree quiescence, terminal persistence before lock release, and retained evidence; item `854` emitted `agentDisposed=true`, `terminalBeforeLockRelease=true`, retained candidate/audit evidence, and process-tree quiescence.
 - [x] Deliberately interrupt evaluation and prove the entire prior provider-owned process tree is quiescent; item `855` emitted the evaluator parent/child PIDs and `processTreeQuiescent=true` after cancellation.
-- [x] Resume by run id and observe completion without duplicate candidate; item `856` emitted the resumed terminal status, exactly one attempt, and `duplicateCandidate=false`.
+- [x] Resume by run id and observe completion without duplicate candidate; item `856` now requires background → foreground result equality after caller HEAD/subdirectory changes, plus the quiescent interrupted lineage's exact terminal status and single attempt.
 - [x] Separately simulate restart without whole-process-tree quiescence proof and observe typed `blocked` without signalling the recorded PID or duplicating evaluation; item `857` emitted `status=blocked`, the typed evidence code, `pidSignalled=false`, `duplicateEvaluation=false`, and `lockRetained=true`.
 
 ## Chunk 09 review gate

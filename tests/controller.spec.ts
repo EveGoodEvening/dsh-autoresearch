@@ -251,6 +251,28 @@ describe('controller real Git/SQLite outcomes', () => {
     try { const { result, tracker } = await runControllerCase(f, { metric_direction: direction, target, max_experiments: 1 }); expect(result).toMatchObject({ status, best: { metric }, counts: { experimentsStarted: 0, experimentsCompleted: 0, attempts: 1 } }); expect(f.creates).toHaveLength(0); expect(tracker.database.prepare('SELECT COUNT(*) AS n FROM artifacts').get()?.['n']).toBe(2); tracker.close() } finally { rmSync(f.root, { recursive: true, force: true }) }
   })
 
+  it('resumes across execution modes from another subdirectory after caller HEAD advances', async () => {
+    const f = controllerFixture([{ stdout: '{"score":10}\n' }, { stdout: '{"score":9}\n' }], [(worktree) => writeFileSync(join(worktree, 'src', 'code.ts'), 'export const n = 2\n')])
+    try {
+      const initial = createCaseController(f, { repository: join(f.root, 'src'), mode: 'background', max_experiments: 1 })
+      const first = await initial.run(); const ready = await initial.ready
+      const tracker = DurableTracker.open(ready.tracker); const row = tracker.getRun(ready.runId)!
+      const startCommit = String(row['start_commit']); const persistedPolicy = JSON.parse(String(row['policy_json'])) as Record<string, unknown>
+      tracker.close()
+      expect(first.status).toBe('budget-limited')
+      expect(persistedPolicy).toMatchObject({ repository: f.root, runTag: input.run_tag })
+      expect(persistedPolicy).not.toHaveProperty('mode')
+
+      const resumeDirectory = join(f.root, 'resume-cwd'); mkdirSync(resumeDirectory); writeFileSync(join(resumeDirectory, 'caller.txt'), 'caller advancement\n')
+      execFileSync('git', ['-C', f.root, 'add', 'resume-cwd/caller.txt']); execFileSync('git', ['-C', f.root, 'commit', '-m', 'advance caller head'])
+      expect(execFileSync('git', ['-C', f.root, 'rev-parse', 'HEAD']).toString().trim()).not.toBe(startCommit)
+
+      const resumed = await createCaseController(f, { repository: resumeDirectory, mode: 'foreground', max_experiments: 1 }, ready.runId).run()
+      expect(resumed).toEqual(first)
+      expect(f.subprocess.evaluatorSpawns).toBe(2)
+    } finally { rmSync(f.root, { recursive: true, force: true }) }
+  })
+
   it('prepares a durable job binding, checkpoints cancellation before abort work, and allocates no worktree or child', async () => {
     const f = controllerFixture([])
     const close = vi.spyOn(DurableTracker.prototype, 'close')

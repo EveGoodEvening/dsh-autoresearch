@@ -58,8 +58,8 @@ describe('release and consumer contract', () => {
         accepted: { ok: true, strictDecision: 'accept', terminalBeforeLockRelease: true, agentDisposed: true, tsv: { equalBytes: true, firstSha256: expect.stringMatching(/^[0-9a-f]{64}$/), secondSha256: expect.stringMatching(/^[0-9a-f]{64}$/), temporaryFiles: [], lowerLayerAtomicFaultTest: expect.stringContaining('publishes deterministic run-scoped TSV atomically') } },
         tie: { ok: true, strictDecision: 'reject', terminalBeforeLockRelease: true, agentDisposed: true },
         rejected: { ok: true, strictDecision: 'reject', terminalBeforeLockRelease: true, agentDisposed: true },
-        background: { ok: true, listed: true, kill: true, noLiveJobs: true },
-        interruptionResume: { ok: true, processTreeQuiescent: true, attempts: 1, duplicateCandidate: false },
+        background: { ok: true, listed: true, kill: true, noLiveJobs: true, resumedStatus: 'budget-limited', resumeResultMatches: true, headAdvanced: true, resumeCwdChanged: true },
+        interruptionResume: { ok: true, processTreeQuiescent: true, resumedStatus: 'cancelled', attempts: 1, duplicateCandidate: false },
         uncertainRestart: { ok: true, status: 'blocked', pidSignalled: false, duplicateEvaluation: false, lockRetained: true },
         items: Object.fromEntries(['840','845','846','847','848','849','850','851','852','853','854','855','856','857'].map(item => [item, { ok: true }])),
       })

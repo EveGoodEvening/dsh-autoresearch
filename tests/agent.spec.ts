@@ -182,7 +182,7 @@ function request(parent: Agent, persistTrustedGitConfig: ProposalAgentRequest['p
       repository: '/repo', objective: 'Make it faster', constraints: ['Keep behavior'], mutableGlobs: ['src/**'],
       exceptionalAllowlists: { dependencies: [], evaluators: [], datasets: [], submodules: [], gitConfig: [] },
       evaluation: { command: 'bench.js', args: [] }, metricName: 'time', metricDirection: 'minimize', timeoutMs: 1_000,
-      maxExperiments: 3, provenance: {}, environment: {}, mode: 'foreground',
+      maxExperiments: 3, runTag: 'tag', provenance: {}, environment: {},
     },
     policySha256: 'c'.repeat(64), provenanceSha256: 'd'.repeat(64),
     best: { metric: 10, commit: 'b'.repeat(40), experimentId: 'baseline' }, history: [],
