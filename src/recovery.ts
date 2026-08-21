@@ -7,13 +7,13 @@ import type { CandidateSnapshot, GitCommandOptions, RepositoryDiscovery, RunGitI
 import { parseFinalLineMetric } from './evaluator.js'
 import type { EvaluatorAttemptFacts, EvaluatorResult } from './evaluator.js'
 import type { ArtifactRecord, DurableTracker, RecoveryState } from './tracker.js'
-import type { AttemptId, BestResult, BlockerEvidence, ExperimentId, FullCommitSha, NormalizedRunPolicy, RunDurableState, RunId } from './types.js'
+import type { AttemptId, BestResult, BlockerEvidence, DurableRunPolicy, ExperimentId, FullCommitSha, RunDurableState, RunId } from './types.js'
 import type { SQLOutputValue } from 'node:sqlite'
 
 export type RecoveryBlockCode = 'run-missing' | 'repository-mismatch' | 'start-commit-mismatch' | 'policy-mismatch' | 'provenance-mismatch' | 'lock-mismatch' | 'state-ambiguous' | 'commit-missing' | 'git-external-mutation' | 'protected-change' | 'artifact-incomplete' | 'attempt-uncertain' | 'decision-mismatch' | 'reconciliation-unauthorized'
 export interface RecoveredExperiment { readonly experimentId: ExperimentId; readonly ordinal: number; readonly kind: 'baseline' | 'candidate'; readonly parentCommit: FullCommitSha; readonly candidateCommit?: FullCommitSha }
 export type RecoveredEvaluation = { readonly kind: 'measured'; readonly attemptId: AttemptId; readonly metric: number; readonly provenanceSha256: string; readonly exit: EvaluatorAttemptFacts; readonly artifacts: readonly ArtifactRecord[] } | { readonly kind: 'failed'; readonly attemptId: AttemptId; readonly code: Extract<EvaluatorResult, { kind: 'failed' }>['code']; readonly message: string; readonly provenanceSha256: string; readonly exit: EvaluatorAttemptFacts; readonly artifacts: readonly ArtifactRecord[] }
-export interface RecoveryRequest { readonly tracker: DurableTracker; readonly runId: RunId; readonly discovery: RepositoryDiscovery; readonly identity: RunGitIdentity; readonly policy: NormalizedRunPolicy; readonly policySha256: string; readonly provenanceSha256: string; readonly gitExecutable: string; readonly gitOptions: Omit<GitCommandOptions, 'cwd' | 'signal'>; readonly signal: AbortSignal }
+export interface RecoveryRequest { readonly tracker: DurableTracker; readonly runId: RunId; readonly discovery: RepositoryDiscovery; readonly identity: RunGitIdentity; readonly policy: DurableRunPolicy; readonly policySha256: string; readonly provenanceSha256: string; readonly gitExecutable: string; readonly gitOptions: Omit<GitCommandOptions, 'cwd' | 'signal'>; readonly signal: AbortSignal }
 export type RecoveryDirective =
   | { readonly kind: 'initialize'; readonly runId: RunId; readonly startCommit: FullCommitSha; readonly reuseLock: boolean }
   | { readonly kind: 'settle-baseline'; readonly runId: RunId; readonly experiment: RecoveredExperiment; readonly outcome: ({ readonly kind: 'accept'; readonly metric: number } | { readonly kind: 'fail'; readonly state: 'crashed' | 'timed-out' | 'policy-violation' | 'cancelled'; readonly code: string; readonly message: string; readonly quiescent: boolean }) }
@@ -91,7 +91,7 @@ export async function reconcileRecovery(ctx: Context, request: RecoveryRequest):
 }
 
 function validateIdentity(run: Row, request: RecoveryRequest): RecoveryDirective | undefined {
-  if (text(run['repository_id']) !== request.discovery.repositoryId || text(run['repository']) !== request.discovery.repository || text(run['git_common_dir']) !== request.discovery.gitCommonDir || text(run['caller_cwd']) !== request.discovery.callerCwd) return blocked(request, 'repository-mismatch', 'repository discovery differs from immutable run identity', 'retain')
+  if (text(run['repository_id']) !== request.discovery.repositoryId) return blocked(request, 'repository-mismatch', 'canonical repository identity differs from immutable run identity', 'retain')
   if (text(run['start_commit']) !== request.discovery.startCommit) return blocked(request, 'start-commit-mismatch', 'start commit differs from immutable run identity', 'retain')
   if (text(run['policy_sha256']) !== request.policySha256) return blocked(request, 'policy-mismatch', 'normalized policy hash differs from durable policy', 'retain')
   if (text(run['provenance_sha256']) !== request.provenanceSha256) return blocked(request, 'provenance-mismatch', 'evaluator provenance hash differs from durable provenance', 'retain')
@@ -243,7 +243,7 @@ function terminalDirective(request: RecoveryRequest, state: RunDurableState, rec
 
 function validateTerminalEvidence(request: RecoveryRequest, state: 'completed' | 'baseline-blocked' | 'blocked' | 'round-failed' | 'cancelled'): readonly ArtifactRecord[] | RecoveryEvidenceError {
   const experiments = request.tracker.database.prepare('SELECT * FROM experiments WHERE run_id = ? ORDER BY ordinal').all(request.runId) as Row[]
-  const attempts = request.tracker.database.prepare('SELECT * FROM attempts WHERE run_id = ? ORDER BY experiment_id, ordinal').all(request.runId) as Row[]
+  const attempts = request.tracker.database.prepare('SELECT a.* FROM attempts a JOIN experiments e ON e.run_id = a.run_id AND e.experiment_id = a.experiment_id WHERE a.run_id = ? ORDER BY e.ordinal, a.ordinal, a.attempt_id').all(request.runId) as Row[]
   const decoded: ArtifactRecord[] = []
   const validatedAttemptIds = new Set<string>()
   try {

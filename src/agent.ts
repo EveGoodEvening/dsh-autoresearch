@@ -17,10 +17,10 @@ import type { ResolvedConfig } from './config.js'
 import { captureGitConfigBaseline, type GitCommandOptions, type GitConfigBaseline } from './git.js'
 import type {
   BestResult,
+  DurableRunPolicy,
   ExperimentDurableState,
   ExperimentId,
   FullCommitSha,
-  NormalizedRunPolicy,
   RunId,
 } from './types.js'
 
@@ -63,7 +63,7 @@ export interface ProposalAgentRequest {
   readonly experimentId: ExperimentId
   readonly ordinal: number
   readonly workspace: ProposalWorkspaceFacts
-  readonly policy: NormalizedRunPolicy
+  readonly policy: DurableRunPolicy
   readonly policySha256: string
   readonly provenanceSha256: string
   readonly best: BestResult

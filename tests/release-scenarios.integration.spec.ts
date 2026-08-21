@@ -23,6 +23,8 @@ interface ReleaseRun {
   readonly status: string
   readonly runId: string
   readonly tracker: string
+  readonly counts: { readonly experimentsStarted: number; readonly experimentsCompleted: number; readonly attempts: number }
+  readonly best?: { readonly metric: number; readonly commit: string; readonly experimentId: string }
   readonly evidence?: Array<{ readonly code?: string }>
 }
 
@@ -249,7 +251,8 @@ releaseDescribe('packed release scenarios', () => {
       const cwd = await repository(harness.root, 'background')
       const owner = await parent(harness.ctx, cwd)
       try {
-        const started = await execute(harness.ctx, owner.agent, request(cwd, 'release accepted candidate', 'background'))
+        const args = request(cwd, 'release accepted candidate', 'background')
+        const started = await execute(harness.ctx, owner.agent, args)
         expect(started).toMatchObject({ kind: 'background', jobId: expect.any(String), runId: expect.any(String) })
 
         const listed = await harness.ctx.tools.execute({ callId: 'list' as never, name: 'job_list', arguments: {}, agent: owner.agent, signal: new AbortController().signal })
@@ -259,13 +262,27 @@ releaseDescribe('packed release scenarios', () => {
         const output = await harness.ctx.tools.execute({ callId: 'output' as never, name: 'job_output', arguments: { job_id: started.jobId, wait: true, timeout_ms: 20_000 }, agent: owner.agent, signal: new AbortController().signal })
         expect(output.isError).toBe(false)
         const outputValue = output.value as unknown as { text: string }
-        const completed = JSON.parse(outputValue.text) as { status: string; evidence?: unknown }
+        const completed = JSON.parse(outputValue.text) as ReleaseRun
         if (completed.status !== 'budget-limited') throw new Error(JSON.stringify({ status: completed.status, evidence: completed.evidence }))
 
         const kill = await harness.ctx.tools.execute({ callId: 'kill' as never, name: 'job_kill', arguments: { job_id: started.jobId }, agent: owner.agent, signal: new AbortController().signal })
         expect(kill.isError).toBe(false)
         const noLiveJobs = harness.ctx.jobs.list(owner.agent).every(job => !['running', 'stopping'].includes(job.status))
-        evidence.background = { ok: true, readiness: started, listed: true, output: completed.status, kill: true, noLiveJobs }
+
+        const durable = inspect(started.tracker, started.runId); const resumeCwd = join(cwd, 'resume-cwd')
+        await mkdir(resumeCwd); await writeFile(join(resumeCwd, 'caller.txt'), 'advance caller head\n')
+        git(cwd, ['add', 'resume-cwd/caller.txt']); git(cwd, ['commit', '-qm', 'advance caller head'])
+        const advancedHead = git(cwd, ['rev-parse', 'HEAD'])
+        const { run_tag: _tag, mode: _mode, repository: _repository, ...stable } = args
+        const resumed = await execute(harness.ctx, owner.agent, { ...stable, repository: resumeCwd, resume_run_id: started.runId, mode: 'foreground' })
+        expect(resumed).toMatchObject({ kind: 'foreground', run: { runId: started.runId, status: 'budget-limited', best: completed.best } })
+        expect(resumed.run).toEqual(completed)
+
+        evidence.background = {
+          ok: true, readiness: started, listed: true, output: completed.status, kill: true, noLiveJobs,
+          resumedStatus: resumed.run.status, resumedBest: resumed.run.best, resumeResultMatches: true,
+          headAdvanced: advancedHead !== durable.run.start_commit, resumeCwdChanged: resumeCwd !== durable.run.caller_cwd,
+        }
       } finally {
         await owner.dispose()
       }
@@ -284,9 +301,10 @@ releaseDescribe('packed release scenarios', () => {
         const pids = JSON.parse(await readFile(marker, 'utf8')) as { parent: number; child: number }
         const killed = await harness.ctx.tools.execute({ callId: 'interrupt-kill' as never, name: 'job_kill', arguments: { job_id: started.jobId }, agent: owner.agent, signal: new AbortController().signal }); expect(killed.isError).toBe(false)
         await harness.ctx.jobs.wait(started.jobId, 20_000, owner.agent); await waitUntil(async () => await processGone(pids.parent) && await processGone(pids.child), 'provider-owned evaluator tree survived cancellation')
-        const { run_tag: _tag, mode: _mode, ...stable } = args; const resumed = await execute(harness.ctx, owner.agent, { ...stable, resume_run_id: started.runId, mode: 'foreground' }); expect(resumed.kind).toBe('foreground')
+        const { run_tag: _tag, mode: _mode, ...stable } = args; const resumed = await execute(harness.ctx, owner.agent, { ...stable, resume_run_id: started.runId, mode: 'foreground' })
+        expect(resumed).toMatchObject({ kind: 'foreground', run: { runId: started.runId, status: 'cancelled' } })
         const durable = inspect(started.tracker, started.runId); const db = new DatabaseSync(started.tracker, { readOnly: true }); const attempts = Number(db.prepare('SELECT COUNT(*) n FROM attempts').get()?.n); const uncertain = Number(db.prepare('SELECT COUNT(*) n FROM attempts WHERE process_tree_quiescent IS NOT 1').get()?.n); db.close(); expect(attempts).toBe(1); expect(uncertain).toBe(0)
-        evidence.interruptionResume = { ok: true, runId: started.runId, parentPid: pids.parent, childPid: pids.child, processTreeQuiescent: true, resumed: resumed.run.status, attempts, duplicateCandidate: durable.experiments.filter(row => row.kind === 'candidate').length > 1 }
+        evidence.interruptionResume = { ok: true, runId: started.runId, parentPid: pids.parent, childPid: pids.child, processTreeQuiescent: true, resumedStatus: resumed.run.status, attempts, duplicateCandidate: durable.experiments.filter(row => row.kind === 'candidate').length > 1 }
       } finally { await owner.dispose() }
     } finally { await harness.dispose().catch(() => undefined) }
   }, 45_000)

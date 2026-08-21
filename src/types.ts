@@ -110,6 +110,10 @@ export interface NormalizedRunPolicy {
   readonly mode: RunMode
 }
 
+export type DurableRunPolicy = Omit<NormalizedRunPolicy, 'resumeRunId' | 'mode' | 'runTag'> & {
+  readonly runTag: string
+}
+
 export type RunDurableState =
   | 'initializing' | 'baseline-running' | 'ready' | 'candidate-prepared'
   | 'candidate-running' | 'deciding' | 'completed' | 'baseline-blocked'

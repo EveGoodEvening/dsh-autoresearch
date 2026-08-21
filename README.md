@@ -86,7 +86,7 @@ Registered by `apply()` in `src/index.ts`. Runs as a **background job** by defau
 | `metric_name` | yes | Exact JSON scalar key on the evaluator's final output line. |
 | `metric_direction` | yes | `minimize` or `maximize`. |
 | `run_tag` | one of | Fresh Git-safe exclusion tag; mutually exclusive with `resume_run_id`. |
-| `resume_run_id` | one of | Durable run id to resume. |
+| `resume_run_id` | one of | Durable run id to resume using canonical repository identity and the persisted start commit; caller HEAD and subdirectory may differ. |
 | `constraints` | no | Immutable policy constraints. |
 | `exceptional_allowlists` | no | Explicit `dependencies` / `evaluators` / `datasets` / `submodules` / `gitConfig` path exceptions. |
 | `timeout_ms` | no | Per-attempt timeout, bounded by deployment policy. |
@@ -94,7 +94,7 @@ Registered by `apply()` in `src/index.ts`. Runs as a **background job** by defau
 | `target` | no | Finite stopping threshold. |
 | `provenance` | no | `{ evaluator?, dataset? }` labels. |
 | `environment` | no | Evaluator env overrides; every value a NUL-free string, no reserved `DSH_` prefix. |
-| `mode` | no | `background` (default) or `foreground`. |
+| `mode` | no | Execution-only dispatch: `background` (default) or `foreground`; it may change when resuming a run. |
 
 **Output** is a discriminated JSON: `background` (run + job started), `background-start-failed`, or `foreground` (full run result). Run results carry `status`, `counts`, `best`, `artifacts`, and blocker `evidence`.
 

@@ -9,7 +9,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { acquireRunLock, allocateRunWorktree, captureGitConfigBaseline, checkoutCandidateForEvaluation, commitCandidate, discoverRepository, durableGitIdentity, makeRunGitIdentity, snapshotCandidate, validateCandidate } from '../src/git.ts'
 import { reconcileRecovery, type RecoveryRequest } from '../src/recovery.ts'
 import { DurableTracker } from '../src/tracker.ts'
-import type { NormalizedRunPolicy } from '../src/types.ts'
+import type { DurableRunPolicy } from '../src/types.ts'
 
 const SHA = 'a'.repeat(40)
 const HASH = 'b'.repeat(64)
@@ -24,7 +24,7 @@ function fixture() {
   const gitCommonDir = join(repository, '.git')
   const worktree = join(root, 'worktree')
   const runId = 'run-1'
-  const policy = { repository, objective: 'improve', constraints: [], mutableGlobs: ['src/**'], exceptionalAllowlists: { dependencies: [], evaluators: [], datasets: [], gitConfig: [], submodules: [] }, evaluation: { command: 'node', args: ['evaluate.mjs'] }, metricName: 'score', metricDirection: 'minimize', timeoutMs: 1_000, maxExperiments: 2, provenance: {}, environment: {}, mode: 'foreground' } satisfies NormalizedRunPolicy
+  const policy = { repository, runTag: 'tag', objective: 'improve', constraints: [], mutableGlobs: ['src/**'], exceptionalAllowlists: { dependencies: [], evaluators: [], datasets: [], gitConfig: [], submodules: [] }, evaluation: { command: 'node', args: ['evaluate.mjs'] }, metricName: 'score', metricDirection: 'minimize', timeoutMs: 1_000, maxExperiments: 2, provenance: {}, environment: {} } satisfies DurableRunPolicy
   const discovery = { repository, callerCwd: repository, gitCommonDir, repositoryId: 'repo-id', startCommit: SHA }
   const identity = { runId, runTag: 'tag', branch: 'autoresearch/tag-run-1', worktree, acceptedRef: 'refs/autoresearch/runs/run-1/accepted', candidateRefPrefix: 'refs/autoresearch/runs/run-1/candidates/' }
   const request = { tracker, runId, discovery, identity, policy, policySha256: HASH, provenanceSha256: HASH, gitExecutable: '/usr/bin/git', gitOptions: { timeoutMs: 1_000, graceMs: 100, maxStdoutBytes: 10_000, maxStderrBytes: 10_000 }, signal: new AbortController().signal } satisfies RecoveryRequest
@@ -70,6 +70,13 @@ describe('recovery reconciler', () => {
   it('authorizes initialization only from the exact immutable row without an active lock', async () => {
     const { tracker, request } = fixture(); createRun(tracker, request)
     await expect(reconcileRecovery(unusedContext, request)).resolves.toEqual({ kind: 'initialize', runId: request.runId, startCommit: SHA, reuseLock: false })
+    tracker.close()
+  })
+
+  it('accepts another caller subdirectory for the same canonical repository identity', async () => {
+    const { tracker, request } = fixture(); createRun(tracker, request)
+    const resumed = { ...request, discovery: { ...request.discovery, callerCwd: join(request.discovery.repository, 'nested') } }
+    await expect(reconcileRecovery(unusedContext, resumed)).resolves.toEqual({ kind: 'initialize', runId: request.runId, startCommit: SHA, reuseLock: false })
     tracker.close()
   })
 
@@ -176,7 +183,7 @@ async function realFixture() {
   const root = mkdtempSync(join(tmpdir(), 'autoresearch-recovery-real-')); roots.push(root); const repository = join(root, 'repo'); mkdirSync(repository)
   execFileSync('git', ['init', '-b', 'main', repository]); execFileSync('git', ['-C', repository, 'config', 'user.name', 'Test']); execFileSync('git', ['-C', repository, 'config', 'user.email', 'test@example.invalid']); mkdirSync(join(repository, 'src')); writeFileSync(join(repository, 'src', 'code.ts'), 'base\n'); execFileSync('git', ['-C', repository, 'add', '.']); execFileSync('git', ['-C', repository, 'commit', '-m', 'base'])
   const subprocess = new RecoverySubprocess(); const ctx = { subprocess } as unknown as Context; const gitExecutable = await subprocess.resolveExecutable('git'); const gitOptions = { timeoutMs: 5_000, graceMs: 100, maxStdoutBytes: 64 * 1024, maxStderrBytes: 64 * 1024 }; const discovery = await discoverRepository(ctx, gitExecutable, repository, gitOptions)
-  const runId = 'run-real'; const policy = { repository, objective: 'improve', constraints: [], mutableGlobs: ['src/**'], exceptionalAllowlists: { dependencies: [], evaluators: [], datasets: [], gitConfig: [], submodules: [] }, evaluation: { command: 'node', args: ['evaluate.mjs'] }, metricName: 'score', metricDirection: 'minimize', timeoutMs: 1_000, maxExperiments: 2, provenance: {}, environment: {}, mode: 'foreground' } satisfies NormalizedRunPolicy
+  const runId = 'run-real'; const policy = { repository, runTag: 'tag', objective: 'improve', constraints: [], mutableGlobs: ['src/**'], exceptionalAllowlists: { dependencies: [], evaluators: [], datasets: [], gitConfig: [], submodules: [] }, evaluation: { command: 'node', args: ['evaluate.mjs'] }, metricName: 'score', metricDirection: 'minimize', timeoutMs: 1_000, maxExperiments: 2, provenance: {}, environment: {} } satisfies DurableRunPolicy
   const identity = makeRunGitIdentity({ branchPrefix: 'autoresearch/', stateRoot: 'state' }, discovery, 'tag', runId); const tracker = DurableTracker.open(join(root, 'tracker.sqlite')); const request = { tracker, runId, discovery, identity, policy, policySha256: HASH, provenanceSha256: HASH, gitExecutable, gitOptions, signal: new AbortController().signal } satisfies RecoveryRequest
   createRun(tracker, request); acquireRunLock(tracker, identity, discovery.repositoryId, 2); await allocateRunWorktree(ctx, gitExecutable, discovery, identity, durableGitIdentity(tracker, runId), gitOptions); return { root, ctx, tracker, request, subprocess }
 }
