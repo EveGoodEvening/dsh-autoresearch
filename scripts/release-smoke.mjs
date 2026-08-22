@@ -17,8 +17,12 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
 
 async function main(args) {
   const packageManifest = JSON.parse(await readFile(join(repoRoot, 'package.json'), 'utf8'))
-  const { tarball, profile } = resolveReleaseSmokeOptions(args, packageManifest)
+  const options = resolveReleaseSmokeOptions(args, packageManifest)
   const root = await mkdtemp(join(tmpdir(), 'dsh-autoresearch-release-'))
+  const tarball = options.pack
+    ? join(root, basename(options.tarball))
+    : options.tarball
+  const { profile } = options
   const home = join(root, 'home')
   const dshHome = join(root, 'dsh-home')
   const consumer = join(root, 'consumer')
@@ -26,6 +30,7 @@ async function main(args) {
   const evidence = { ok: false, tarball: basename(tarball), profile, package: {}, profileBoot: {}, webProfileBoot: {}, scenarios: {} }
 
   try {
+    if (options.pack) await run('pnpm', ['pack', '--pack-destination', root], { cwd: repoRoot })
     const entries = (await run('tar', ['-tzf', tarball])).stdout.trim().split('\n').filter(Boolean).sort()
     assertExactTarballEntries(entries)
     const manifest = JSON.parse((await run('tar', ['-xOzf', tarball, 'package/package.json'])).stdout)
@@ -110,9 +115,11 @@ export function resolveReleaseSmokeOptions(args, packageManifest, cwd = process.
     throw new Error('package.json must contain a package name and version')
   }
   const expectedFilename = `${name.replace(/^@/u, '').replaceAll('/', '-')}-${version}.tgz`
+  const explicitTarball = tarballOverride ?? positional[0]
   return {
-    tarball: resolve(cwd, tarballOverride ?? positional[0] ?? join(repoRoot, expectedFilename)),
+    tarball: resolve(cwd, explicitTarball ?? join(repoRoot, expectedFilename)),
     profile: profileOverride ?? positional[1] ?? 'autoresearch-release-smoke',
+    pack: explicitTarball === undefined,
   }
 }
 

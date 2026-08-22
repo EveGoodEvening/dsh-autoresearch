@@ -109,18 +109,22 @@ describe('release and consumer contract', () => {
     expect(resolveReleaseSmokeOptions([], manifest, '/ignored-cwd')).toEqual({
       tarball: join(root, 'deepseek-ai-dsh-autoresearch-1.2.3.tgz'),
       profile: 'autoresearch-release-smoke',
+      pack: true,
     })
     expect(resolveReleaseSmokeOptions(['./custom.tgz', 'custom-profile'], manifest, '/tmp/consumer')).toEqual({
       tarball: '/tmp/consumer/custom.tgz',
       profile: 'custom-profile',
+      pack: false,
     })
     expect(resolveReleaseSmokeOptions(['--profile', 'flag-profile'], manifest, '/ignored-cwd')).toEqual({
       tarball: join(root, 'deepseek-ai-dsh-autoresearch-1.2.3.tgz'),
       profile: 'flag-profile',
+      pack: true,
     })
     expect(resolveReleaseSmokeOptions(['--', './custom.tgz', 'dash-profile'], manifest, '/tmp/consumer')).toEqual({
       tarball: '/tmp/consumer/custom.tgz',
       profile: 'dash-profile',
+      pack: false,
     })
   })
 })
