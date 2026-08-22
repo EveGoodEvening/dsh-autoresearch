@@ -1,8 +1,8 @@
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join, relative } from 'node:path'
+import { dirname, join, relative } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { boot, composeEntries, initProfile, loadProfile, writeProfileManifest, type Profile } from '@deepseek-ai/dsh-app-boot'
+import { boot, composeEntries, healProfilesModuleFallback, initProfile, loadProfile, writeProfileManifest, type Profile } from '@deepseek-ai/dsh-app-boot'
 import type { EntryOptions } from '@deepseek-ai/cordis-plugin-loader'
 import type { PatchOptions } from '@deepseek-ai/cordis-plugin-include'
 import type {} from '@deepseek-ai/cordis-plugin-hmr'
@@ -15,6 +15,9 @@ const installAnchor = fileURLToPath(import.meta.resolve('@deepseek-ai/dsh-app-bo
 const baseEntry = fileURLToPath(import.meta.resolve('@deepseek-ai/dsh-base'))
 const basePackage = join(baseEntry, '..', '..')
 const modelPlugin = fileURLToPath(new URL('./loader/model-provider.ts', import.meta.url))
+const shippedPresetManifest = fileURLToPath(import.meta.resolve('@deepseek-ai/dsh/config/agent-presets/standard/preset.yml'))
+const shippedPresetRoot = dirname(dirname(shippedPresetManifest))
+const dshInstallAnchor = join(dirname(dirname(shippedPresetRoot)), 'package.json')
 
 export const COMPOSITION_TERMINATION_GRACE_MS = 5_000
 
@@ -32,6 +35,22 @@ export interface RealHarness {
 function providerOverlay(): PatchOptions[] {
   return [{ insert: [{ id: 'autoresearch-test-model', name: modelPlugin }] }]
 }
+function standardAgentPlaneOverlay(): PatchOptions[] {
+  return [
+    { id: 'tool-jobs', disabled: true },
+    {
+      insert: [{
+        id: 'agent-presets',
+        name: '@deepseek-ai/dsh-agent-presets',
+        config: {
+          default: 'standard',
+          roots: [{ path: shippedPresetRoot, trust: 'system' }],
+          includeUserRoot: false,
+        },
+      }],
+    },
+  ]
+}
 function configureBootEntry(entry: EntryOptions): EntryOptions {
   if (entry.id === 'hmr') {
     return { ...entry, config: { root: [], ignored: [], debounce: 10 } }
@@ -43,7 +62,7 @@ function configureBootEntry(entry: EntryOptions): EntryOptions {
 }
 
 
-export async function composeHarness(options: { autoresearch?: boolean; omitEntry?: string; reverseEntries?: boolean } = {}): Promise<RealHarness> {
+export async function composeHarness(options: { autoresearch?: boolean; omitEntry?: string; reverseEntries?: boolean; standardPreset?: boolean } = {}): Promise<RealHarness> {
   const root = await mkdtemp(join(tmpdir(), 'dsh-autoresearch-loader-'))
   const home = join(root, 'home')
   const profileDir = join(home, 'profiles', 'integration')
@@ -54,6 +73,7 @@ export async function composeHarness(options: { autoresearch?: boolean; omitEntr
     dependencies: { 'dsh-autoresearch': `link:${relative(profileDir, packageRoot)}` },
     dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', ...(options.autoresearch === false ? [] : ['dsh-autoresearch'])] } },
   })
+  if (options.standardPreset) healProfilesModuleFallback(dshInstallAnchor, home)
   const modulesDir = join(profileDir, 'node_modules')
   await mkdir(modulesDir, { recursive: true })
   await symlink(packageRoot, join(modulesDir, 'dsh-autoresearch'), 'dir')
@@ -63,7 +83,12 @@ export async function composeHarness(options: { autoresearch?: boolean; omitEntr
     if (error.code !== 'EEXIST') throw error
   })
   const profile = loadProfile('dsh-autoresearch-test', 'integration', installAnchor, home, { userLayer: false })
-  const entries = composeEntries([...profile.layers.map(layer => layer.patches), profile.patches, providerOverlay()])
+  const entries = composeEntries([
+    ...profile.layers.map(layer => layer.patches),
+    profile.patches,
+    ...(options.standardPreset ? [standardAgentPlaneOverlay()] : []),
+    providerOverlay(),
+  ])
   const selectedEntries = options.omitEntry
     ? entries.filter(entry => entry.id !== options.omitEntry)
     : entries

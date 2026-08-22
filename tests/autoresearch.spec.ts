@@ -67,7 +67,7 @@ function harness(): Harness {
     agents: { create: vi.fn() },
     subprocess: {},
     systemPrompt: { section(section: Harness['prompt']) { prompt = section; return state.releasePrompt } },
-    tools: { register(definition: ToolDefinition) { tool = definition; return state.releaseTool } },
+    tools: { get: vi.fn(() => undefined), register(definition: ToolDefinition) { tool = definition; return state.releaseTool } },
     jobs: { start(spec: JobStart) { if (state.startError) throw state.startError; thisJob = spec; thisHooks = spec.run(); if (state.throwAfterRun) throw new Error('registry failed after run'); return 'autoresearch-1' } },
     effect(factory: () => () => Promise<void>) { cleanup = factory(); return cleanup },
   }
@@ -152,12 +152,12 @@ describe('autoresearch production wiring', () => {
     await expect(test.hooks?.done).resolves.toMatchObject({ status: 'completed' })
   })
 
-  it('returns a typed failure when job registration throws without orphaning a controller', async () => {
-    state.startError = new Error('registry unavailable')
+  it('returns the owner-relative registry failure without constructing a controller', async () => {
+    state.startError = new Error('no attached job controller serves owner session')
     const test = harness()
     await expect(test.tool.execute(input, execution())).resolves.toEqual({
-      kind: 'background-start-failed', jobId: 'unregistered', status: 'failed', reason: 'registry unavailable',
-      evidence: [{ code: 'startup-failed', message: 'registry unavailable', artifacts: [] }],
+      kind: 'background-start-failed', jobId: 'unregistered', status: 'failed', reason: 'no attached job controller serves owner session',
+      evidence: [{ code: 'startup-failed', message: 'no attached job controller serves owner session', artifacts: [] }],
     })
     expect(state.controllers).toHaveLength(0)
   })

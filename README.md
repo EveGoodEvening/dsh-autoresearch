@@ -17,7 +17,8 @@ The design is inspired by [Karpathy's `autoresearch`](https://github.com/karpath
 
 - Node.js `^22.19.0 || >=24.0.0` (uses `node:sqlite`)
 - pnpm `11.7.0`
-- A DeepSeek Harness deployment with the peer services: `@deepseek-ai/cordis`, `dsh-agent`, `dsh-jobs`, `dsh-subprocess`, `dsh-system-prompt`, `dsh-tools`, `dsh-tool-jobs`, and friends (see `package.json` `peerDependencies`).
+- DeepSeek Harness `0.1.1-rc.2`; this developer-preview integration is retested and repinned for each supported DSH release.
+- The Host must provide `agents`, `jobs`, `subprocess`, `systemPrompt`, and `tools`. Background mode additionally requires the calling Agent to mount `dsh-tool-jobs`; the Web `standard` Agent preset and the base/headless compositions do so. Host-global `job_*` tools are not required.
 
 ## Install
 
@@ -153,7 +154,7 @@ pnpm run check          # typecheck + test + build
 pnpm run release:smoke  # packed-artifact release verification
 ```
 
-Release verification exercises the packed artifact **outside** the checkout: inspect the allowlist, install without local links, import generated ESM/declarations, and install/dump the real named dsh profile.
+Release verification exercises the packed artifact **outside** the checkout: inspect the allowlist, install without local links, import generated ESM/declarations, install/dump the real named dsh profile, and boot the actual Web profile long enough to fetch its HTML surface. The integration suite separately executes autoresearch through the Web `standard` Agent preset with owner-scoped `job_*` controls.
 
 ## License
 

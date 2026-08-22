@@ -1,0 +1,9 @@
+allowBuilds:
+  '@deepseek-ai/dsh-subprocess-local': true
+  '@google/genai': false
+  koffi: false
+  node-pty: false
+  protobufjs: false
+minimumReleaseAgeExclude:
+  # DSH publishes one synchronized prerelease family; exact versions remain locked in pnpm-lock.yaml.
+  - '@deepseek-ai/*'

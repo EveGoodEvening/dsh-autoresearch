@@ -81,10 +81,6 @@ function requireServices(ctx: Context): void {
   if (typeof agents.create !== 'function') throw new Error('autoresearch requires a compatible ctx.agents.create runtime with child setup support')
   const jobs = services['jobs'] as { start?: unknown }
   if (typeof jobs.start !== 'function') throw new Error('autoresearch requires a compatible ctx.jobs registry')
-  const tools = services['tools'] as { get?: (name: string) => unknown }
-  if (typeof tools.get === 'function' && ['job_list', 'job_output', 'job_kill'].some(name => tools.get!(name) === undefined)) {
-    throw new Error('autoresearch requires the generic dsh-tool-jobs controller composition')
-  }
 }
 
 /** Register the sole production autoresearch controller, model tool, and direct-human guidance. */

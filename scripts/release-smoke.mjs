@@ -23,7 +23,7 @@ async function main(args) {
   const dshHome = join(root, 'dsh-home')
   const consumer = join(root, 'consumer')
   const externalDshHome = process.env.DSH_HOME
-  const evidence = { ok: false, tarball: basename(tarball), profile, package: {}, profileBoot: {}, scenarios: {} }
+  const evidence = { ok: false, tarball: basename(tarball), profile, package: {}, profileBoot: {}, webProfileBoot: {}, scenarios: {} }
 
   try {
     const entries = (await run('tar', ['-tzf', tarball])).stdout.trim().split('\n').filter(Boolean).sort()
@@ -38,6 +38,8 @@ async function main(args) {
     const dump = await run(dshExecutable, ['--profile', profile, '--dump-config'], { env: isolatedEnv, replaceEnv: true })
     if (!dump.stdout.includes('id: autoresearch') || !dump.stdout.includes('name: dsh-autoresearch')) throw new Error('dumped profile does not contain the autoresearch row')
     for (const expected of ['defaultMaxExperiments: 20', 'maxExperiments: 100', 'stateRoot: dsh-autoresearch']) if (!dump.stdout.includes(expected)) throw new Error(`dumped profile is missing ${expected}`)
+    if (profile !== 'web') await run(dshExecutable, ['plugin', '--profile', 'web', 'add', tarball], { env: isolatedEnv, replaceEnv: true })
+    evidence.webProfileBoot = await runWebProfileSmoke(dshExecutable, isolatedEnv)
 
     if (externalDshHomeBefore && externalDshHome) {
       const after = await stat(externalDshHome)
@@ -187,7 +189,6 @@ function activationContext(registrations) {
     jobs: { start() {} },
     subprocess: {},
     tools: {
-      get: () => ({}),
       register(tool) {
         registrations.tools.push(tool.name)
         return () => {}
@@ -201,6 +202,69 @@ function activationContext(registrations) {
     },
     effect(runEffect) { return runEffect() },
     on() { return () => {} },
+  }
+}
+
+export async function runWebProfileSmoke(command, env) {
+  const child = spawn(command, ['web', '--no-open', '--host', '127.0.0.1', '--port', '0'], {
+    env,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  const ready = Promise.withResolvers()
+  const exited = Promise.withResolvers()
+  let stdout = ''
+  let stderr = ''
+  let readySettled = false
+
+  const rejectReady = error => {
+    if (readySettled) return
+    readySettled = true
+    ready.reject(error)
+  }
+  child.stdout.setEncoding('utf8').on('data', chunk => {
+    stdout += chunk
+    const match = stdout.match(/http:\/\/127\.0\.0\.1:\d+/u)
+    if (!match || readySettled) return
+    readySettled = true
+    ready.resolve(match[0])
+  })
+  child.stderr.setEncoding('utf8').on('data', chunk => { stderr += chunk })
+  child.once('error', error => {
+    rejectReady(error)
+    exited.resolve({ error })
+  })
+  child.once('close', (code, signal) => {
+    rejectReady(new Error(`${command} web exited before readiness (${code ?? signal})\n${stdout}\n${stderr}`))
+    exited.resolve({ code, signal })
+  })
+
+  const timeout = setTimeout(() => {
+    rejectReady(new Error(`${command} web did not become ready within 60s\n${stdout}\n${stderr}`))
+  }, 60_000)
+  try {
+    const url = await ready.promise
+    const response = await fetch(url, { signal: AbortSignal.timeout(10_000) })
+    const contentType = response.headers.get('content-type') ?? ''
+    await response.arrayBuffer()
+    if (!response.ok || !contentType.includes('text/html')) {
+      throw new Error(`web profile returned ${response.status} ${contentType || '(no content type)'}`)
+    }
+    child.kill('SIGTERM')
+    const outcome = await Promise.race([
+      exited.promise,
+      new Promise(resolveTimeout => setTimeout(() => resolveTimeout({ timeout: true }), 10_000)),
+    ])
+    if (outcome.timeout) throw new Error('web profile did not stop within 10s after SIGTERM')
+    if (outcome.error) throw outcome.error
+    if (outcome.code !== 0) throw new Error(`web profile exited ${outcome.code ?? outcome.signal}\n${stdout}\n${stderr}`)
+    return { url, status: response.status, contentType }
+  } finally {
+    clearTimeout(timeout)
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill('SIGTERM')
+      await Promise.race([exited.promise, new Promise(resolveWait => setTimeout(resolveWait, 5_000))])
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+    }
   }
 }
 

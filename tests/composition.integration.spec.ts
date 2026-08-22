@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { DatabaseSync } from 'node:sqlite'
 import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
+import type {} from '@deepseek-ai/dsh-agent-presets'
 import type { SubprocessHandle } from '@deepseek-ai/dsh-subprocess'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -34,12 +35,22 @@ async function repository(root: string): Promise<string> {
   return cwd
 }
 
-async function parentAgent(harness: RealHarness, cwd: string, suffix = 'owner'): Promise<AgentHandle> {
+async function parentAgent(harness: RealHarness, cwd: string, suffix = 'owner', preset?: 'standard'): Promise<AgentHandle> {
   return harness.ctx.agents.create({
     sessionId: SessionId(`${suffix}-${crypto.randomUUID()}`),
     meta: { cwd },
     agentOptions: { provider: 'autoresearch-test', model: 'bounded-model', maxTokens: 512 },
+    ...(preset === undefined ? {} : {
+      setup: async agentCtx => { await harness.ctx.agentPresets.mount(agentCtx, preset) },
+    }),
   })
+}
+
+function stringProperty(value: unknown, property: string): string {
+  if (value === null || typeof value !== 'object' || !(property in value)) throw new Error(`tool result is missing ${property}`)
+  const field = value[property]
+  if (typeof field !== 'string') throw new Error(`tool result ${property} must be a string`)
+  return field
 }
 
 async function execute(harness: RealHarness, name: string, args: unknown, agent: Agent) {
@@ -125,6 +136,26 @@ describe('real Loader/profile production composition', () => {
     expect(harness.ctx.tools.schemas().map(tool => tool.name)).toEqual(expect.arrayContaining(['autoresearch', 'job_output', 'job_list', 'job_kill']))
     expect(await assembledPrompt(harness.ctx)).toContain('Use autoresearch only when the direct human explicitly requests')
     expect(harness.ctx.llm.listProviders().map(provider => provider.id)).toContain('autoresearch-test')
+  }, 30_000)
+
+  it('runs through the Web standard Agent preset while job controls remain absent from the Host tool layer', async () => {
+    const harness = await composeHarness({ standardPreset: true })
+    active.push(harness)
+    expect(harness.entries.find(entry => entry.id === 'tool-jobs')).toMatchObject({ disabled: true })
+    expect(harness.ctx.tools.schemas().map(tool => tool.name)).not.toEqual(expect.arrayContaining(['job_output', 'job_list', 'job_kill']))
+
+    const cwd = await repository(harness.root)
+    const parent = await parentAgent(harness, cwd, 'web-standard', 'standard')
+    try {
+      expect(harness.ctx.tools.schemas(parent.agent).map(tool => tool.name)).toEqual(expect.arrayContaining(['autoresearch', 'job_output', 'job_list', 'job_kill']))
+      const started = await execute(harness, 'autoresearch', request(cwd), parent.agent)
+      expect(started.isError).toBe(false)
+      expect(started.value).toMatchObject({ kind: 'background', jobId: expect.stringMatching(/^autoresearch-/) })
+      const jobId = stringProperty(started.value, 'jobId')
+      const output = await execute(harness, 'job_output', { job_id: jobId, wait: true, timeout_ms: 20_000 }, parent.agent)
+      expect(output.isError).toBe(false)
+      expect(JSON.parse(stringProperty(output.value, 'text'))).toMatchObject({ best: { metric: 1 }, status: 'round-failed' })
+    } finally { await parent.dispose() }
   }, 30_000)
 
   it('boots and executes autoresearch when equivalent profile entry rows are deliberately reversed', async () => {
@@ -339,7 +370,17 @@ describe('Loader activation failures', () => {
     await expect(composeHarness({ omitEntry: entry })).rejects.toThrow(new RegExp(service, 'i'))
   }, 30_000)
 
-  it('fails clearly when dsh-tool-jobs is absent even though the jobs registry exists', async () => {
-    await expect(composeHarness({ omitEntry: 'tool-jobs' })).rejects.toThrow(/dsh-tool-jobs/)
+  it('defers missing Job control validation to owner-relative background registration', async () => {
+    const harness = await composeHarness({ omitEntry: 'tool-jobs' })
+    active.push(harness)
+    const cwd = await repository(harness.root)
+    const parent = await parentAgent(harness, cwd, 'no-job-controller')
+    try {
+      const result = await execute(harness, 'autoresearch', request(cwd), parent.agent)
+      expect(result.isError).toBe(false)
+      expect(result.value).toMatchObject({ kind: 'background-start-failed', jobId: 'unregistered', status: 'failed' })
+      expect(stringProperty(result.value, 'reason')).toMatch(/controller|collect|stop/i)
+      expect(harness.ctx.jobs.list(parent.agent)).toEqual([])
+    } finally { await parent.dispose() }
   }, 30_000)
 })

@@ -29,6 +29,11 @@ describe('release and consumer contract', () => {
       '@deepseek-ai/dsh-subprocess', '@deepseek-ai/dsh-system-prompt',
       '@deepseek-ai/dsh-tool-jobs', '@deepseek-ai/dsh-tools',
     ]))
+    const dshPeers = Object.entries(manifest.peerDependencies).filter(([name]) => name.startsWith('@deepseek-ai/dsh-'))
+    expect(dshPeers.every(([, version]) => version === '^0.1.1-rc.2')).toBe(true)
+    const dshDevDependencies = Object.entries(manifest.devDependencies).filter(([name]) => name === '@deepseek-ai/dsh' || name.startsWith('@deepseek-ai/dsh-'))
+    expect(dshDevDependencies.every(([, version]) => version === '0.1.1-rc.2')).toBe(true)
+    expect(manifest.devDependencies['@deepseek-ai/dsh-agent-presets']).toBe('0.1.1-rc.2')
     expect(JSON.stringify({ dependencies: manifest.dependencies, peerDependencies: manifest.peerDependencies, exports: manifest.exports })).not.toMatch(/\b(?:file|link|workspace):|\/src\//u)
   })
 
@@ -88,6 +93,8 @@ describe('release and consumer contract', () => {
     expect(readme).toContain('AutoresearchRunController')
     expect(readme).toContain('dsh plugin --profile <name> add dsh-autoresearch')
     expect(readme).toContain('dsh --profile <name> --dump-config')
+    expect(readme).toContain('DeepSeek Harness `0.1.1-rc.2`')
+    expect(readme).toContain('Web `standard` Agent preset')
     expect(readme).not.toContain('ctx.workflowEngine')
     expect(readme).not.toContain('ctx.subagents')
     expect(patch).toContain('id: autoresearch')
