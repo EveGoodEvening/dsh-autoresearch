@@ -266,7 +266,7 @@ describe('host-owned evaluator execution', () => {
     const failing = options(fakeRuntime({ spawnError: new Error('cannot launch abcdef abc') }), { environment })
     const failure = await runEvaluator(failing.value)
     expect(failure).toMatchObject({ kind: 'failed', message: 'cannot launch [REDACTED] [REDACTED]' })
-    expect(failing.value.persistence.outcome?.[0]).toMatchObject({ failureMessage: 'cannot launch [REDACTED] [REDACTED]' })
+    expect(failing.value.persistence.outcome?.[0]).toMatchObject({ kind: 'failed', message: 'cannot launch [REDACTED] [REDACTED]', exit: { failureMessage: 'cannot launch [REDACTED] [REDACTED]' } })
     expect(JSON.stringify(failing.value.persistence.intent)).not.toContain('[REDACTED]def')
     expect(JSON.stringify(failing.value.persistence.outcome)).not.toContain('[REDACTED]def')
   })
@@ -316,7 +316,7 @@ describe('host-owned evaluator execution', () => {
     expect(runtime.spec).toBeUndefined()
     expect(setup.value.persistence.events).toEqual(['intent', 'outcome'])
     expect(setup.value.persistence.observed).toBeUndefined()
-    expect(setup.value.persistence.outcome?.[0]).toMatchObject({ cancelled: true, exitCode: null, signal: null })
+    expect(setup.value.persistence.outcome?.[0]).toMatchObject({ kind: 'failed', code: 'cancelled', exit: { cancelled: true, exitCode: null, signal: null } })
   })
 
   it('atomically observes cancellation that races listener registration without spawning', async () => {
@@ -389,6 +389,14 @@ describe('host-owned evaluator execution', () => {
     expect(setup.value.persistence.outcome?.[1][1]).toMatchObject({ kind: 'stderr', truncated: true })
   })
 
+  it('persists a parsed numeric metric before secret redaction destroys artifact JSON', async () => {
+    const setup = options(fakeRuntime({ stdout: reader('{"score":1}\n') }), { environment: { ORDINARY: '1' } })
+    const result = await runEvaluator(setup.value)
+    expect(result).toMatchObject({ kind: 'measured', metric: 1 })
+    expect(readFileSync(setup.artifactWriter.internalPath('stdout'), 'utf8')).toBe('{"score":[REDACTED]}\n')
+    expect(setup.value.persistence.outcome?.[0]).toMatchObject({ kind: 'measured', metric: 1 })
+  })
+
   it('persists a bounded complete spill artifact and parses it when the in-memory read is lossless', async () => {
     const paths = fixture()
     const spill = join(paths.root, 'spill.log')
@@ -410,7 +418,7 @@ describe('host-owned evaluator execution', () => {
     await expect(runEvaluator(setup.value)).resolves.toMatchObject({ kind: 'failed', code })
     expect(setup.value.persistence.events[0]).toBe('intent')
     expect(setup.value.persistence.events.at(-1)).toBe('outcome')
-    expect(setup.value.persistence.outcome?.[0]).toMatchObject(persisted)
+    expect(setup.value.persistence.outcome?.[0]).toMatchObject({ kind: 'failed', code, exit: persisted })
   })
 
   it('rejects lexical and symlink cwd/file escapes before spawn', async () => {
@@ -537,7 +545,7 @@ describe('host-owned evaluator execution', () => {
     const setup = options(fakeRuntime(fake))
     const result = await runEvaluator(setup.value)
     expect(result.exit).toMatchObject(expected)
-    expect(setup.value.persistence.outcome?.[0]).toMatchObject(expected)
+    expect(setup.value.persistence.outcome?.[0]).toMatchObject({ exit: expected })
   })
 
   it.each(['stdout', 'stderr'] as const)('enforces a real subprocess %s cap with bounded artifacts', async stream => {
@@ -640,7 +648,7 @@ describe('host-owned evaluator execution', () => {
     expect(setup.runtime.terminated).toBe(1)
     expect(setup.runtime.waited).toBe(1)
     expect(setup.value.persistence.events).toEqual(['intent', 'outcome'])
-    expect(setup.value.persistence.outcome?.[0]).toMatchObject({ failureCode: 'spawn', processTreeQuiescent: true })
+    expect(setup.value.persistence.outcome?.[0]).toMatchObject({ kind: 'failed', code: 'spawn', exit: { failureCode: 'spawn', processTreeQuiescent: true } })
   })
 
   it('writes artifacts exclusively under an owner-only StateLayout capability', async () => {

@@ -63,14 +63,18 @@ export interface EvaluatorAttemptFacts {
   readonly failureMessage?: string
 }
 
+export type EvaluatorFailureCode = 'spawn' | 'timeout' | 'cancelled' | 'exit' | 'signal' | 'output-limit' | 'metric-protocol'
+export type EvaluatorOutcome =
+  | { readonly kind: 'measured'; readonly metric: number; readonly provenanceSha256: string; readonly exit: EvaluatorAttemptFacts }
+  | { readonly kind: 'failed'; readonly code: EvaluatorFailureCode; readonly message: string; readonly provenanceSha256: string; readonly exit: EvaluatorAttemptFacts }
 export type EvaluatorResult =
-  | { readonly kind: 'measured'; readonly metric: number; readonly provenanceSha256: string; readonly exit: EvaluatorAttemptFacts; readonly artifacts: readonly EvaluatorArtifactInput[] }
-  | { readonly kind: 'failed'; readonly code: 'spawn' | 'timeout' | 'cancelled' | 'exit' | 'signal' | 'output-limit' | 'metric-protocol'; readonly message: string; readonly provenanceSha256: string; readonly exit: EvaluatorAttemptFacts; readonly artifacts: readonly EvaluatorArtifactInput[] }
+  | (Extract<EvaluatorOutcome, { kind: 'measured' }> & { readonly artifacts: readonly EvaluatorArtifactInput[] })
+  | (Extract<EvaluatorOutcome, { kind: 'failed' }> & { readonly artifacts: readonly EvaluatorArtifactInput[] })
 
 export interface EvaluatorPersistence {
   persistSpawnIntent(intent: Readonly<{ argv: readonly string[]; cwd: string; env: Readonly<Record<string, string>>; provenanceSha256: string }>): void
   persistSpawnObserved(facts: Readonly<{ providerPid: number; spawnedAt: string }>): void
-  persistAttemptOutcome(facts: EvaluatorAttemptFacts, artifacts: readonly EvaluatorArtifactInput[]): void
+  persistAttemptOutcome(outcome: EvaluatorOutcome, artifacts: readonly EvaluatorArtifactInput[]): void
 }
 
 export interface EvaluatorRunOptions {
@@ -204,6 +208,19 @@ export async function runEvaluator(options: EvaluatorRunOptions): Promise<Evalua
     metricDirection: options.metricDirection,
     policy: { normalizedPolicySha256: options.boundary.normalizedPolicySha256, evaluationSha256: options.boundary.evaluationSha256, policy: options.policy ?? null },
   })
+  const failedOutcome = (code: EvaluatorFailureCode, message: string, facts: EvaluatorAttemptFacts): Extract<EvaluatorOutcome, { kind: 'failed' }> => {
+    const safeMessage = redact(message, secrets)
+    const exit = deepFreeze(durableSerialize({ ...facts, failureCode: code, failureMessage: safeMessage }, secrets)) as EvaluatorAttemptFacts
+    return deepFreeze({ kind: 'failed', code, message: safeMessage, provenanceSha256: provenance.sha256, exit })
+  }
+  const measuredOutcome = (metric: number, facts: EvaluatorAttemptFacts): Extract<EvaluatorOutcome, { kind: 'measured' }> => {
+    const exit = deepFreeze(durableSerialize(facts, secrets)) as EvaluatorAttemptFacts
+    return deepFreeze({ kind: 'measured', metric, provenanceSha256: provenance.sha256, exit })
+  }
+  const persistOutcome = (outcome: EvaluatorOutcome, artifacts: readonly EvaluatorArtifactInput[]): EvaluatorResult => {
+    persistSafely(() => options.persistence.persistAttemptOutcome(outcome, artifacts), secrets)
+    return deepFreeze({ ...outcome, artifacts }) as EvaluatorResult
+  }
   const argv = Object.freeze([options.evaluation.command, ...options.evaluation.args])
   const durableIntent = durableSerialize({ argv, cwd, env: persistedEnv, provenanceSha256: provenance.sha256 }, secrets) as Parameters<EvaluatorPersistence['persistSpawnIntent']>[0]
   persistSafely(() => options.persistence.persistSpawnIntent(durableIntent), secrets)
@@ -220,8 +237,7 @@ export async function runEvaluator(options: EvaluatorRunOptions): Promise<Evalua
       exitedAt: now().toISOString(), exitCode: null, signal: null, timedOut: false, cancelled: true, processTreeQuiescent: true,
     }
     const artifacts = artifactWriter.write(undefined, undefined, secrets)
-    persistSafely(() => options.persistence.persistAttemptOutcome(facts, artifacts), secrets)
-    return { kind: 'failed', code: 'cancelled', message: 'evaluator cancelled', provenanceSha256: provenance.sha256, exit: facts, artifacts }
+    return persistOutcome(failedOutcome('cancelled', 'evaluator cancelled', facts), artifacts)
   }
   const timeout = setTimeout(() => { if (cause === undefined) cause = 'timeout'; controller.abort() }, options.timeoutMs)
   let handle: SubprocessHandle | undefined
@@ -267,24 +283,24 @@ export async function runEvaluator(options: EvaluatorRunOptions): Promise<Evalua
   const stdoutRead = handle?.collected.stdout?.readFrom(0)
   const stderrRead = handle?.collected.stderr?.readFrom(0)
   const artifacts = artifactWriter.write(stdoutRead, stderrRead, secrets)
-  const rawFacts: EvaluatorAttemptFacts = {
+  const facts: EvaluatorAttemptFacts = {
     ...(handle === undefined ? {} : { providerPid: handle.pid }), ...(spawnedAt === undefined ? {} : { spawnedAt }),
     exitedAt: now().toISOString(), exitCode: outcome.exitCode, signal: outcome.signal,
     timedOut: cause === 'timeout', cancelled: cause === 'cancelled', processTreeQuiescent: quiescent,
-    ...(spawnFailure === undefined ? {} : { failureCode: 'spawn', failureMessage: safeErrorMessage(spawnFailure, secrets) }),
   }
-  const facts = deepFreeze(durableSerialize(rawFacts, secrets)) as EvaluatorAttemptFacts
-  persistSafely(() => options.persistence.persistAttemptOutcome(facts, artifacts), secrets)
-  const base = deepFreeze({ provenanceSha256: provenance.sha256, exit: facts, artifacts })
-  if (spawnFailure !== undefined) return { kind: 'failed', code: 'spawn', message: safeErrorMessage(spawnFailure, secrets), ...base }
-  if (cause === 'cancelled') return { kind: 'failed', code: 'cancelled', message: 'evaluator cancelled', ...base }
-  if (cause === 'timeout') return { kind: 'failed', code: 'timeout', message: 'evaluator timed out', ...base }
-  if (!quiescent) return { kind: 'failed', code: 'signal', message: 'evaluator process tree did not become quiescent', ...base }
-  if (outcome.signal !== null) return { kind: 'failed', code: 'signal', message: `evaluator terminated by ${outcome.signal}`, ...base }
-  if (outcome.exitCode !== 0) return { kind: 'failed', code: 'exit', message: `evaluator exited with code ${outcome.exitCode}`, ...base }
-  if (stdoutRead === undefined || stdoutRead.lossy) return { kind: 'failed', code: 'output-limit', message: 'evaluator stdout exceeded its authoritative parse limit', ...base }
-  try { return { kind: 'measured', metric: parseFinalLineMetric(stdoutRead.text, options.metricName), ...base } }
-  catch (error) { return { kind: 'failed', code: 'metric-protocol', message: safeErrorMessage(error, secrets), ...base } }
+  let durableOutcome: EvaluatorOutcome
+  if (spawnFailure !== undefined) durableOutcome = failedOutcome('spawn', safeErrorMessage(spawnFailure, secrets), facts)
+  else if (cause === 'cancelled') durableOutcome = failedOutcome('cancelled', 'evaluator cancelled', facts)
+  else if (cause === 'timeout') durableOutcome = failedOutcome('timeout', 'evaluator timed out', facts)
+  else if (!quiescent) durableOutcome = failedOutcome('signal', 'evaluator process tree did not become quiescent', facts)
+  else if (outcome.signal !== null) durableOutcome = failedOutcome('signal', `evaluator terminated by ${outcome.signal}`, facts)
+  else if (outcome.exitCode !== 0) durableOutcome = failedOutcome('exit', `evaluator exited with code ${outcome.exitCode}`, facts)
+  else if (stdoutRead === undefined || stdoutRead.lossy) durableOutcome = failedOutcome('output-limit', 'evaluator stdout exceeded its authoritative parse limit', facts)
+  else {
+    try { durableOutcome = measuredOutcome(parseFinalLineMetric(stdoutRead.text, options.metricName), facts) }
+    catch (error) { durableOutcome = failedOutcome('metric-protocol', safeErrorMessage(error, secrets), facts) }
+  }
+  return persistOutcome(durableOutcome, artifacts)
 }
 
 

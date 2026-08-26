@@ -279,7 +279,17 @@ export class AutoresearchRunController {
     const result = await runEvaluator({ subprocess: this.ctx.subprocess, worktree: r.identity.worktree, boundary, evaluation: r.policy.evaluation, metricName: r.policy.metricName, metricDirection: r.policy.metricDirection, timeoutMs: r.policy.timeoutMs, terminationGraceMs: this.options.config.terminationGraceMs, maxStdoutBytes: this.options.config.maxStdoutBytes, maxStderrBytes: this.options.config.maxStderrBytes, artifactWriterFactory: () => { if (!intentCreated) throw new Error('artifact capability requested before durable attempt intent'); return createEvaluatorArtifactWriterFactory(r.tracker.layout, r.runId, experiment.experimentId, attemptId)() }, environment: r.policy.environment, policy: r.policy, signal: this.aborter.signal, persistence: {
       persistSpawnIntent: intent => { r.tracker.createAttemptIntent({ attemptId, runId: r.runId, experimentId: experiment.experimentId, ordinal: attemptOrdinal }, intent); intentCreated = true },
       persistSpawnObserved: facts => r.tracker.recordAttemptObserved(attemptId, facts),
-      persistAttemptOutcome: (facts, artifacts) => r.tracker.recordAttemptOutcome(attemptId, { facts, artifacts: artifacts.map(item => artifact(r, experiment.experimentId, attemptId, item)), outcome: { kind: 'evaluator-outcome', facts } }),
+      persistAttemptOutcome: (outcome, artifacts) => {
+        const attemptResult = outcome.kind === 'measured'
+          ? { kind: 'measured' as const, metric: outcome.metric }
+          : { kind: 'failed' as const, code: outcome.code, message: outcome.message }
+        r.tracker.recordAttemptOutcome(attemptId, {
+          facts: outcome.exit,
+          artifacts: artifacts.map(item => artifact(r, experiment.experimentId, attemptId, item)),
+          result: attemptResult,
+          outcome: { kind: 'evaluator-outcome', result: attemptResult },
+        })
+      },
     } })
     const recovered = { ...result, attemptId, artifacts: result.artifacts.map(item => artifact(r, experiment.experimentId, attemptId, item)) } as RecoveredEvaluation
     await this.finalizeEvaluation(r, experiment, recovered)

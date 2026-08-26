@@ -4,15 +4,14 @@ import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { GitBoundaryError, inspectRunGitState, validateCandidate, verifyCandidateTree } from './git.js'
 import type { CandidateSnapshot, GitCommandOptions, RepositoryDiscovery, RunGitIdentity, RunGitInspection } from './git.js'
-import { parseFinalLineMetric } from './evaluator.js'
-import type { EvaluatorAttemptFacts, EvaluatorResult } from './evaluator.js'
+import type { EvaluatorAttemptFacts, EvaluatorFailureCode } from './evaluator.js'
 import type { ArtifactRecord, DurableTracker, RecoveryState } from './tracker.js'
 import type { AttemptId, BestResult, BlockerEvidence, DurableRunPolicy, ExperimentId, FullCommitSha, RunDurableState, RunId } from './types.js'
 import type { SQLOutputValue } from 'node:sqlite'
 
 export type RecoveryBlockCode = 'run-missing' | 'repository-mismatch' | 'start-commit-mismatch' | 'policy-mismatch' | 'provenance-mismatch' | 'lock-mismatch' | 'state-ambiguous' | 'commit-missing' | 'git-external-mutation' | 'protected-change' | 'artifact-incomplete' | 'attempt-uncertain' | 'decision-mismatch' | 'reconciliation-unauthorized'
 export interface RecoveredExperiment { readonly experimentId: ExperimentId; readonly ordinal: number; readonly kind: 'baseline' | 'candidate'; readonly parentCommit: FullCommitSha; readonly candidateCommit?: FullCommitSha }
-export type RecoveredEvaluation = { readonly kind: 'measured'; readonly attemptId: AttemptId; readonly metric: number; readonly provenanceSha256: string; readonly exit: EvaluatorAttemptFacts; readonly artifacts: readonly ArtifactRecord[] } | { readonly kind: 'failed'; readonly attemptId: AttemptId; readonly code: Extract<EvaluatorResult, { kind: 'failed' }>['code']; readonly message: string; readonly provenanceSha256: string; readonly exit: EvaluatorAttemptFacts; readonly artifacts: readonly ArtifactRecord[] }
+export type RecoveredEvaluation = { readonly kind: 'measured'; readonly attemptId: AttemptId; readonly metric: number; readonly provenanceSha256: string; readonly exit: EvaluatorAttemptFacts; readonly artifacts: readonly ArtifactRecord[] } | { readonly kind: 'failed'; readonly attemptId: AttemptId; readonly code: EvaluatorFailureCode; readonly message: string; readonly provenanceSha256: string; readonly exit: EvaluatorAttemptFacts; readonly artifacts: readonly ArtifactRecord[] }
 export interface RecoveryRequest { readonly tracker: DurableTracker; readonly runId: RunId; readonly discovery: RepositoryDiscovery; readonly identity: RunGitIdentity; readonly policy: DurableRunPolicy; readonly policySha256: string; readonly provenanceSha256: string; readonly gitExecutable: string; readonly gitOptions: Omit<GitCommandOptions, 'cwd' | 'signal'>; readonly signal: AbortSignal }
 export type RecoveryDirective =
   | { readonly kind: 'initialize'; readonly runId: RunId; readonly startCommit: FullCommitSha; readonly reuseLock: boolean }
@@ -31,6 +30,7 @@ const TERMINAL: Readonly<Record<RunDurableState, boolean>> = { initializing: fal
 const FAILURE_CODES: Readonly<Record<string, true>> = { spawn: true, timeout: true, cancelled: true, exit: true, signal: true, 'output-limit': true, 'metric-protocol': true }
 
 type Row = Record<string, SQLOutputValue>
+type RecoveredAttemptResult = { readonly kind: 'measured'; readonly metric: number } | { readonly kind: 'failed'; readonly code: EvaluatorFailureCode; readonly message: string }
 class RecoveryEvidenceError extends Error {
   constructor(readonly code: RecoveryBlockCode, message: string) { super(message); this.name = 'RecoveryEvidenceError' }
 }
@@ -150,7 +150,6 @@ function reconstructEvaluation(request: RecoveryRequest, experiment: RecoveredEx
   if (artifacts.length === 0) throw new RecoveryEvidenceError('artifact-incomplete', 'completed evaluator attempt has no durable artifacts')
   if (artifacts.length !== 2 || artifacts.map(row => text(row['kind'])).sort().join(',') !== 'stderr,stdout') throw new RecoveryEvidenceError('artifact-incomplete', 'durable attempt artifacts must contain exactly one stdout and one stderr artifact')
   const decoded: ArtifactRecord[] = []
-  let stdout = ''
   const attemptId = text(attempt['attempt_id'])
   for (const row of artifacts) {
     const kind = text(row['kind'])
@@ -163,24 +162,16 @@ function reconstructEvaluation(request: RecoveryRequest, experiment: RecoveredEx
     const metadata = json(row['metadata_json'])
     if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata) || Object.keys(metadata).length !== 1 || typeof (metadata as Record<string, unknown>).truncated !== 'boolean') throw new RecoveryEvidenceError('artifact-incomplete', `artifact ${kind} has noncanonical truncation metadata`)
     decoded.push({ artifactId: `${attemptId}-${kind}`, runId: request.runId, experimentId: experiment.experimentId, attemptId, kind, location, sizeBytes: bytes.length, sha256: text(row['sha256']), owner: 'evaluator', retention: 'retain', metadata })
-    if (kind === 'stdout') stdout = bytes.toString('utf8')
   }
   const exit = decodeExit(attempt)
   const provenanceSha256 = spawnProvenance(attempt)
   if (provenanceSha256 !== request.provenanceSha256) throw new RecoveryEvidenceError('provenance-mismatch', 'attempt spawn provenance differs from the durable run provenance')
-  const failureCode = attempt['failure_code'] === null ? undefined : text(attempt['failure_code'])
-  if (failureCode) {
-    const code = FAILURE_CODES[failureCode] ? failureCode as Extract<EvaluatorResult, { kind: 'failed' }>['code'] : 'exit'
-    return { kind: 'failed', attemptId, code, message: text(attempt['failure_message']) || failureCode, provenanceSha256, exit, artifacts: decoded }
-  }
-  if (exit.timedOut) return { kind: 'failed', attemptId, code: 'timeout', message: 'evaluator timed out', provenanceSha256, exit, artifacts: decoded }
-  if (exit.cancelled) return { kind: 'failed', attemptId, code: 'cancelled', message: 'evaluator cancelled', provenanceSha256, exit, artifacts: decoded }
-  if (exit.signal) return { kind: 'failed', attemptId, code: 'signal', message: `evaluator exited by signal ${exit.signal}`, provenanceSha256, exit, artifacts: decoded }
-  if (exit.exitCode !== 0) return { kind: 'failed', attemptId, code: 'exit', message: `evaluator exited with code ${exit.exitCode}`, provenanceSha256, exit, artifacts: decoded }
-  const truncated = decoded.some(item => Boolean((item.metadata as Record<string, unknown>).truncated))
-  if (truncated) return { kind: 'failed', attemptId, code: 'output-limit', message: 'evaluator output was truncated', provenanceSha256, exit, artifacts: decoded }
-  try { return { kind: 'measured', attemptId, metric: parseFinalLineMetric(stdout, request.policy.metricName), provenanceSha256, exit, artifacts: decoded } }
-  catch (error) { return { kind: 'failed', attemptId, code: 'metric-protocol', message: error instanceof Error ? error.message : String(error), provenanceSha256, exit, artifacts: decoded } }
+  const result = decodeAttemptResult(attempt, attemptId)
+  if (result.kind === 'failed') return { ...result, attemptId, provenanceSha256, exit, artifacts: decoded }
+  const stdout = decoded.find(item => item.kind === 'stdout')!
+  if (Boolean((stdout.metadata as Record<string, unknown>).truncated)) throw new RecoveryEvidenceError('state-ambiguous', `measured attempt ${attemptId} has truncated authoritative stdout`)
+  if (!exit.processTreeQuiescent || exit.timedOut || exit.cancelled || exit.signal !== null || exit.exitCode !== 0) throw new RecoveryEvidenceError('state-ambiguous', `measured attempt ${attemptId} conflicts with its durable exit facts`)
+  return { ...result, attemptId, provenanceSha256, exit, artifacts: decoded }
 }
 
 function baselineSettlement(request: RecoveryRequest, experiment: RecoveredExperiment, row: Row): RecoveryDirective {
@@ -301,6 +292,25 @@ function decodeExperiment(row: Row): RecoveredExperiment {
   return { experimentId: text(row['experiment_id']), ordinal: integer(row['ordinal']), kind: text(row['kind']) as 'baseline' | 'candidate', parentCommit: text(row['parent_commit']), ...(candidate ? { candidateCommit: candidate } : {}) }
 }
 function decodeBest(run: Row): BestResult | undefined { const metric = number(run['best_metric']); const commit = run['best_commit'] === null ? '' : text(run['best_commit']); const experimentId = run['best_experiment_id'] === null ? '' : text(run['best_experiment_id']); return metric !== undefined && SHA.test(commit) && experimentId ? { metric, commit, experimentId } : undefined }
+function decodeAttemptResult(row: Row, attemptId: string): RecoveredAttemptResult {
+  let value: unknown
+  try { value = json(row['outcome_json']) }
+  catch { throw new RecoveryEvidenceError('state-ambiguous', `attempt ${attemptId} has malformed authoritative outcome JSON`) }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new RecoveryEvidenceError('state-ambiguous', `attempt ${attemptId} lacks an authoritative durable outcome`)
+  const result = value as Record<string, unknown>
+  const keys = Object.keys(result).sort().join(',')
+  if (result.kind === 'measured') {
+    if (keys !== 'kind,metric' || typeof result.metric !== 'number' || !Number.isFinite(result.metric)) throw new RecoveryEvidenceError('state-ambiguous', `attempt ${attemptId} has a malformed measured outcome`)
+    if (row['failure_code'] !== null || row['failure_message'] !== null) throw new RecoveryEvidenceError('state-ambiguous', `measured attempt ${attemptId} carries failure facts`)
+    return { kind: 'measured', metric: result.metric }
+  }
+  if (result.kind === 'failed') {
+    if (keys !== 'code,kind,message' || typeof result.code !== 'string' || !FAILURE_CODES[result.code] || typeof result.message !== 'string' || !result.message.trim()) throw new RecoveryEvidenceError('state-ambiguous', `attempt ${attemptId} has a malformed failed outcome`)
+    if (text(row['failure_code']) !== result.code || text(row['failure_message']) !== result.message) throw new RecoveryEvidenceError('state-ambiguous', `attempt ${attemptId} failure facts differ from its authoritative outcome`)
+    return { kind: 'failed', code: result.code as EvaluatorFailureCode, message: result.message }
+  }
+  throw new RecoveryEvidenceError('state-ambiguous', `attempt ${attemptId} has an unknown authoritative outcome kind`)
+}
 function decodeExit(row: Row): EvaluatorAttemptFacts { return { ...(row['provider_pid'] === null ? {} : { providerPid: integer(row['provider_pid']) }), ...(row['spawned_at'] === null ? {} : { spawnedAt: text(row['spawned_at']) }), exitedAt: text(row['exited_at']), exitCode: row['exit_code'] === null ? null : integer(row['exit_code']), signal: row['signal'] === null ? null : text(row['signal']), timedOut: row['timed_out'] === 1, cancelled: text(row['failure_code']) === 'cancelled', processTreeQuiescent: row['process_tree_quiescent'] === 1, ...(row['failure_code'] === null ? {} : { failureCode: text(row['failure_code']) }), ...(row['failure_message'] === null ? {} : { failureMessage: text(row['failure_message']) }) } }
 function spawnProvenance(row: Row): string { const intent = json(row['spawn_intent_json']); return intent && typeof intent === 'object' ? String((intent as Record<string, unknown>).provenanceSha256 ?? (intent as Record<string, unknown>).provenance_sha256 ?? '') : '' }
 function findCandidateIntent(transitions: Row[], experimentId: string): CandidateSnapshot | undefined { for (const row of [...transitions].reverse()) { if (row['experiment_id'] !== null && row['experiment_id'] !== experimentId) continue; const intent = json(row['intent_json']); if (!intent || typeof intent !== 'object') continue; const object = intent as Record<string, unknown>; const snapshot = (object.snapshot ?? (object.kind === 'candidate-snapshot' ? object : undefined)) as CandidateSnapshot | undefined; if (snapshot?.parentCommit && Array.isArray(snapshot.changed) && Array.isArray(snapshot.ignoredUntracked) && snapshot.gitConfig) return { ...snapshot, gitConfig: { files: snapshot.gitConfig.files.map(file => ({ logicalPath: file.logicalPath, path: file.path, exists: file.exists, ...(file.sha256 === undefined ? {} : { sha256: file.sha256 }) })), allowedPaths: [...snapshot.gitConfig.allowedPaths] } } } }

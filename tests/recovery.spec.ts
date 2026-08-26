@@ -35,16 +35,28 @@ function createRun(tracker: DurableTracker, request: RecoveryRequest): void {
   tracker.createRun({ runId: request.runId, repositoryId: request.discovery.repositoryId, repository: request.discovery.repository, gitCommonDir: request.discovery.gitCommonDir, callerCwd: request.discovery.callerCwd, startCommit: request.discovery.startCommit, runTag: request.identity.runTag, branch: request.identity.branch, worktree: request.identity.worktree, policy: request.policy, policySha256: request.policySha256, provenance: {}, provenanceSha256: request.provenanceSha256 })
 }
 
-function persistOutcome(tracker: DurableTracker, request: RecoveryRequest, experimentId: string, attemptId: string, ordinal: number, stdout = '{"score":7}\n', stderr = '', failed = false): void {
+function persistOutcome(
+  tracker: DurableTracker,
+  request: RecoveryRequest,
+  experimentId: string,
+  attemptId: string,
+  ordinal: number,
+  stdout = '{"score":7}\n',
+  stderr = '',
+  failed = false,
+  options: { readonly metric?: number; readonly stdoutTruncated?: boolean; readonly stderrTruncated?: boolean } = {},
+): void {
   tracker.createAttemptIntent({ attemptId, runId: request.runId, experimentId, ordinal }, { provenanceSha256: request.provenanceSha256 })
   const directory = join(tracker.layout.root, 'artifacts', request.runId, experimentId, attemptId)
   mkdirSync(directory, { recursive: true, mode: 0o700 })
   const artifacts = ([['stdout', stdout], ['stderr', stderr]] as const).map(([kind, content]) => {
     const path = join(directory, `${kind}.log`); writeFileSync(path, content, { mode: 0o600 }); chmodSync(path, 0o600)
     const bytes = Buffer.from(content)
-    return { artifactId: `${attemptId}-${kind}`, runId: request.runId, experimentId, attemptId, kind, location: `artifact:sha256:${createHash('sha256').update(path).digest('hex')}`, sizeBytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'), owner: 'evaluator', retention: 'retain', metadata: { truncated: false } }
+    const truncated = kind === 'stdout' ? options.stdoutTruncated ?? false : options.stderrTruncated ?? false
+    return { artifactId: `${attemptId}-${kind}`, runId: request.runId, experimentId, attemptId, kind, location: `artifact:sha256:${createHash('sha256').update(path).digest('hex')}`, sizeBytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'), owner: 'evaluator', retention: 'retain', metadata: { truncated } }
   })
-  tracker.recordAttemptOutcome(attemptId, { facts: { exitedAt: new Date().toISOString(), exitCode: failed ? 1 : 0, signal: null, timedOut: false, processTreeQuiescent: true, ...(failed ? { failureCode: 'exit', failureMessage: 'baseline failed' } : {}) }, artifacts })
+  const result = failed ? { kind: 'failed' as const, code: 'exit', message: 'baseline failed' } : { kind: 'measured' as const, metric: options.metric ?? 7 }
+  tracker.recordAttemptOutcome(attemptId, { facts: { exitedAt: new Date().toISOString(), exitCode: failed ? 1 : 0, signal: null, timedOut: false, processTreeQuiescent: true, ...(failed ? { failureCode: 'exit', failureMessage: 'baseline failed' } : {}) }, artifacts, result })
 }
 
 const unusedContext = {} as Parameters<typeof reconcileRecovery>[0]
@@ -219,6 +231,24 @@ describe('recovery nonterminal state matrix with real Git/SQLite', () => {
     const before = f.subprocess.specs.length; const first = await reconcileRecovery(f.ctx, f.request); const second = await reconcileRecovery(f.ctx, f.request); expect(first).toMatchObject({ kind: 'blocked', code: 'attempt-uncertain', lock: 'retain' }); expect(second).toEqual(first); expect(f.subprocess.specs.slice(before).every(spec => spec.argv[0] === f.request.gitExecutable)).toBe(true); expect(f.tracker.database.prepare('SELECT COUNT(*) AS n FROM attempts').get()?.['n']).toBe(1); f.tracker.close()
   })
 
+  it('recovers the authoritative metric without reparsing redacted stdout', async () => {
+    const f = await realFixture(); f.tracker.transitionRun(f.request.runId, 'baseline-running')
+    f.tracker.createExperiment({ experimentId: 'baseline', runId: f.request.runId, ordinal: 0, kind: 'baseline', parentCommit: f.request.discovery.startCommit, command: 'node', args: [] }); f.tracker.transitionExperiment('baseline', 'running')
+    persistOutcome(f.tracker, f.request, 'baseline', 'attempt-1', 1, '{"score":[REDACTED]}\n', '', false, { metric: 1 })
+    const first = await reconcileRecovery(f.ctx, f.request); const second = await reconcileRecovery(f.ctx, f.request)
+    expect(first).toMatchObject({ kind: 'finalize-evaluation', evaluation: { kind: 'measured', metric: 1 } }); expect(second).toEqual(first)
+    f.tracker.close()
+  })
+
+  it('preserves a measured outcome when only stderr was truncated', async () => {
+    const f = await realFixture(); f.tracker.transitionRun(f.request.runId, 'baseline-running')
+    f.tracker.createExperiment({ experimentId: 'baseline', runId: f.request.runId, ordinal: 0, kind: 'baseline', parentCommit: f.request.discovery.startCommit, command: 'node', args: [] }); f.tracker.transitionExperiment('baseline', 'running')
+    persistOutcome(f.tracker, f.request, 'baseline', 'attempt-1', 1, '{"score":3}\n', 'bounded stderr tail', false, { metric: 3, stderrTruncated: true })
+    const first = await reconcileRecovery(f.ctx, f.request); const second = await reconcileRecovery(f.ctx, f.request)
+    expect(first).toMatchObject({ kind: 'finalize-evaluation', evaluation: { kind: 'measured', metric: 3, artifacts: [{ kind: 'stderr', metadata: { truncated: true } }, { kind: 'stdout', metadata: { truncated: false } }] } }); expect(second).toEqual(first)
+    f.tracker.close()
+  })
+
   it('reruns one proven-quiescent no-outcome evaluator attempt exactly once and never duplicates after recovery advances', async () => {
     const f = await realFixture()
     f.tracker.transitionRun(f.request.runId, 'baseline-running')
@@ -246,7 +276,7 @@ describe('recovery nonterminal state matrix with real Git/SQLite', () => {
     const f = await realFixture(); f.tracker.transitionRun(f.request.runId, 'baseline-running')
     f.tracker.createExperiment({ experimentId: 'baseline', runId: f.request.runId, ordinal: 0, kind: 'baseline', parentCommit: f.request.discovery.startCommit, command: 'node', args: [] }); f.tracker.transitionExperiment('baseline', 'running')
     f.tracker.createAttemptIntent({ attemptId: 'attempt-1', runId: f.request.runId, experimentId: 'baseline', ordinal: 1 }, { provenanceSha256: HASH })
-    f.tracker.recordAttemptOutcome('attempt-1', { facts: { exitedAt: new Date().toISOString(), exitCode: 0, signal: null, timedOut: false, processTreeQuiescent: true }, artifacts: [] })
+    f.tracker.recordAttemptOutcome('attempt-1', { facts: { exitedAt: new Date().toISOString(), exitCode: 0, signal: null, timedOut: false, processTreeQuiescent: true }, artifacts: [], result: { kind: 'measured', metric: 7 } })
     const first = await reconcileRecovery(f.ctx, f.request); const second = await reconcileRecovery(f.ctx, f.request)
     expect(first).toMatchObject({ kind: 'blocked', code: 'artifact-incomplete', lock: 'retain' }); expect(second).toEqual(first)
     expect(f.tracker.database.prepare('SELECT COUNT(*) AS n FROM attempts').get()?.['n']).toBe(1)

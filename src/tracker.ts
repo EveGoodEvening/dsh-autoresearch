@@ -5,7 +5,7 @@ import { DatabaseSync, type SQLOutputValue } from 'node:sqlite'
 import { StateLayout } from './state-layout.js'
 import type { ExperimentDurableState, RunDurableState } from './types.js'
 
-export const TRACKER_SCHEMA_VERSION = 5
+export const TRACKER_SCHEMA_VERSION = 6
 export const TRACKER_BUSY_TIMEOUT_MS = 5_000
 const TRACKER_RETRY_WAIT = new Int32Array(new SharedArrayBuffer(4))
 
@@ -61,9 +61,13 @@ export interface AttemptOutcome {
   providerAttemptId?: string; providerPid?: number; providerIdentity?: string; spawnedAt?: string; exitedAt?: string
   exitCode?: number | null; signal?: string | null; timedOut?: boolean; processTreeQuiescent?: boolean; failureCode?: string; failureMessage?: string
 }
+export type AttemptEvaluationResult =
+  | { readonly kind: 'measured'; readonly metric: number }
+  | { readonly kind: 'failed'; readonly code: string; readonly message: string }
 export interface AttemptOutcomeCheckpoint {
   readonly facts: AttemptOutcome
   readonly artifacts: readonly ArtifactRecord[]
+  readonly result: AttemptEvaluationResult
   readonly outcome?: unknown
 }
 export interface RecoverableBlockedEvidence {
@@ -233,14 +237,18 @@ export class DurableTracker {
     return this.transaction(() => {
       const attempt = this.database.prepare('SELECT * FROM attempts WHERE attempt_id = ?').get(attemptId)
       if (!attempt) throw new TrackerTransitionError(`unknown attempt ${attemptId}`)
-      this.mergeAttemptObservation(attempt, checkpoint.facts, updatedAt)
+      if (attempt['outcome_json'] !== null) throw new TrackerTransitionError(`attempt ${attemptId} already has a durable outcome`)
+      const facts = attemptOutcomeFacts(checkpoint)
+      this.mergeAttemptObservation(attempt, facts, updatedAt)
+      this.database.prepare('UPDATE attempts SET outcome_json = ?, updated_at = ? WHERE attempt_id = ?').run(canonicalJson(checkpoint.result), updatedAt, attemptId)
       const runId = String(attempt['run_id'])
       const experimentId = String(attempt['experiment_id'])
       this.validateAndInsertArtifacts(runId, experimentId, checkpoint.artifacts)
       const run = this.requireRun(runId)
       const state = String(run['state']) as RunDurableState
       if (RUN_TERMINAL[state]) throw new TrackerTransitionError('attempt outcome requires a nonterminal run')
-      return this.insertTransition(runId, experimentId, 'run', state, state, { outcome: checkpoint.outcome ?? checkpoint.facts, artifacts: checkpoint.artifacts }, updatedAt)
+      const outcome = checkpoint.outcome ?? { kind: 'evaluator-outcome', result: checkpoint.result }
+      return this.insertTransition(runId, experimentId, 'run', state, state, { outcome, artifacts: checkpoint.artifacts }, updatedAt)
     })
   }
 
@@ -387,6 +395,7 @@ const MIGRATIONS: Record<number, (database: DatabaseSync) => void> = {
   3(_database) { /* Version 3 tightens repository-level transactional invariants without destructive table rebuilds. */ },
   4(database) { database.exec(`DROP TRIGGER experiments_immutable_lineage; CREATE TRIGGER experiments_immutable_lineage BEFORE UPDATE OF run_id, ordinal, kind, parent_commit, candidate_commit, command, args_json, cwd ON experiments WHEN OLD.run_id != NEW.run_id OR OLD.ordinal != NEW.ordinal OR OLD.kind != NEW.kind OR OLD.parent_commit != NEW.parent_commit OR OLD.command != NEW.command OR OLD.args_json != NEW.args_json OR OLD.cwd IS NOT NEW.cwd OR OLD.candidate_commit IS NOT NULL OR NEW.candidate_commit IS NULL OR length(NEW.candidate_commit) != 40 BEGIN SELECT RAISE(ABORT, 'immutable experiment lineage/evaluator'); END;`) },
   5(database) { database.exec(`CREATE TABLE schema_metadata_canonical (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), version INTEGER NOT NULL, created_at TEXT NOT NULL) STRICT; INSERT INTO schema_metadata_canonical SELECT singleton, version, created_at FROM schema_metadata; DROP TABLE schema_metadata; ALTER TABLE schema_metadata_canonical RENAME TO schema_metadata;`) },
+  6(database) { database.exec(`ALTER TABLE attempts ADD COLUMN outcome_json TEXT; CREATE TRIGGER attempts_immutable_outcome BEFORE UPDATE OF outcome_json ON attempts WHEN OLD.outcome_json IS NOT NULL OR NEW.outcome_json IS NULL BEGIN SELECT RAISE(ABORT, 'immutable attempt outcome'); END;`) },
 }
 
 let expectedSchemaFingerprint: string | undefined
@@ -430,6 +439,18 @@ function validateExperimentFacts(state: ExperimentDurableState, facts: Experimen
   if (!facts.failureCode || !facts.failureMessage) throw new TrackerTransitionError(`${state} requires failure code and message`)
   if (state === 'timed-out' && facts.timedOut !== true) throw new TrackerTransitionError('timed-out requires timedOut=true')
   if (state !== 'timed-out' && facts.timedOut === true) throw new TrackerTransitionError(`${state} cannot claim timeout`)
+}
+function attemptOutcomeFacts(checkpoint: AttemptOutcomeCheckpoint): AttemptOutcome {
+  const { facts, result } = checkpoint
+  if (result.kind === 'measured') {
+    if (!Number.isFinite(result.metric)) throw new TrackerTransitionError('attempt metric must be finite')
+    if (hasOwn(facts, 'failureCode') || hasOwn(facts, 'failureMessage')) throw new TrackerTransitionError('measured attempt cannot carry failure facts')
+    return facts
+  }
+  if (!result.code.trim() || !result.message.trim()) throw new TrackerTransitionError('failed attempt requires a non-empty code and message')
+  if (facts.failureCode !== undefined && facts.failureCode !== result.code) throw new TrackerTransitionError('attempt failure code conflicts with its authoritative result')
+  if (facts.failureMessage !== undefined && facts.failureMessage !== result.message) throw new TrackerTransitionError('attempt failure message conflicts with its authoritative result')
+  return { ...facts, failureCode: result.code, failureMessage: result.message }
 }
 function hasOwn(value: object, property: PropertyKey): boolean { return Object.prototype.hasOwnProperty.call(value, property) }
 function isSqliteBusyOrLocked(error: unknown): boolean {
