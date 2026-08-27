@@ -342,8 +342,8 @@ function isStrictImprovement(direction: MetricDirection, metric: number, referen
   if (direction !== 'minimize' && direction !== 'maximize') throw new TypeError('metric direction must be minimize or maximize')
   return direction === 'minimize' ? metric < reference : metric > reference
 }
-export function decodeRunResult(value: unknown, direction: MetricDirection, maxChars: number): AutoresearchRunResult {
-  assertBoundedJson(value, maxChars, 'run result')
+/** Validate a complete canonical result; presentation limits belong to render and job adapters. */
+export function decodeRunResult(value: unknown, direction: MetricDirection): AutoresearchRunResult {
   const record = exactRecord(value, 'run result')
   const status = record['status']
   const common = decodeRunBase(record)

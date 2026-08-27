@@ -251,6 +251,16 @@ describe('controller real Git/SQLite outcomes', () => {
     try { const { result, tracker } = await runControllerCase(f, { metric_direction: direction, target, max_experiments: 1 }); expect(result).toMatchObject({ status, best: { metric }, counts: { experimentsStarted: 0, experimentsCompleted: 0, attempts: 1 } }); expect(f.creates).toHaveLength(0); expect(tracker.database.prepare('SELECT COUNT(*) AS n FROM artifacts').get()?.['n']).toBe(2); tracker.close() } finally { rmSync(f.root, { recursive: true, force: true }) }
   })
 
+  it('does not apply the presentation limit to canonical terminal results', async () => {
+    const f = controllerFixture([{ stdout: '{"score":5}\n' }])
+    try {
+      const { result, tracker } = await runControllerCase(f, { target: 5, max_experiments: 1 }, { maxResultChars: 1 })
+      expect(result).toMatchObject({ status: 'target-reached', best: { metric: 5 }, artifacts: expect.arrayContaining([expect.objectContaining({ kind: 'stdout' }), expect.objectContaining({ kind: 'stderr' })]) })
+      expect(JSON.stringify(result).length).toBeGreaterThan(1)
+      tracker.close()
+    } finally { rmSync(f.root, { recursive: true, force: true }) }
+  })
+
   it('resumes across execution modes from another subdirectory after caller HEAD advances', async () => {
     const f = controllerFixture([{ stdout: '{"score":10}\n' }, { stdout: '{"score":9}\n' }], [(worktree) => writeFileSync(join(worktree, 'src', 'code.ts'), 'export const n = 2\n')])
     try {

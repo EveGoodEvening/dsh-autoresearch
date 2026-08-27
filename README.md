@@ -99,6 +99,8 @@ Registered by `apply()` in `src/index.ts`. Runs as a **background job** by defau
 
 **Output** is a discriminated JSON: `background` (run + job started), `background-start-failed`, or `foreground` (full run result). Run results carry `status`, `counts`, `best`, `artifacts`, and blocker `evidence`.
 
+Canonical run JSON is validated independently of `maxResultChars`; that setting applies only to rendered and background-job presentation.
+
 ## Configuration
 
 The `Config` schema (`src/config.ts`) is loaded at deploy time. Defaults (also in `cordis.patch.yml`):
@@ -115,7 +117,7 @@ The `Config` schema (`src/config.ts`) is loaded at deploy time. Defaults (also i
 | `terminationGraceMs` | `5000` | Grace period before killing the evaluator tree. |
 | `maxActiveRunsPerRepository` | `1` | Concurrent run cap per repo. |
 | `maxStdoutBytes` / `maxStderrBytes` | `1048576` | Evaluator output capture limits. |
-| `maxResultChars` | `16384` | Tool result render limit. |
+| `maxResultChars` | `16384` | Rendered tool and background-job presentation limit; canonical run results are unaffected. |
 | `artifactRetentionDays` | `30` | Artifact-byte retention window, enforced lazily for safe terminal runs. |
 | `retainFailedArtifacts` | `true` | If `false`, prune failed-attempt bytes at safe terminal settlement. |
 | `retainWorktrees` | `true` | Keep terminal worktrees; `false` enables terminal cleanup. |

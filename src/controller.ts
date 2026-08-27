@@ -425,7 +425,7 @@ export class AutoresearchRunController {
       recoverTerminalRunLock(r.tracker, r.runId)
       applyRunRetention(r.tracker, r.runId, this.options.config)
     }
-    return decodeRunResult(value, r.policy.metricDirection, this.options.config.maxResultChars)
+    return decodeRunResult(value, r.policy.metricDirection)
   }
 }
 

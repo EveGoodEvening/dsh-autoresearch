@@ -69,15 +69,15 @@ describe('run result contracts', () => {
     ['round-failed', { ...runBase, status: 'round-failed', reason: 'agent failed', evidence }, ['reason', 'evidence'], [['exit', exit]] ],
     ['cancelled', { ...runBase, status: 'cancelled', lastState: 'candidate-running', reason: 'operator request', quiescent: true }, ['lastState', 'reason', 'quiescent'], [['evidence', evidence]] ],
   ] as const)('enforces required and forbidden fields for %s', (_status, valid, required, forbidden) => {
-    requireAndForbid((value) => decodeRunResult(value, 'minimize', 10_000), valid, required, forbidden)
+    requireAndForbid((value) => decodeRunResult(value, 'minimize'), valid, required, forbidden)
   })
 
   it('enforces discriminator-specific invariants and optional best fields', () => {
-    expect(decodeRunResult({ ...runBase, status: 'round-failed', reason: 'agent failed', evidence, best }, 'minimize', 10_000)).toHaveProperty('best')
-    expect(decodeRunResult({ ...runBase, status: 'cancelled', lastState: 'ready', reason: 'operator request', quiescent: true, best }, 'minimize', 10_000)).toHaveProperty('best')
-    expect(() => decodeRunResult({ ...runBase, status: 'blocked', best, evidence: [] }, 'minimize', 10_000)).toThrow(/requires evidence/)
-    expect(() => decodeRunResult({ ...runBase, status: 'cancelled', lastState: 'cancelled', reason: 'operator request', quiescent: true }, 'minimize', 10_000)).toThrow(/valid prior state/)
-    expect(() => decodeRunResult({ ...runBase, status: 'cancelled', lastState: 'ready', reason: 'operator request', quiescent: false }, 'minimize', 10_000)).toThrow(/quiescent/)
+    expect(decodeRunResult({ ...runBase, status: 'round-failed', reason: 'agent failed', evidence, best }, 'minimize')).toHaveProperty('best')
+    expect(decodeRunResult({ ...runBase, status: 'cancelled', lastState: 'ready', reason: 'operator request', quiescent: true, best }, 'minimize')).toHaveProperty('best')
+    expect(() => decodeRunResult({ ...runBase, status: 'blocked', best, evidence: [] }, 'minimize')).toThrow(/requires evidence/)
+    expect(() => decodeRunResult({ ...runBase, status: 'cancelled', lastState: 'cancelled', reason: 'operator request', quiescent: true }, 'minimize')).toThrow(/valid prior state/)
+    expect(() => decodeRunResult({ ...runBase, status: 'cancelled', lastState: 'ready', reason: 'operator request', quiescent: false }, 'minimize')).toThrow(/quiescent/)
   })
 
   it.each([
@@ -90,16 +90,36 @@ describe('run result contracts', () => {
   ] as const)('recomputes %s target satisfaction from best metric', (direction, metric, target, expected) => {
     expect(isTargetReached(direction, metric, target)).toBe(expected)
     const value = { ...runBase, status: 'target-reached', target, best: { ...best, metric } }
-    if (expected) expect(decodeRunResult(value, direction, 10_000)).toMatchObject({ status: 'target-reached', target })
-    else expect(() => decodeRunResult(value, direction, 10_000)).toThrow(/does not satisfy target/)
+    if (expected) expect(decodeRunResult(value, direction)).toMatchObject({ status: 'target-reached', target })
+    else expect(() => decodeRunResult(value, direction)).toThrow(/does not satisfy target/)
   })
 
   it('rejects malformed common and nested fields', () => {
-    expect(() => decodeRunResult({ ...runBase, status: 'budget-limited', best: { ...best, metric: Number.NaN } }, 'minimize', 10_000)).toThrow(/finite/)
-    expect(() => decodeRunResult({ ...runBase, status: 'budget-limited', best: { ...best, commit: 'abc1234' } }, 'minimize', 10_000)).toThrow(/full lowercase commit SHA/)
-    expect(() => decodeRunResult({ ...runBase, counts: { ...counts, experimentsCompleted: 2 }, status: 'budget-limited', best }, 'minimize', 10_000)).toThrow(/inconsistent/)
-    expect(() => decodeRunResult({ ...runBase, status: 'budget-limited', best, extra: true }, 'minimize', 10_000)).toThrow(/unexpected keys/)
-    expect(() => decodeRunResult({ ...runBase, status: 'budget-limited', best }, 'minimize', 10)).toThrow(/exceeds 10/)
+    expect(() => decodeRunResult({ ...runBase, status: 'budget-limited', best: { ...best, metric: Number.NaN } }, 'minimize')).toThrow(/finite/)
+    expect(() => decodeRunResult({ ...runBase, status: 'budget-limited', best: { ...best, commit: 'abc1234' } }, 'minimize')).toThrow(/full lowercase commit SHA/)
+    expect(() => decodeRunResult({ ...runBase, counts: { ...counts, experimentsCompleted: 2 }, status: 'budget-limited', best }, 'minimize')).toThrow(/inconsistent/)
+    expect(() => decodeRunResult({ ...runBase, status: 'budget-limited', best, extra: true }, 'minimize')).toThrow(/unexpected keys/)
+  })
+
+  it('accepts a 100-experiment canonical result above the presentation limit', () => {
+    const artifacts = Array.from({ length: 202 }, (_, index) => ({
+      ...artifact,
+      artifactId: `artifact-${index}-${'a'.repeat(96)}`,
+      location: `artifacts/${index}/${'b'.repeat(64)}.txt`,
+    }))
+    const value = {
+      ...runBase,
+      counts: { experimentsStarted: 100, experimentsCompleted: 100, attempts: 101 },
+      artifacts,
+      status: 'budget-limited',
+      best,
+    } as const
+    expect(JSON.stringify(value).length).toBeGreaterThan(DEFAULT_CONFIG.maxResultChars)
+    const decoded = decodeRunResult(value, 'minimize')
+    expect(decoded).toEqual(value)
+    const rendered = renderRunResult(decoded, DEFAULT_CONFIG.maxResultChars)
+    expect(rendered).toHaveLength(DEFAULT_CONFIG.maxResultChars)
+    expect(rendered).toMatch(/… \[truncated\]$/)
   })
 })
 
@@ -255,7 +275,7 @@ describe('Cordis patch contract', () => {
 
 describe('stable bounded rendering', () => {
   it('renders canonical run, experiment, and tool summaries in stable order', () => {
-    const run = decodeRunResult({ ...runBase, status: 'budget-limited', best, artifacts: [artifact] }, 'minimize', 10_000)
+    const run = decodeRunResult({ ...runBase, status: 'budget-limited', best, artifacts: [artifact] }, 'minimize')
     expect(renderRunResult(run, 10_000)).toBe([
       'Autoresearch run run-1: budget-limited',
       'Tracker: state/run-1.sqlite',
