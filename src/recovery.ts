@@ -144,7 +144,7 @@ function evaluationDirective(request: RecoveryRequest, experiment: RecoveredExpe
   return { kind: 'evaluate', runId: request.runId, experiment, commit, createExperiment: false, attemptOrdinal: integer(latest['ordinal']) + 1, rerun: true }
 }
 
-function reconstructEvaluation(request: RecoveryRequest, experiment: RecoveredExperiment, attempt: Row): RecoveredEvaluation | undefined {
+function reconstructEvaluation(request: RecoveryRequest, experiment: RecoveredExperiment, attempt: Row, allowPruned = false): RecoveredEvaluation | undefined {
   if (!attempt['exited_at']) return undefined
   const artifacts = request.tracker.database.prepare('SELECT * FROM artifacts WHERE run_id = ? AND experiment_id = ? AND attempt_id = ? ORDER BY kind').all(request.runId, experiment.experimentId, text(attempt['attempt_id'])) as Row[]
   if (artifacts.length === 0) throw new RecoveryEvidenceError('artifact-incomplete', 'completed evaluator attempt has no durable artifacts')
@@ -154,14 +154,20 @@ function reconstructEvaluation(request: RecoveryRequest, experiment: RecoveredEx
   for (const row of artifacts) {
     const kind = text(row['kind'])
     if (text(row['artifact_id']) !== `${attemptId}-${kind}` || text(row['run_id']) !== request.runId || text(row['experiment_id']) !== experiment.experimentId || text(row['attempt_id']) !== attemptId) throw new RecoveryEvidenceError('artifact-incomplete', `artifact ${kind} has noncanonical attempt-scoped identity`)
-    if (text(row['owner']) !== 'evaluator' || text(row['retention']) !== 'retain') throw new RecoveryEvidenceError('artifact-incomplete', `artifact ${kind} has noncanonical owner or retention`)
+    const retention = text(row['retention'])
+    if (text(row['owner']) !== 'evaluator' || retention !== 'retain' && (!allowPruned || retention !== 'pruned')) throw new RecoveryEvidenceError('artifact-incomplete', `artifact ${kind} has noncanonical owner or retention`)
     const path = join(request.tracker.layout.root, 'artifacts', request.runId, experiment.experimentId, attemptId, `${kind}.log`)
-    const bytes = readSecure(path)
     const location = `artifact:sha256:${createHash('sha256').update(path).digest('hex')}`
-    if (text(row['location']) !== location || integer(row['size_bytes']) !== bytes.length || text(row['sha256']) !== createHash('sha256').update(bytes).digest('hex')) throw new RecoveryEvidenceError('artifact-incomplete', `artifact ${kind} failed canonical location, size, or hash verification`)
+    const sizeBytes = integer(row['size_bytes'])
+    const sha256 = text(row['sha256'])
+    if (text(row['location']) !== location || sizeBytes < 0 || !HASH.test(sha256)) throw new RecoveryEvidenceError('artifact-incomplete', `artifact ${kind} failed canonical location, size, or hash validation`)
+    if (retention === 'retain') {
+      const bytes = readSecure(path)
+      if (sizeBytes !== bytes.length || sha256 !== createHash('sha256').update(bytes).digest('hex')) throw new RecoveryEvidenceError('artifact-incomplete', `artifact ${kind} failed canonical size or hash verification`)
+    }
     const metadata = json(row['metadata_json'])
     if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata) || Object.keys(metadata).length !== 1 || typeof (metadata as Record<string, unknown>).truncated !== 'boolean') throw new RecoveryEvidenceError('artifact-incomplete', `artifact ${kind} has noncanonical truncation metadata`)
-    decoded.push({ artifactId: `${attemptId}-${kind}`, runId: request.runId, experimentId: experiment.experimentId, attemptId, kind, location, sizeBytes: bytes.length, sha256: text(row['sha256']), owner: 'evaluator', retention: 'retain', metadata })
+    decoded.push({ artifactId: `${attemptId}-${kind}`, runId: request.runId, experimentId: experiment.experimentId, attemptId, kind, location, sizeBytes, sha256, owner: 'evaluator', retention, metadata })
   }
   const exit = decodeExit(attempt)
   const provenanceSha256 = spawnProvenance(attempt)
@@ -249,7 +255,7 @@ function validateTerminalEvidence(request: RecoveryRequest, state: 'completed' |
       }
       const experimentRow = experiments.find(row => text(row['experiment_id']) === text(attempt['experiment_id']))
       if (!experimentRow) throw new RecoveryEvidenceError('state-ambiguous', `attempt ${attemptId} has no durable experiment`)
-      const evaluation = reconstructEvaluation(request, decodeExperiment(experimentRow), attempt)
+      const evaluation = reconstructEvaluation(request, decodeExperiment(experimentRow), attempt, true)
       if (!evaluation) throw new RecoveryEvidenceError('attempt-uncertain', `attempt ${attemptId} has no durable outcome`)
       decoded.push(...evaluation.artifacts)
       validatedAttemptIds.add(attemptId)
@@ -268,7 +274,7 @@ function validateTerminalEvidence(request: RecoveryRequest, state: 'completed' |
       const own = attempts.filter(row => text(row['experiment_id']) === text(baseline['experiment_id']))
       const latest = own.at(-1)
       if (!latest || !latest['exited_at']) throw new RecoveryEvidenceError('attempt-uncertain', 'baseline-blocked run lacks a completed baseline evaluator attempt')
-      const outcome = reconstructEvaluation(request, decodeExperiment(baseline), latest)
+      const outcome = reconstructEvaluation(request, decodeExperiment(baseline), latest, true)
       if (!outcome || outcome.kind !== 'failed') throw new RecoveryEvidenceError('state-ambiguous', 'baseline-blocked run does not match a failed baseline evaluator outcome')
     }
     if (state === 'completed') {
@@ -278,7 +284,7 @@ function validateTerminalEvidence(request: RecoveryRequest, state: 'completed' |
       if (!best || !experiment || text(experiment['state']) !== 'accepted' || number(experiment['metric']) !== best.metric) throw new RecoveryEvidenceError('state-ambiguous', 'completed run lacks a canonical accepted best experiment')
       const latest = attempts.filter(row => text(row['experiment_id']) === best.experimentId).at(-1)
       if (!latest || !latest['exited_at']) throw new RecoveryEvidenceError('attempt-uncertain', 'completed run lacks durable evaluator evidence for its best experiment')
-      const outcome = reconstructEvaluation(request, decodeExperiment(experiment), latest)
+      const outcome = reconstructEvaluation(request, decodeExperiment(experiment), latest, true)
       if (!outcome || outcome.kind !== 'measured' || outcome.metric !== best.metric) throw new RecoveryEvidenceError('state-ambiguous', 'completed best result does not match its evaluator outcome')
     }
     return decoded

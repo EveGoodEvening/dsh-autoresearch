@@ -1,5 +1,5 @@
 import { execFileSync, spawn } from 'node:child_process'
-import { mkdirSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
@@ -9,7 +9,7 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import type { SubprocessHandle, SubprocessOutcome, SubprocessOutputReader, SubprocessSpawnSpec } from '@deepseek-ai/dsh-subprocess'
 import type { ToolDefinition, ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import { describe, expect, it, vi } from 'vitest'
-import { resolveConfig } from '../src/config.ts'
+import { resolveConfig, type Config } from '../src/config.ts'
 import { AutoresearchRunController } from '../src/controller.ts'
 
 import { DurableTracker } from '../src/tracker.ts'
@@ -222,16 +222,16 @@ function controllerFixture(evaluations: EvaluationStep[], edits: Array<(worktree
   return { root, ctx, parent: parentAgent, subprocess, creates, order, trackerPath: () => lastTracker, liveCount: () => live.size }
 }
 
-async function runControllerCase(f: ControllerFixture, overrides: Partial<typeof input> = {}) {
-  const controller = new AutoresearchRunController(f.ctx, { config: resolveConfig({ stateRoot: '.autoresearch-test', cleanupWorktreesOnSuccess: false, retainWorktrees: true, exportTsv: false }), input: { ...input, repository: f.root, evaluation: { command: 'fake-evaluator', args: [] }, mutable_globs: ['src/**'], ...overrides }, parent: f.parent, signal: new AbortController().signal })
+async function runControllerCase(f: ControllerFixture, overrides: Partial<typeof input> = {}, configOverrides: Config = {}) {
+  const controller = createCaseController(f, overrides, undefined, configOverrides)
   const result = await controller.run(); const ready = await controller.ready; return { result, ready, tracker: DurableTracker.open(ready.tracker) }
 }
 
-function createCaseController(f: ControllerFixture, overrides: Partial<typeof input> = {}, resumeRunId?: string) {
+function createCaseController(f: ControllerFixture, overrides: Partial<typeof input> = {}, resumeRunId?: string, configOverrides: Config = {}) {
   const { run_tag: _runTag, ...baseInput } = input
   const identity = resumeRunId ? { resume_run_id: resumeRunId } : { run_tag: input.run_tag }
   return new AutoresearchRunController(f.ctx, {
-    config: resolveConfig({ stateRoot: '.autoresearch-test', cleanupWorktreesOnSuccess: false, retainWorktrees: true, exportTsv: false }),
+    config: resolveConfig({ stateRoot: '.autoresearch-test', cleanupWorktreesOnSuccess: false, retainWorktrees: true, exportTsv: false, ...configOverrides }),
     input: { ...baseInput, ...identity, repository: f.root, evaluation: { command: 'fake-evaluator', args: [] }, mutable_globs: ['src/**'], ...overrides },
     parent: f.parent,
     signal: new AbortController().signal,
@@ -490,6 +490,81 @@ describe('controller real Git/SQLite outcomes', () => {
   it('classifies a real evaluator timeout, awaits process-tree exit, retains artifacts, and spawns no child', async () => {
     const f = controllerFixture([{ hang: true }])
     try { const { result, tracker } = await runControllerCase(f, { timeout_ms: 25 }); expect(result.status).toBe('baseline-blocked'); expect(f.creates).toHaveLength(0); expect(tracker.database.prepare('SELECT state FROM experiments').get()?.['state']).toBe('timed-out'); expect(tracker.database.prepare('SELECT timed_out, process_tree_quiescent FROM attempts').get()).toEqual({ timed_out: 1, process_tree_quiescent: 1 }); tracker.close() } finally { rmSync(f.root, { recursive: true, force: true }) }
+  })
+
+  it('prunes failed-attempt artifact bytes while preserving terminal replay metadata', async () => {
+    const f = controllerFixture([{ stdout: '', stderr: 'failed', exitCode: 9 }])
+    try {
+      const { result, ready, tracker } = await runControllerCase(f, {}, { retainFailedArtifacts: false })
+      expect(result.status).toBe('baseline-blocked')
+      const rows = tracker.database.prepare('SELECT run_id, experiment_id, attempt_id, kind, retention FROM artifacts ORDER BY kind').all()
+      expect(rows.map(row => row['retention'])).toEqual(['pruned', 'pruned'])
+      for (const row of rows) {
+        const path = join(tracker.layout.root, 'artifacts', String(row['run_id']), String(row['experiment_id']), String(row['attempt_id']), `${String(row['kind'])}.log`)
+        expect(existsSync(path)).toBe(false)
+      }
+      tracker.database.prepare("UPDATE artifacts SET retention = 'pruning' WHERE artifact_id = (SELECT artifact_id FROM artifacts ORDER BY artifact_id LIMIT 1)").run()
+      tracker.close()
+
+      const replay = await createCaseController(f, {}, ready.runId, { retainFailedArtifacts: false }).run()
+      expect(replay.status).toBe('baseline-blocked')
+      expect(replay.artifacts).toHaveLength(2)
+      expect(replay.artifacts.every(item => !('retention' in item))).toBe(true)
+      expect(f.subprocess.evaluatorSpawns).toBe(1)
+      const replayedTracker = DurableTracker.open(ready.tracker)
+      expect(replayedTracker.database.prepare('SELECT DISTINCT retention FROM artifacts').all()).toEqual([{ retention: 'pruned' }])
+      replayedTracker.close()
+    } finally { rmSync(f.root, { recursive: true, force: true }) }
+  })
+
+  it('sweeps expired artifact bytes and TSV exports before the next repository run', async () => {
+    const f = controllerFixture([{ stdout: '{"score":5}\n' }, { stdout: '{"score":7}\n' }])
+    try {
+      const first = await runControllerCase(f, { run_tag: 'retention-first', target: 5, max_experiments: 1 }, { exportTsv: true })
+      const old = new Date(Date.now() - 3 * 86_400_000)
+      first.tracker.database.prepare('UPDATE artifacts SET created_at = ?').run(old.toISOString())
+      const artifactPaths = first.tracker.database.prepare('SELECT run_id, experiment_id, attempt_id, kind FROM artifacts ORDER BY kind').all().map(row => join(first.tracker.layout.root, 'artifacts', String(row['run_id']), String(row['experiment_id']), String(row['attempt_id']), `${String(row['kind'])}.log`))
+      const tsvPath = join(first.tracker.layout.root, 'exports', `${first.ready.runId}.tsv`)
+      expect(artifactPaths.every(path => existsSync(path))).toBe(true)
+      expect(existsSync(tsvPath)).toBe(true)
+      utimesSync(tsvPath, old, old)
+      first.tracker.close()
+
+      const second = await runControllerCase(f, { run_tag: 'retention-second', target: 7, max_experiments: 1 }, { artifactRetentionDays: 1, tsvRetentionDays: 1 })
+      second.tracker.close()
+      const swept = DurableTracker.open(first.ready.tracker)
+      expect(swept.database.prepare('SELECT DISTINCT retention FROM artifacts').all()).toEqual([{ retention: 'pruned' }])
+      expect(artifactPaths.every(path => !existsSync(path))).toBe(true)
+      expect(existsSync(tsvPath)).toBe(false)
+      swept.close()
+
+      const replay = await createCaseController(f, { target: 5, max_experiments: 1 }, first.ready.runId, { artifactRetentionDays: 1, tsvRetentionDays: 1 }).run()
+      expect(replay).toMatchObject({ status: 'target-reached', best: { metric: 5 } })
+      expect(f.subprocess.evaluatorSpawns).toBe(2)
+    } finally { rmSync(f.root, { recursive: true, force: true }) }
+  })
+
+  it('removes every safe terminal worktree when retainWorktrees is false by itself', async () => {
+    const f = controllerFixture([{ stdout: '', exitCode: 9 }])
+    try {
+      const { result, ready, tracker } = await runControllerCase(f, {}, { retainWorktrees: false, cleanupWorktreesOnSuccess: false })
+      expect(result.status).toBe('baseline-blocked')
+      expect(existsSync(ready.worktree)).toBe(false)
+      tracker.close()
+    } finally { rmSync(f.root, { recursive: true, force: true }) }
+  })
+
+  it.each([
+    ['failed', { stdout: '', exitCode: 9 }, {}, 'baseline-blocked', true],
+    ['successful', { stdout: '{"score":5}\n' }, { target: 5, max_experiments: 1 }, 'target-reached', false],
+  ] as const)('limits cleanupWorktreesOnSuccess to %s terminal outcomes', async (_label, evaluation, overrides, status, retained) => {
+    const f = controllerFixture([evaluation])
+    try {
+      const { result, ready, tracker } = await runControllerCase(f, overrides, { retainWorktrees: false, cleanupWorktreesOnSuccess: true })
+      expect(result.status).toBe(status)
+      expect(existsSync(ready.worktree)).toBe(retained)
+      tracker.close()
+    } finally { rmSync(f.root, { recursive: true, force: true }) }
   })
 
   it('treats forbidden child edits as a host policy failure while a child blocker claim remains non-authoritative', async () => {

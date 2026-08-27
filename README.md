@@ -63,7 +63,7 @@ The package ships a Cordis patch row (`cordis.patch.yml`) declared via `dsh.bund
                                         │ persist
                                         ▼
                                ┌──────────────────┐
-                               │  DurableTracker  │  SQLite, schema v5
+                               │  DurableTracker  │  SQLite, schema v6
                                └──────────────────┘
 ```
 
@@ -116,12 +116,14 @@ The `Config` schema (`src/config.ts`) is loaded at deploy time. Defaults (also i
 | `maxActiveRunsPerRepository` | `1` | Concurrent run cap per repo. |
 | `maxStdoutBytes` / `maxStderrBytes` | `1048576` | Evaluator output capture limits. |
 | `maxResultChars` | `16384` | Tool result render limit. |
-| `artifactRetentionDays` | `30` | Artifact retention window. |
-| `retainFailedArtifacts` | `true` | Keep artifacts from failed attempts. |
-| `retainWorktrees` | `true` | Keep worktrees after terminal runs. |
-| `cleanupWorktreesOnSuccess` | `false` | Remove worktrees on `target-reached` / `budget-limited`. |
+| `artifactRetentionDays` | `30` | Artifact-byte retention window, enforced lazily for safe terminal runs. |
+| `retainFailedArtifacts` | `true` | If `false`, prune failed-attempt bytes at safe terminal settlement. |
+| `retainWorktrees` | `true` | Keep terminal worktrees; `false` enables terminal cleanup. |
+| `cleanupWorktreesOnSuccess` | `false` | With `retainWorktrees: false`, limit cleanup to `target-reached` / `budget-limited`. |
 | `exportTsv` | `true` | Export a TSV summary per run. |
-| `tsvRetentionDays` | `30` | TSV retention window. |
+| `tsvRetentionDays` | `30` | TSV retention window, measured from the export mtime. |
+
+Retention is repository-local and lazy: each controller startup sweeps safely terminal runs without a live controller owner, and each safe terminal settlement applies the same policy to the current run. Pruning removes artifact bytes but preserves SQLite artifact identity, size, hash, and outcome metadata so terminal replay remains deterministic. `retainWorktrees: false` removes every safely terminal worktree unless `cleanupWorktreesOnSuccess: true` narrows removal to successful terminal statuses.
 
 ## Project layout
 
@@ -139,6 +141,7 @@ src/
   render.ts           Tool result rendering with bounded truncation
   invariant.ts        Package invariant companion (dsh-invariants)
   state-layout.ts     SQLite state layout
+  retention.ts        Lazy artifact/TSV retention sweeps and current-run pruning
   evaluator-artifacts.ts  Evaluator stdout/stderr artifact capture
 ```
 

@@ -15,6 +15,7 @@ import {
 } from './git.js'
 import { reconcileRecovery, type RecoveredEvaluation, type RecoveredExperiment, type RecoveryDirective } from './recovery.js'
 import { DurableTracker, type ArtifactRecord } from './tracker.js'
+import { applyRunRetention, sweepRepositoryRetention } from './retention.js'
 import {
   decodeRunResult, isTargetReached, type AutoresearchRunResult, type AutoresearchToolInput,
   type BestResult, type BlockerEvidence, type DurableRunPolicy, type ExperimentDurableState,
@@ -132,6 +133,7 @@ export class AutoresearchRunController {
       const gitExecutable = await resolveGitExecutable(this.ctx, this.options.config.gitExecutable, this.aborter.signal)
       let discovery = await discoverRepository(this.ctx, gitExecutable, normalizedPolicy.repository, { ...gitOptions, signal: this.aborter.signal })
       const runId = normalizedPolicy.resumeRunId ?? randomUUID()
+      sweepRepositoryRetention(discovery.gitCommonDir, this.options.config.stateRoot, this.options.config, runId)
       const trackerPath = join(discovery.gitCommonDir, this.options.config.stateRoot, 'runs', runId, 'tracker.sqlite')
       tracker = DurableTracker.open(trackerPath)
       const existing = tracker.getRun(runId)
@@ -153,6 +155,7 @@ export class AutoresearchRunController {
       const claimProcess = currentControllerProcessIdentity()
       acquireControllerClaim(tracker, runId, claimOwner, CONTROLLER_LEASE_MS, new Date(), claimProcess)
       claimed = { runId, ownerId: claimOwner }
+      applyRunRetention(tracker, runId, this.options.config)
       if (this.jobId !== undefined) tracker.checkpointRun(runId, { outcome: { kind: 'background-job-registered', jobId: this.jobId } })
       const runtime = { runId, policy, discovery, identity, tracker, gitExecutable, policySha256, provenanceSha256, gitOptions, claimOwner, claimProcess }
       this.startClaimHeartbeat(runtime)
@@ -413,9 +416,15 @@ export class AutoresearchRunController {
     const value = { ...common(r), ...specific }
     const recovery = r.tracker.recoveryState(r.runId)
     const safeRelease = release && recovery.run['terminal_quiescent'] === 1 && recovery.processDisposition === 'quiescent'
+    const status = String(specific['status'] ?? '')
+    const successful = status === 'target-reached' || status === 'budget-limited'
+    const removeWorktree = !this.options.config.retainWorktrees && (!this.options.config.cleanupWorktreesOnSuccess || successful)
     if (this.options.config.exportTsv) r.tracker.exportTsv(r.runId, r.tracker.layout.resolve(join('exports', `${r.runId}.tsv`)))
-    if (safeRelease && this.options.config.cleanupWorktreesOnSuccess && !this.options.config.retainWorktrees) await removeRunWorktree(this.ctx, r.gitExecutable, r.discovery, r.identity, r.gitOptions)
-    if (safeRelease) recoverTerminalRunLock(r.tracker, r.runId)
+    if (safeRelease && removeWorktree) await removeRunWorktree(this.ctx, r.gitExecutable, r.discovery, r.identity, r.gitOptions)
+    if (safeRelease) {
+      recoverTerminalRunLock(r.tracker, r.runId)
+      applyRunRetention(r.tracker, r.runId, this.options.config)
+    }
     return decodeRunResult(value, r.policy.metricDirection, this.options.config.maxResultChars)
   }
 }

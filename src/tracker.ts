@@ -1,6 +1,6 @@
-import { closeSync, chmodSync, fsyncSync, openSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { closeSync, chmodSync, constants, fstatSync, fsyncSync, lstatSync, openSync, readFileSync, realpathSync, renameSync, rmdirSync, unlinkSync, writeFileSync, type Stats } from 'node:fs'
 import { createHash, randomUUID } from 'node:crypto'
-import { basename, dirname, relative } from 'node:path'
+import { dirname, join } from 'node:path'
 import { DatabaseSync, type SQLOutputValue } from 'node:sqlite'
 import { StateLayout } from './state-layout.js'
 import type { ExperimentDurableState, RunDurableState } from './types.js'
@@ -310,6 +310,53 @@ export class DurableTracker {
     } catch (error) { try { unlinkSync(temporary) } catch { /* best effort for derived output */ }; throw error }
   }
 
+  pruneArtifacts(runId: string, cutoffMs: number, retainFailedArtifacts: boolean): number {
+    if (Number.isNaN(cutoffMs)) throw new TypeError('artifact retention cutoff must be a number')
+    if (typeof retainFailedArtifacts !== 'boolean') throw new TypeError('retainFailedArtifacts must be boolean')
+    if (!this.retentionSafe(runId)) return 0
+    const selected = this.transaction(() => {
+      const rows = this.database.prepare(`SELECT a.*, t.outcome_json FROM artifacts a LEFT JOIN attempts t ON t.run_id = a.run_id AND t.attempt_id = a.attempt_id WHERE a.run_id = ? AND a.retention <> 'pruned' ORDER BY a.created_at, a.artifact_id`).all(runId)
+      const beginPruning = this.database.prepare("UPDATE artifacts SET retention = 'pruning' WHERE artifact_id = ? AND retention = 'retain'")
+      const result: PrunableArtifact[] = []
+      for (const row of rows) {
+        const retention = String(row['retention'])
+        if (retention !== 'retain' && retention !== 'pruning') throw new TrackerTransitionError(`artifact ${String(row['artifact_id'])} has unsupported retention ${retention}`)
+        const expired = timestamp(row['created_at'], 'artifact created_at') < cutoffMs
+        const failed = !retainFailedArtifacts && failedAttempt(row['outcome_json'])
+        if (retention === 'retain' && !expired && !failed) continue
+        const artifact = prunableArtifact(row, this.layout.root, runId)
+        if (retention === 'retain' && beginPruning.run(artifact.artifactId).changes !== 1) throw new TrackerTransitionError(`artifact ${artifact.artifactId} retention changed concurrently`)
+        result.push(artifact)
+      }
+      return result
+    })
+    for (const artifact of selected) {
+      secureDeleteArtifact(artifact, this.layout.root)
+      this.transaction(() => {
+        const changed = this.database.prepare("UPDATE artifacts SET retention = 'pruned' WHERE artifact_id = ? AND retention = 'pruning'").run(artifact.artifactId).changes
+        if (changed !== 1 && this.database.prepare('SELECT retention FROM artifacts WHERE artifact_id = ?').get(artifact.artifactId)?.['retention'] !== 'pruned') throw new TrackerTransitionError(`artifact pruning outcome could not be finalized: ${artifact.path}`)
+      })
+    }
+    return selected.length
+  }
+
+  pruneTsv(runId: string, cutoffMs: number): boolean {
+    if (Number.isNaN(cutoffMs)) throw new TypeError('TSV retention cutoff must be a number')
+    if (!this.retentionSafe(runId)) return false
+    const path = join(this.layout.root, 'exports', `${safeStateComponent(runId, 'run id')}.tsv`)
+    const info = optionalLstat(path)
+    if (!info || info.mtimeMs >= cutoffMs) return false
+    secureDeleteFile(path, info)
+    removeEmptyParents(dirname(path), this.layout.root)
+    return true
+  }
+
+  private retentionSafe(runId: string): boolean {
+    const recovery = this.recoveryState(runId)
+    const state = String(recovery.run['state']) as RunDurableState
+    return RUN_TERMINAL[state] && recovery.run['terminal_quiescent'] === 1 && recovery.processDisposition === 'quiescent' && recovery.activeLock === undefined
+  }
+
   private configure(busyTimeoutMs: number): void { this.database.exec(`PRAGMA foreign_keys = ON; PRAGMA busy_timeout = ${busyTimeoutMs}; PRAGMA journal_mode = WAL;`) }
   private migrate(deadline: number): void {
     while (true) {
@@ -452,6 +499,100 @@ function attemptOutcomeFacts(checkpoint: AttemptOutcomeCheckpoint): AttemptOutco
   if (facts.failureMessage !== undefined && facts.failureMessage !== result.message) throw new TrackerTransitionError('attempt failure message conflicts with its authoritative result')
   return { ...facts, failureCode: result.code, failureMessage: result.message }
 }
+interface PrunableArtifact { readonly artifactId: string; readonly path: string; readonly sizeBytes: number; readonly sha256: string }
+
+function prunableArtifact(row: Record<string, SQLOutputValue>, root: string, runId: string): PrunableArtifact {
+  const artifactId = String(row['artifact_id'])
+  const experimentId = safeStateComponent(String(row['experiment_id'] ?? ''), 'artifact experiment id')
+  const attemptId = safeStateComponent(String(row['attempt_id'] ?? ''), 'artifact attempt id')
+  const kind = String(row['kind'])
+  if (kind !== 'stdout' && kind !== 'stderr') throw new TrackerTransitionError(`artifact ${artifactId} has unsupported kind ${kind}`)
+  if (String(row['run_id']) !== runId || artifactId !== `${attemptId}-${kind}` || String(row['owner']) !== 'evaluator') throw new TrackerTransitionError(`artifact ${artifactId} has noncanonical ownership`)
+  const path = join(root, 'artifacts', safeStateComponent(runId, 'run id'), experimentId, attemptId, `${kind}.log`)
+  const sizeBytes = integer(row['size_bytes'], 'artifact size')
+  const sha256 = String(row['sha256'])
+  const location = `artifact:sha256:${createHash('sha256').update(path).digest('hex')}`
+  if (sizeBytes < 0 || !/^[0-9a-f]{64}$/u.test(sha256) || String(row['location']) !== location) throw new TrackerTransitionError(`artifact ${artifactId} has noncanonical location, size, or hash`)
+  const metadata = parseJson(row['metadata_json'], 'artifact metadata')
+  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata) || Object.keys(metadata).length !== 1 || typeof (metadata as Record<string, unknown>).truncated !== 'boolean') throw new TrackerTransitionError(`artifact ${artifactId} has noncanonical metadata`)
+  return { artifactId, path, sizeBytes, sha256 }
+}
+
+function failedAttempt(value: unknown): boolean {
+  if (value === null || value === undefined) return false
+  const outcome = parseJson(value, 'attempt outcome')
+  if (!outcome || typeof outcome !== 'object' || Array.isArray(outcome)) throw new TrackerTransitionError('attempt outcome is malformed during retention')
+  const kind = (outcome as Record<string, unknown>).kind
+  if (kind === 'failed') return true
+  if (kind === 'measured') return false
+  throw new TrackerTransitionError('attempt outcome kind is invalid during retention')
+}
+
+function secureDeleteArtifact(artifact: PrunableArtifact, root: string): void {
+  const info = optionalLstat(artifact.path)
+  if (!info) return
+  validateOwnerFile(artifact.path, info)
+  const fd = openSync(artifact.path, constants.O_RDONLY | constants.O_NOFOLLOW)
+  let bytes: Buffer
+  try {
+    const opened = fstatSync(fd)
+    if (!opened.isFile() || opened.dev !== info.dev || opened.ino !== info.ino || opened.size !== info.size) throw new TrackerTransitionError(`artifact identity changed before retention pruning: ${artifact.path}`)
+    bytes = readFileSync(fd)
+    const after = fstatSync(fd)
+    if (after.dev !== opened.dev || after.ino !== opened.ino || after.size !== opened.size) throw new TrackerTransitionError(`artifact identity changed during retention pruning: ${artifact.path}`)
+  } finally { closeSync(fd) }
+  if (bytes.length !== artifact.sizeBytes || createHash('sha256').update(bytes).digest('hex') !== artifact.sha256) throw new TrackerTransitionError(`artifact content does not match durable retention evidence: ${artifact.path}`)
+  const beforeDelete = lstatSync(artifact.path)
+  if (beforeDelete.dev !== info.dev || beforeDelete.ino !== info.ino) throw new TrackerTransitionError(`artifact identity changed before deletion: ${artifact.path}`)
+  unlinkSync(artifact.path)
+  fsyncDirectory(dirname(artifact.path))
+  removeEmptyParents(dirname(artifact.path), join(root, 'artifacts'))
+}
+
+function secureDeleteFile(path: string, info: Stats): void {
+  validateOwnerFile(path, info)
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+  try {
+    const opened = fstatSync(fd)
+    if (!opened.isFile() || opened.dev !== info.dev || opened.ino !== info.ino || opened.size !== info.size) throw new TrackerTransitionError(`retained file identity changed before deletion: ${path}`)
+  } finally { closeSync(fd) }
+  const beforeDelete = lstatSync(path)
+  if (beforeDelete.dev !== info.dev || beforeDelete.ino !== info.ino) throw new TrackerTransitionError(`retained file identity changed before deletion: ${path}`)
+  unlinkSync(path)
+  fsyncDirectory(dirname(path))
+}
+
+function validateOwnerFile(path: string, info: Stats): void {
+  if (!info.isFile() || info.isSymbolicLink()) throw new TrackerTransitionError(`retained path is not a regular file: ${path}`)
+  if (typeof process.getuid === 'function' && info.uid !== process.getuid()) throw new TrackerTransitionError(`retained file is not owner-controlled: ${path}`)
+  if ((info.mode & 0o077) !== 0) throw new TrackerTransitionError(`retained file is not owner-only: ${path}`)
+  if (realpathSync(path) !== path) throw new TrackerTransitionError(`retained file traverses a symlink: ${path}`)
+}
+
+function removeEmptyParents(start: string, stop: string): void {
+  let current = start
+  while (current !== stop) {
+    try {
+      const info = lstatSync(current)
+      if (!info.isDirectory() || info.isSymbolicLink()) throw new TrackerTransitionError(`retention parent is not a real directory: ${current}`)
+      rmdirSync(current)
+      fsyncDirectory(dirname(current))
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code
+      if (code === 'ENOENT' || code === 'ENOTEMPTY' || code === 'EEXIST') return
+      throw error
+    }
+    current = dirname(current)
+  }
+}
+
+function fsyncDirectory(path: string): void { const fd = openSync(path, 'r'); try { fsyncSync(fd) } finally { closeSync(fd) } }
+function optionalLstat(path: string): Stats | undefined { try { return lstatSync(path) } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error } }
+function safeStateComponent(value: string, label: string): string { if (!/^[A-Za-z0-9._-]+$/u.test(value) || value === '.' || value === '..') throw new TrackerTransitionError(`${label} contains unsafe characters`); return value }
+function integer(value: unknown, label: string): number { const result = Number(value); if (!Number.isSafeInteger(result)) throw new TrackerTransitionError(`${label} must be an integer`); return result }
+function timestamp(value: unknown, label: string): number { const result = typeof value === 'string' ? Date.parse(value) : Number.NaN; if (!Number.isFinite(result)) throw new TrackerTransitionError(`${label} must be an ISO timestamp`); return result }
+function parseJson(value: unknown, label: string): unknown { if (typeof value !== 'string') throw new TrackerTransitionError(`${label} must be JSON text`); try { return JSON.parse(value) } catch { throw new TrackerTransitionError(`${label} is malformed`) } }
+
 function hasOwn(value: object, property: PropertyKey): boolean { return Object.prototype.hasOwnProperty.call(value, property) }
 function isSqliteBusyOrLocked(error: unknown): boolean {
   if (!error || typeof error !== 'object') return false
