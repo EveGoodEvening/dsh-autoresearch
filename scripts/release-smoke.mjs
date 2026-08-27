@@ -7,7 +7,7 @@ import { spawn } from 'node:child_process'
 
 const repoRoot = resolve(import.meta.dirname, '..')
 const dshExecutable = process.env.DSH_BIN || join(repoRoot, 'node_modules', '.bin', process.platform === 'win32' ? 'dsh.cmd' : 'dsh')
-const MODULES = ['agent', 'config', 'controller', 'evaluator-artifacts', 'evaluator', 'git', 'index', 'invariant', 'recovery', 'render', 'state-layout', 'tracker', 'types']
+const MODULES = ['agent', 'config', 'controller', 'evaluator-artifacts', 'evaluator', 'git', 'index', 'invariant', 'recovery', 'render', 'retention', 'state-layout', 'tracker', 'types']
 export const EXPECTED_TARBALL_ENTRIES = Object.freeze([
   'package/LICENSE', 'package/README.md', 'package/cordis.patch.yml', 'package/package.json',
   ...MODULES.flatMap(name => [`package/lib/${name}.d.ts`, `package/lib/${name}.d.ts.map`, `package/lib/${name}.js`, `package/lib/${name}.js.map`]),
