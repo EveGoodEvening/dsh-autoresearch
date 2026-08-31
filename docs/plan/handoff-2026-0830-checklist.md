@@ -35,9 +35,9 @@ This is the durable remediation tracker for the findings in `docs/plan/handoff-2
 - **Owner chunks:** Chunks 01-04; Chunk 04 is the sole activation cutover.
 - **Dependencies:** Chunks 01-03 prepare inert durable, file-boundary, and Host-contract machinery; Chunk 04 activates the complete authority and frozen-identity contract used by H-03/H-04/H-05.
 - **Exact verification:** Reject removed raw evaluator/environment/provenance/metric keys as unknown model input. For the new-start branch, reject omitted or unknown `evaluator_id` before Git discovery, tracker creation, worktree/ref allocation, ownership, child creation, mutation, or spawn. For the resume branch, omission of `evaluator_id` is the only valid shape; any submitted value is rejected by the discriminated schema before repository/tracker lookup, whether it would be matching, mismatching, or unknown, and is never used for lookup. With the field omitted, allow only non-mutating repository discovery needed to locate the repo-scoped named tracker and recover its durable evaluator ID, registration fingerprint, manifest, and latest accepted HEAD; then permit an exact current registration match, but typed-block a missing/renamed ID or changed registration before Git mutation/worktree allocation, ownership acquisition/takeover, retention mutation, child/evaluator spawn, or attempt/candidate mutation. An omitted-field legacy terminal resume replays only durable terminal evidence without registration lookup, ownership, allocation, mutation, or spawn; every legacy resume that submits `evaluator_id` is rejected at schema discrimination first. Assert spawned argv/cwd/env/metric/direction exactly equal the Host registration selected for a new start or matched from durable identity on resume; assert hostile `bash -c`, `PATH`, `NODE_OPTIONS`, and model-supplied file allowlists cannot override it.
-- [ ] Implementation
-- [ ] Review
-- [ ] Accounting
+- [x] Implementation
+- [x] Review
+- [x] Accounting
 
 ### H-02 — Evaluator execution is managed but not sandbox-confined
 
@@ -63,9 +63,9 @@ This is the durable remediation tracker for the findings in `docs/plan/handoff-2
 - **Owner chunks:** Chunks 01-04; behavior activates only in Chunk 04.
 - **Dependencies:** Chunks 01-03 prepare the atomic Host-owned registration/manifest contract without making it runnable; Chunk 04 activates it.
 - **Exact verification:** With a configured dataset, baseline and candidate must reach normal measurement/decision rather than `baseline-blocked`; persisted run provenance and every baseline/candidate/resumed attempt spawn provenance must be byte-identical. `provenance-mismatch` is reserved for attempt evidence that diverges from the already accepted durable registration/provenance; missing or changed current registrations block earlier as `evaluator-registration-mismatch`.
-- [ ] Implementation
-- [ ] Review
-- [ ] Accounting
+- [x] Implementation
+- [x] Review
+- [x] Accounting
 
 ### H-04 — Evaluator-file freezing exists only in the low-level helper
 
@@ -77,9 +77,9 @@ This is the durable remediation tracker for the findings in `docs/plan/handoff-2
 - **Owner chunks:** Chunks 01, 02, and 04; Chunk 04 is the sole activation cutover.
 - **Dependencies:** Chunk 01 defines inert durable manifest authority, Chunk 02 defines inert derivation/revalidation enforcement, and Chunk 04 wires both atomically as the sole runtime authority.
 - **Exact verification:** A Host-declared scorer such as `scripts/score.mjs` must be protected even with `mutable_globs: ['**']`. Missing, symlinked, renamed, content-replaced, or attempt-local inode/dev-swapped files block before or after spawn as appropriate. SHA-256 digests derived at run creation from the isolated worktree at exactly `start_commit` must match baseline/candidate checks. On resume after one or more accepted candidates, reconcile the worktree to the latest durable accepted HEAD and independently recompute every frozen digest against the run-creation manifest. A dirty caller checkout must not influence either identity. Failure while allocating/checking out the initial isolated worktree or atomically persisting the run, manifest, and fingerprint must leave no resumable partial run, release any newly acquired claim/lock, and remove only newly allocated worktree/ref state.
-- [ ] Implementation
-- [ ] Review
-- [ ] Accounting
+- [x] Implementation
+- [x] Review
+- [x] Accounting
 
 ### H-05 — Dataset files are neither declared nor content-frozen
 
@@ -91,9 +91,9 @@ This is the durable remediation tracker for the findings in `docs/plan/handoff-2
 - **Owner chunks:** Chunks 01, 02, and 04; Chunk 04 is the sole activation cutover.
 - **Dependencies:** Chunk 01's inert durable identity plus Chunk 02's shared inert hash/revalidation machinery; Chunk 04 activates the Host-owned registration contract.
 - **Exact verification:** For local data, Host-declared files such as `data/train.json` must be protected under broad mutable globs and replacement/rename/symlink/content changes must block; dev/inode checks are attempt-local only. For external data, the normalized algorithm-qualified immutable digest must remain stable across baseline/candidate/resume. Resume after accepted candidates must reconcile the latest durable accepted HEAD while independently proving local dataset bytes still match the run-creation manifest. Same ID with any normalized registration change, renamed ID with identical bytes, external digest rotation, and deployment rollback to a different fingerprint all typed-block before spawn as `evaluator-registration-mismatch`; model labels or unregistered paths must not alter identity.
-- [ ] Implementation
-- [ ] Review
-- [ ] Accounting
+- [x] Implementation
+- [x] Review
+- [x] Accounting
 
 ### H-06 — Timeout is not a fixed fair-compute budget
 
@@ -364,12 +364,16 @@ For H-01, H-03, H-04, and H-05, this amendment adds Chunk 03R as an additional o
   Every pre-cutover raw-policy tracker lacking the new marker plus evaluator ID/fingerprint is non-resumable. Detect it after read-only lookup/schema recognition and before policy comparison, ownership/takeover, allocation, spawn, or mutation. Terminal legacy runs replay only existing terminal evidence. Nonterminal legacy runs preserve tracker state, active durable lock, audit refs, artifacts, and isolated worktree indefinitely and typed-block as `legacy-evaluator-policy-unsupported`; do not terminalize, release ownership, auto-migrate, hash current config into new authority, or let retention delete them.
 - **Depends on:** Chunk 03R and its `docs(plan): record handoff chunk 03R` accounting commit; all four preparatory negative activation gates must pass together at the 03R tip immediately before activation.
 - **Exact verification:** Run focused contract/evaluator/Git/controller/recovery/restart/composition/installed-package tests plus typecheck. Prove the pre-activation gate, then the sole activation switch. New-start acceptance cases: omitted `evaluator_id` is rejected, unknown ID is rejected before discovery/mutation, and a known ID alone selects the Host registration. Resume acceptance cases, all before ownership/takeover, retention/allocation, mutation, or spawn: omitted `evaluator_id` derives identity exclusively from the durable tracker and proceeds only on an exact current registration match; submitted matching, mismatching, and unknown IDs are each rejected by schema before lookup and never influence registration lookup; a missing/renamed durable ID or registration drift/digest rotation/rollback typed-blocks after read-only durable lookup. Legacy-terminal cases: omitted `evaluator_id` replays durable terminal evidence without current registration lookup or any ownership/allocation/mutation/spawn, while any submitted evaluator ID is rejected at schema discrimination; nonterminal legacy cases retain the documented fail-closed behavior. Also prove complete manifest/fingerprint creation is atomic; exact Host spawn/provenance is used; broad-glob/tamper/symlink/rename/content/inode cases block; accepted-HEAD resume and independent manifest checks both run; removed raw keys have no alias; and no mixed-generation route exists.
-- **Implementation commit:** `fix(security): activate host evaluator authority`
-- **Required tracker-accounting commit:** `docs(plan): record handoff chunk 04`; changes only this checklist and must land before Chunk 05 starts.
-- [ ] Implementation complete
-- [ ] Focused verification complete, including tested atomic activation gate
-- [ ] Focused review complete
-- [ ] Tracker-accounting commit complete
+- **Implementation commit:** `4b9e93efcb343b9a9cf017ba47605dc44e867e6a` (`fix(security): activate host evaluator authority`).
+- **Focused verification:** `pnpm run build` passed; the focused suite passed 10 files with 327 tests passed and 6 skipped; `pnpm run typecheck` passed. Acceptance coverage confirmed Host `evaluator_id` authority with raw model inputs removed, byte-consistent dataset provenance, evaluator/local-dataset manifest and file freezing, clean legacy/current cutover, read-only preclaim classification, required migrations, terminal claim and retention behavior, and rollback safety.
+- **Focused review:** Clean after review-fix loops; three independent final reviewers found no unresolved issue across authority, provenance, frozen identity, cutover, recovery, migration, terminal claims/retention, or rollback.
+- **H-02 boundary:** Unchanged by decision: DSH sandbox confinement remains document-only work owned by Chunk 08; Chunk 04 adds no sandbox runtime or hostile-code isolation claim.
+- **Required tracker-accounting commit:** `docs(plan): record handoff chunk 04`; this checklist-only accounting change is complete and ready to land before Chunk 05 starts. Its SHA remains external until the commit exists.
+- **Rollback:** Before any new-contract run exists, revert the Chunk 04 implementation and checklist-only accounting commits only with legacy/new guards intact. After a new-contract run exists, roll forward while preserving durable manifests, fingerprints, provenance, migrations, terminal evidence, claims/locks, retained legacy state, and rollback evidence; never reinterpret either current or legacy policy.
+- [x] Implementation complete
+- [x] Focused verification complete, including tested atomic activation gate
+- [x] Focused review complete
+- [x] Tracker-accounting commit complete
 
 ### Chunk 05 — Persist bounded untrusted research memory
 
@@ -455,7 +459,7 @@ Fill each implementation row only after the fact exists. Rows 00-07 and 03R requ
 | 02 | `75949d0fe7aa504537e98b5941e14f7da364279e` | `pnpm exec vitest run tests/evaluator.spec.ts tests/git.spec.ts`: 2 files/78 tests passed; `pnpm run typecheck`: passed. | Clean after resolving alias, immutable-object, and descriptor findings; one clean final reviewer found no unresolved issue. The sole contrary finding demanded runtime activation and was independently refuted twice because activation is explicitly prohibited until Chunk 04. | `docs(plan): record handoff chunk 02` — complete and ready to land; SHA external until committed. | Revert implementation and accounting before Chunk 03; helpers are inert, preserve existing evaluator behavior, and do not activate or interpret the new frozen-input contract. |
 | 03 | `cf3d0c3` | `pnpm run build`: passed; `pnpm exec vitest run tests/contracts.spec.ts tests/autoresearch.spec.ts tests/composition.integration.spec.ts`: 3 files/91 tests passed; `pnpm run typecheck`: passed. Negative activation evidence confirmed the registered production tool and controller/recovery routes remain legacy-only, cannot create/resume/interpret new-contract runs, and write no new marker. | Clean after fixes for schema/config mutable-input parity, omitted-dataset defaulting, strict malformed fields, full activation-decoder validation/deep freeze, and required Loader fields; two independent final reviews found no unresolved issue. | `docs(plan): record handoff chunk 03` — complete and ready to land; SHA external until committed. | Revert implementation and accounting before Chunk 04; machinery is inert, retain the registered legacy route, and do not create, resume, or interpret the new contract. |
 | 03R | `d9c10369cdc83948dd6cd0960fe2d63caf1d2fac` (`fix(core): harden activation primitives`); review fixes `da87f21276a83f842cee15f6870818caada71751`, `aca459bb94a895078cda855f64c8fde5e7e356e5` | At the clean 03R tip, `pnpm exec vitest run tests/tracker.spec.ts tests/evaluator.spec.ts tests/git.spec.ts tests/contracts.spec.ts`: 4 files/177 tests passed; `pnpm run typecheck`: passed. `tests/contracts.spec.ts` is included because activation DSL parity belongs to shared types. Snapshot evidence preserved source main/WAL bytes and sidecar existence; transient coordination bytes in an already-existing SHM may change. Zero production activation remained proven. | Clean; two final reviewers found no unresolved issue. Resolved findings covered durable-evidence-preserving SQLite snapshot semantics, strict generation/registration durability, rollback and terminal authority, semantic provenance/manifest reconstruction, empty-manifest and frozen-file handling, and shared activation DSL/type parity. | `docs(plan): record handoff chunk 03R` — complete and ready to land; SHA external until committed. | Before activation, revert `aca459bb94a895078cda855f64c8fde5e7e356e5`, `da87f21276a83f842cee15f6870818caada71751`, and `d9c10369cdc83948dd6cd0960fe2d63caf1d2fac` in reverse order with the accounting commit, preserving completed Chunk 00-03 history and the legacy route; after activation, roll forward through the hardened shared contract. |
-| 04 | _unchecked_ | _unchecked_ | _unchecked_ | `docs(plan): record handoff chunk 04` — _unchecked_ | Before any new-contract run exists, reverse only with legacy/new guards intact. After one exists, roll forward; preserve manifests, fingerprints, provenance, and evidence; never reinterpret new or legacy policy. |
+| 04 | `4b9e93efcb343b9a9cf017ba47605dc44e867e6a` (`fix(security): activate host evaluator authority`) | `pnpm run build`: passed; focused suite: 10 files, 327 passed/6 skipped; `pnpm run typecheck`: passed. Acceptance covered Host `evaluator_id` authority, removed raw inputs, dataset provenance consistency, manifest/file freezing, legacy/current cutover, read-only preclaim behavior, migrations, terminal claims/retention, and rollback. | Clean after review-fix loops; three independent final reviewers found no unresolved issue. H-02 sandbox confinement remains document-only by explicit decision. | `docs(plan): record handoff chunk 04` — complete and ready to land; SHA external until committed. | Before any new-contract run exists, revert implementation and accounting only with legacy/new guards intact. After one exists, roll forward preserving manifests, fingerprints, provenance, migrations, terminal evidence, claims/locks, retained legacy state, and rollback evidence; never reinterpret current or legacy policy. |
 | 05 | _unchecked_ | _unchecked_ | _unchecked_ | `docs(plan): record handoff chunk 05` — _unchecked_ | If schema advances, roll forward after migration; never down-migrate an opened tracker. |
 | 06 | _unchecked_ | _unchecked_ | _unchecked_ | `docs(plan): record handoff chunk 06` — _unchecked_ | Reverse only before later behavior/docs depend on continuation semantics. |
 | 07 | _unchecked_ | _unchecked_ | _unchecked_ | `docs(plan): record handoff chunk 07` — _unchecked_ | Schema-neutral reverse-order revert; cancellation replay may regress and must not be misreported. |
