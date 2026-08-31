@@ -162,6 +162,18 @@ export function acquireRunLock(tracker: DurableTracker, identity: RunGitIdentity
   try { tracker.acquireActiveLock(identity.runId, repositoryId, identity.runTag) }
   catch (error) { releaseAuthorityLock(tracker, identity.runId); throw error }
 }
+export function rollbackRunActivationAuthority(tracker: DurableTracker, runId: string): void {
+  const authority = openLockAuthority(tracker, runId)
+  try {
+    authority.exec('BEGIN IMMEDIATE')
+    authority.prepare('DELETE FROM controller_claims WHERE run_id = ?').run(runId)
+    authority.prepare('DELETE FROM active_locks WHERE run_id = ?').run(runId)
+    authority.exec('COMMIT')
+  } catch (error) {
+    try { authority.exec('ROLLBACK') } catch { /* preserve rollback failure */ }
+    throw error
+  } finally { authority.close() }
+}
 
 
 export async function allocateRunWorktree(ctx: GitContext, executable: string, discovery: RepositoryDiscovery, identity: RunGitIdentity, durable: DurableGitIdentity, options: Omit<GitCommandOptions, 'cwd'>, resume = false): Promise<void> {
@@ -202,6 +214,7 @@ export async function deriveRegistrationManifestAtStartCommit(ctx: GitContext, e
   const normalized = normalizeEvaluatorRegistration(registration)
   const declarations = normalizeFrozenFileDeclarations({ evaluatorFiles: normalized.evaluatorFiles, datasetFiles: normalized.dataset.kind === 'local' ? normalized.dataset.files : [] })
   const paths = [...declarations.evaluatorFiles, ...declarations.datasetFiles].sort()
+  if (paths.length === 0) return {}
   const literalPaths = paths.map(path => `:(literal)${path}`)
   const treeEntries = parseDeclaredTreeEntries((await runGit(ctx, executable, ['ls-tree', '-z', discovery.startCommit, '--', ...literalPaths], { ...options, cwd: canonicalRepository })).stdout)
   if (treeEntries.length !== paths.length || treeEntries.some((entry, index) => entry.path !== paths[index])) throw new GitBoundaryError('git-manifest-path-missing', 'Every declared registration path must exist at the immutable start commit')
@@ -350,14 +363,13 @@ export async function restoreAcceptedWorktree(ctx: GitContext, executable: strin
 }
 export function releaseTerminalRunLock(tracker: DurableTracker, runId: string): boolean {
   const released = tracker.releaseActiveLock(runId)
-  releaseAuthorityLock(tracker, runId)
-  return released
+  return releaseTerminalAuthority(tracker, runId) || released
 }
 export function recoverTerminalRunLock(tracker: DurableTracker, runId: string): boolean {
   const recovery = tracker.recoveryState(runId)
   if (!['completed', 'baseline-blocked', 'blocked', 'round-failed', 'cancelled'].includes(String(recovery.run['state'])) || recovery.run['terminal_quiescent'] !== 1 || recovery.processDisposition !== 'quiescent') return false
   const released = tracker.releaseActiveLock(runId)
-  return releaseAuthorityLock(tracker, runId) || released
+  return releaseTerminalAuthority(tracker, runId) || released
 }
 function openLockAuthority(tracker: DurableTracker, runId: string): DatabaseSync {
   const run = tracker.getRun(runId)
@@ -382,6 +394,25 @@ function releaseAuthorityLock(tracker: DurableTracker, runId: string): boolean {
     const row = authority.prepare('SELECT repository_id, run_tag FROM active_locks WHERE run_id = ?').get(runId)
     if (row && (row['repository_id'] !== repositoryId || row['run_tag'] !== runTag)) throw new GitBoundaryError('run-lock-identity', 'Shared active lock identity differs from the durable run')
     return authority.prepare('DELETE FROM active_locks WHERE run_id = ? AND repository_id = ? AND run_tag = ?').run(runId, repositoryId, runTag).changes === 1
+  } finally { authority.close() }
+}
+
+function releaseTerminalAuthority(tracker: DurableTracker, runId: string): boolean {
+  const run = tracker.getRun(runId)
+  if (!run) throw new GitBoundaryError('run-lock-identity', 'Shared terminal release requires a durable run')
+  const repositoryId = String(run['repository_id']); const runTag = String(run['run_tag'])
+  const authority = openLockAuthority(tracker, runId)
+  try {
+    authority.exec('BEGIN IMMEDIATE')
+    const row = authority.prepare('SELECT repository_id, run_tag FROM active_locks WHERE run_id = ?').get(runId)
+    if (row && (row['repository_id'] !== repositoryId || row['run_tag'] !== runTag)) throw new GitBoundaryError('run-lock-identity', 'Shared active lock identity differs from the durable run')
+    const lock = authority.prepare('DELETE FROM active_locks WHERE run_id = ? AND repository_id = ? AND run_tag = ?').run(runId, repositoryId, runTag).changes
+    const claim = authority.prepare('DELETE FROM controller_claims WHERE run_id = ?').run(runId).changes
+    authority.exec('COMMIT')
+    return lock === 1 || claim === 1
+  } catch (error) {
+    try { authority.exec('ROLLBACK') } catch { /* preserve rollback failure */ }
+    throw error
   } finally { authority.close() }
 }
 

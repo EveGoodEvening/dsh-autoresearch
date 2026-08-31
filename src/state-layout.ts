@@ -20,6 +20,16 @@ export class StateLayout {
     chmodSync(absolute, 0o700)
     return new StateLayout(realpathSync(absolute))
   }
+  /** Verify an existing owner-only state directory without changing permissions or creating nodes. */
+  static inspect(root: string): StateLayout {
+    const absolute = resolve(root)
+    const info = lstatSync(absolute)
+    if (!info.isDirectory() || info.isSymbolicLink()) throw new StateLayoutError('state root must be a real directory')
+    if (typeof process.getuid === 'function' && info.uid !== process.getuid()) throw new StateLayoutError('state root must be owned by the current user')
+    if ((info.mode & 0o077) !== 0) throw new StateLayoutError('state root must not be accessible by group or other users')
+    return new StateLayout(realpathSync(absolute))
+  }
+
 
   resolve(relativePath: string, kind: 'file' | 'directory' = 'file'): string {
     if (isAbsolute(relativePath) || relativePath.split(/[\\/]/u).some((part) => part === '..')) throw new StateLayoutError('state path must be relative and contained')
@@ -44,6 +54,15 @@ export class StateLayout {
     if (exists(absolute)) this.verifyNode(absolute, false)
     return absolute
   }
+  /** Verify an existing contained file without changing the filesystem. */
+  inspectContained(path: string): string {
+    const absolute = resolve(path)
+    const rel = relative(this.root, absolute)
+    if (rel === '' || rel === '..' || rel.startsWith(`..${sep}`)) throw new StateLayoutError('destination must be a file beneath state root')
+    this.verifyNode(absolute, false)
+    return absolute
+  }
+
 
   secureFile(path: string): void {
     this.assertContained(path)

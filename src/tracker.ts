@@ -1,6 +1,9 @@
-import { closeSync, chmodSync, constants, fstatSync, fsyncSync, lstatSync, openSync, readFileSync, realpathSync, renameSync, rmdirSync, unlinkSync, writeFileSync, type Stats } from 'node:fs'
+import { closeSync, chmodSync, constants, fstatSync, fsyncSync, lstatSync, mkdtempSync, openSync, readFileSync, realpathSync, renameSync, rmSync, rmdirSync, unlinkSync, writeFileSync, type Stats } from 'node:fs'
+import { spawnSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
-import { dirname, join } from 'node:path'
+import { tmpdir } from 'node:os'
+import { basename, dirname, join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { DatabaseSync, type SQLOutputValue } from 'node:sqlite'
 import { StateLayout } from './state-layout.js'
 import { EVALUATOR_CONTRACT_GENERATION, normalizeEvaluatorRegistration, normalizeRegistrationManifest, registrationFingerprint, serializeRegistrationJson } from './types.js'
@@ -91,7 +94,7 @@ export class DurableTracker {
   readonly database: DatabaseSync
   readonly layout: StateLayout
   private closed = false
-  private constructor(readonly path: string, database: DatabaseSync, layout: StateLayout) { this.database = database; this.layout = layout }
+  private constructor(readonly path: string, database: DatabaseSync, layout: StateLayout, private readonly dispose?: () => void) { this.database = database; this.layout = layout }
 
   static open(path: string): DurableTracker {
     const layout = StateLayout.open(dirname(path)); const safePath = layout.assertContained(path)
@@ -120,7 +123,30 @@ export class DurableTracker {
       }
     }
   }
-  close(): void { if (!this.closed) { this.database.close(); this.closed = true } }
+
+  /** Inspect a transactionally consistent private snapshot without modifying the source tracker or its sidecars. */
+  static openReadOnly(path: string): DurableTracker {
+    const layout = StateLayout.inspect(dirname(path))
+    const safePath = layout.inspectContained(path)
+    const snapshotRoot = mkdtempSync(join(tmpdir(), 'dsh-autoresearch-tracker-'))
+    const snapshotPath = join(snapshotRoot, basename(safePath))
+    let database: DatabaseSync | undefined
+    try {
+      snapshotSqliteDatabase(safePath, snapshotPath)
+      const snapshotUrl = pathToFileURL(snapshotPath); snapshotUrl.searchParams.set('mode', 'ro'); snapshotUrl.searchParams.set('immutable', '1')
+      database = new DatabaseSync(snapshotUrl.href, { readOnly: true, enableDoubleQuotedStringLiterals: false })
+      const tracker = new DurableTracker(safePath, database, layout, () => rmSync(snapshotRoot, { recursive: true, force: true }))
+      tracker.database.prepare('PRAGMA schema_version').get()
+      return tracker
+    } catch (error) {
+      try { database?.close() } catch { /* preserve original failure */ }
+      rmSync(snapshotRoot, { recursive: true, force: true })
+      if (error instanceof TrackerBlockedError) throw error
+      throw new TrackerBlockedError('tracker-schema-invalid', 'tracker is corrupt, malformed, or has an incompatible schema', error)
+    }
+  }
+
+  close(): void { if (!this.closed) { try { this.database.close() } finally { this.closed = true; this.dispose?.() } } }
   schemaVersion(): number { return Number(this.database.prepare('SELECT version FROM schema_metadata WHERE singleton = 1').get()!['version']) }
   foreignKeysEnabled(): boolean { return Number(this.database.prepare('PRAGMA foreign_keys').get()!['foreign_keys']) === 1 }
   journalMode(): string { return String(this.database.prepare('PRAGMA journal_mode').get()!['journal_mode']) }
@@ -136,11 +162,25 @@ export class DurableTracker {
     const fingerprint = registrationFingerprint(registration, manifest)
     const identity: DurableRegistrationIdentity = { contractGeneration: EVALUATOR_CONTRACT_GENERATION, evaluatorId: registration.evaluatorId, registration, manifest, registrationFingerprint: fingerprint }
     this.transaction(() => {
-      this.insertRun(record, at)
+      this.insertRun(record, at, EVALUATOR_CONTRACT_GENERATION)
       this.database.prepare(`INSERT INTO run_registrations (run_id, contract_generation, evaluator_id, registration_json, manifest_json, registration_fingerprint, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?)`).run(record.runId, identity.contractGeneration, identity.evaluatorId, serializeRegistrationJson(identity.registration), serializeRegistrationJson(identity.manifest), identity.registrationFingerprint, at)
     })
     return identity
+  }
+  rollbackRegisteredRunActivation(runId: string): void {
+    this.transaction(() => {
+      const run = this.requireRun(runId)
+      if (run['state'] !== 'initializing') throw new TrackerTransitionError('registered run activation rollback requires an initializing run')
+      if (this.database.prepare('SELECT 1 FROM experiments WHERE run_id = ? LIMIT 1').get(runId) || this.database.prepare('SELECT 1 FROM attempts WHERE run_id = ? LIMIT 1').get(runId) || this.database.prepare('SELECT 1 FROM artifacts WHERE run_id = ? LIMIT 1').get(runId)) throw new TrackerTransitionError('registered run activation rollback requires no execution state')
+      this.database.prepare('DELETE FROM active_locks WHERE run_id = ?').run(runId)
+      this.database.prepare('DELETE FROM transition_artifacts WHERE transition_id IN (SELECT transition_id FROM transitions WHERE run_id = ?)').run(runId)
+      this.database.prepare('DELETE FROM transitions WHERE run_id = ?').run(runId)
+      this.database.exec('DROP TRIGGER run_registrations_presence_monotonic')
+      this.database.prepare('DELETE FROM run_registrations WHERE run_id = ?').run(runId)
+      this.database.prepare('DELETE FROM runs WHERE run_id = ?').run(runId)
+      this.database.exec(`CREATE TRIGGER run_registrations_presence_monotonic BEFORE DELETE ON run_registrations BEGIN SELECT RAISE(ABORT, 'evaluator registration presence is monotonic'); END;`)
+    })
   }
   readRegistration(runId: string): DurableRegistrationIdentity | undefined {
     this.requireRun(runId)
@@ -421,14 +461,14 @@ export class DurableTracker {
     if (!this.foreignKeysEnabled()) throw new TrackerBlockedError('tracker-schema-invalid', 'tracker foreign keys are disabled')
   }
   private secureSidecars(): void { for (const suffix of ['', '-wal', '-shm']) { try { this.layout.secureFile(`${this.path}${suffix}`) } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error } } }
-  private insertRun(record: InitialRunRecord, at: string): void {
+  private insertRun(record: InitialRunRecord, at: string, contractGeneration?: typeof EVALUATOR_CONTRACT_GENERATION): void {
     this.database.prepare(`INSERT INTO runs (run_id, repository_id, repository, git_common_dir, caller_cwd, start_commit, run_tag, branch, worktree,
       agent_id, session_id, policy_json, policy_sha256, provenance_json, provenance_sha256, state, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'initializing', ?, ?)`).run(
       record.runId, record.repositoryId, record.repository, record.gitCommonDir, record.callerCwd, record.startCommit, record.runTag, record.branch, record.worktree,
-      record.agentId ?? null, record.sessionId ?? null, canonicalJson(redactEnvironment(record.policy)), record.policySha256,
+      record.agentId ?? null, record.sessionId ?? null, serializeDurablePolicy(record.policy), record.policySha256,
       canonicalJson(redactEnvironment(record.provenance)), record.provenanceSha256, at, at)
-    this.insertTransition(record.runId, null, 'run', null, 'initializing', { intent: { kind: 'create-run' } }, at)
+    this.insertTransition(record.runId, null, 'run', null, 'initializing', { intent: contractGeneration === undefined ? { kind: 'create-run' } : { kind: 'create-run', contractGeneration } }, at)
   }
   private transaction<T>(operation: () => T): T { this.database.exec('BEGIN IMMEDIATE'); try { const result = operation(); this.database.exec('COMMIT'); return result } catch (error) { try { this.database.exec('ROLLBACK') } catch { /* transaction may already be aborted */ }; throw error } }
   private requireRun(runId: string): Record<string, SQLOutputValue> { const row = this.getRun(runId); if (!row) throw new TrackerTransitionError(`unknown run ${runId}`); return row }
@@ -624,7 +664,7 @@ function removeEmptyParents(start: string, stop: string): void {
       rmdirSync(current)
       fsyncDirectory(dirname(current))
     } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code
+      const code = errorCode(error)
       if (code === 'ENOENT' || code === 'ENOTEMPTY' || code === 'EEXIST') return
       throw error
     }
@@ -633,7 +673,7 @@ function removeEmptyParents(start: string, stop: string): void {
 }
 
 function fsyncDirectory(path: string): void { const fd = openSync(path, 'r'); try { fsyncSync(fd) } finally { closeSync(fd) } }
-function optionalLstat(path: string): Stats | undefined { try { return lstatSync(path) } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error } }
+function optionalLstat(path: string): Stats | undefined { try { return lstatSync(path) } catch (error) { if (errorCode(error) === 'ENOENT') return undefined; throw error } }
 function safeStateComponent(value: string, label: string): string { if (!/^[A-Za-z0-9._-]+$/u.test(value) || value === '.' || value === '..') throw new TrackerTransitionError(`${label} contains unsafe characters`); return value }
 function integer(value: unknown, label: string): number { const result = Number(value); if (!Number.isSafeInteger(result)) throw new TrackerTransitionError(`${label} must be an integer`); return result }
 function timestamp(value: unknown, label: string): number { const result = typeof value === 'string' ? Date.parse(value) : Number.NaN; if (!Number.isFinite(result)) throw new TrackerTransitionError(`${label} must be an ISO timestamp`); return result }
@@ -670,17 +710,97 @@ function assertStringRecord(value: unknown, label: string): asserts value is Rec
 function isJsonObject(value: unknown): value is Record<string, unknown> { return value !== null && typeof value === 'object' && !Array.isArray(value) }
 
 function hasOwn(value: object, property: PropertyKey): boolean { return Object.prototype.hasOwnProperty.call(value, property) }
+function errorRecord(error: unknown): Record<string, unknown> | undefined { return error !== null && typeof error === 'object' ? error as Record<string, unknown> : undefined }
+function errorCode(error: unknown): unknown { return errorRecord(error)?.['code'] }
 function isSqliteBusyOrLocked(error: unknown): boolean {
-  if (!error || typeof error !== 'object') return false
-  const sqliteError = error as { code?: unknown; errcode?: unknown }
-  if (sqliteError.code === 'SQLITE_BUSY' || sqliteError.code === 'SQLITE_LOCKED') return true
-  const numericCode = typeof sqliteError.errcode === 'number' ? sqliteError.errcode : typeof sqliteError.code === 'number' ? sqliteError.code : undefined
+  const record = errorRecord(error)
+  if (!record) return false
+  const code = record['code']
+  if (code === 'SQLITE_BUSY' || code === 'SQLITE_LOCKED') return true
+  const errcode = record['errcode']
+  const numericCode = typeof errcode === 'number' ? errcode : typeof code === 'number' ? code : undefined
   return numericCode !== undefined && ((numericCode & 0xff) === 5 || (numericCode & 0xff) === 6)
 }
 function sleep(milliseconds: number): void { Atomics.wait(TRACKER_RETRY_WAIT, 0, 0, milliseconds) }
+export function serializeDurablePolicy(policy: unknown): string { return serializeRedactedDurablePolicy(redactEnvironment(policy)) }
+export function serializeRedactedDurablePolicy(policy: unknown): string { return canonicalJson(policy) }
 function canonicalJson(value: unknown): string { return JSON.stringify(sortJson(value)) }
 function sortJson(value: unknown): unknown { if (Array.isArray(value)) return value.map(sortJson); if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, item]) => [key, sortJson(item)])); if (typeof value === 'number' && !Number.isFinite(value)) throw new TypeError('tracker JSON snapshots require finite numbers'); if (value === undefined || typeof value === 'bigint' || typeof value === 'function' || typeof value === 'symbol') throw new TypeError('tracker snapshots must be JSON values'); return value }
 function redactEnvironment(value: unknown): unknown { if (Array.isArray(value)) return value.map(redactEnvironment); if (!value || typeof value !== 'object') return value; return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, key.toLowerCase() === 'environment' && item && typeof item === 'object' && !Array.isArray(item) ? Object.fromEntries(Object.entries(item).map(([name, secret]) => [name, { sha256: createHash('sha256').update(String(secret)).digest('hex') }])) : redactEnvironment(item)])) }
 function identity(value: unknown): unknown { return value }
+
+function snapshotSqliteDatabase(path: string, snapshotPath: string): void {
+  const deadline = Date.now() + TRACKER_BUSY_TIMEOUT_MS
+  let retryDelayMs = 1
+  while (true) {
+    if (fileExists(`${path}-wal`)) { backupSqliteSnapshot(path, snapshotPath); return }
+    if (!fileExists(`${path}-journal`) && copyStableMainDatabase(path, snapshotPath) && !fileExists(`${path}-wal`) && !fileExists(`${path}-journal`)) return
+    rmSync(snapshotPath, { force: true })
+    if (fileExists(`${path}-wal`)) { backupSqliteSnapshot(path, snapshotPath); return }
+    const remainingMs = deadline - Date.now()
+    if (remainingMs <= 0) throw new TrackerBlockedError('tracker-busy', 'tracker snapshot is busy after the configured timeout')
+    sleep(Math.min(retryDelayMs, remainingMs))
+    retryDelayMs = Math.min(retryDelayMs * 2, 50)
+  }
+}
+
+function copyStableMainDatabase(path: string, snapshotPath: string): boolean {
+  const source = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+  let before: Stats
+  let bytes: Buffer
+  try {
+    before = fstatSync(source)
+    if (!before.isFile()) throw new TrackerTransitionError('tracker path is not a regular file')
+    bytes = readFileSync(source)
+    const after = fstatSync(source)
+    if (!sameFileIdentity(before, after) || after.size !== bytes.length) return false
+  } finally { closeSync(source) }
+  writeFileSync(snapshotPath, bytes, { mode: 0o400, flag: 'wx' })
+  const verification = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+  try {
+    const current = fstatSync(verification)
+    if (!sameFileIdentity(before, current) || current.size !== bytes.length) return false
+    return readFileSync(verification).equals(bytes)
+  } finally { closeSync(verification) }
+}
+
+function sameFileIdentity(left: Stats, right: Stats): boolean { return left.dev === right.dev && left.ino === right.ino }
+
+const SQLITE_BACKUP_PROGRAM = String.raw`
+const { DatabaseSync, backup } = require('node:sqlite');
+const [sourcePath, snapshotPath, timeout] = process.argv.slice(1);
+let source;
+(async () => {
+  try {
+    source = new DatabaseSync(sourcePath, { readOnly: true, enableDoubleQuotedStringLiterals: false, timeout: Number(timeout) });
+    source.exec('PRAGMA query_only = ON');
+    await backup(source, snapshotPath, { rate: 256 });
+  } catch (error) {
+    process.stderr.write(JSON.stringify({ code: error?.code, errcode: error?.errcode, message: error?.message }));
+    process.exitCode = 1;
+  } finally {
+    try { source?.close(); } catch {}
+  }
+})();`
+
+function backupSqliteSnapshot(path: string, snapshotPath: string): void {
+  const result = spawnSync(process.execPath, ['-e', SQLITE_BACKUP_PROGRAM, path, snapshotPath, String(TRACKER_BUSY_TIMEOUT_MS)], {
+    encoding: 'utf8', timeout: TRACKER_BUSY_TIMEOUT_MS, windowsHide: true,
+  })
+  if (result.status === 0 && !result.error) return
+  const details = parseBackupFailure(result.stderr)
+  const processMessage = errorRecord(result.error)?.['message']
+  const cause = Object.assign(new Error(typeof details['message'] === 'string' ? details['message'] : typeof processMessage === 'string' ? processMessage : 'SQLite backup failed'), details)
+  if (errorCode(result.error) === 'ETIMEDOUT' || isSqliteBusyOrLocked(details)) throw new TrackerBlockedError('tracker-busy', 'tracker snapshot is busy after the configured timeout', cause)
+  throw cause
+}
+
+function parseBackupFailure(stderr: string): Record<string, unknown> {
+  try { return errorRecord(JSON.parse(stderr || '{}')) ?? {} } catch { return {} }
+}
+
+
 function booleanInteger(value: unknown): number { return Number(value) }
 function tsvCell(value: SQLOutputValue | undefined): string { if (value === null || value === undefined) return ''; return String(value).replaceAll('\\', '\\\\').replaceAll('\t', '\\t').replaceAll('\r', '\\r').replaceAll('\n', '\\n') }
+
+function fileExists(path: string): boolean { try { lstatSync(path); return true } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error } }

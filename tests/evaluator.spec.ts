@@ -225,10 +225,20 @@ describe('inert frozen registration files', () => {
   it('never combines digest and inode from different descriptors during replacement', () => {
     const paths = fixture(); const normalized = registration(paths.root); const manifest = deriveRegistrationManifest(paths.root, normalized)
     const dataset = join(paths.root, 'data', 'train.json'); let replaced = false
-    expect(() => captureFrozenFileAttempt(paths.root, manifest, { afterOpen(path) {
-      if (replaced || path !== dataset) return
-      replaced = true; renameSync(dataset, `${dataset}.old`); writeFileSync(dataset, '{"rows":1}\n')
-    } })).toThrowError(expect.objectContaining({ name: 'TypeError', message: 'frozen registration file changed while it was read' }))
+    let error: unknown
+    try {
+      captureFrozenFileAttempt(paths.root, manifest, { afterOpen(path) {
+        if (replaced || path !== dataset) return
+        replaced = true; renameSync(dataset, `${dataset}.old`); writeFileSync(dataset, '{"rows":1}\n')
+      } })
+    } catch (caught) {
+      error = caught
+    }
+    expect(error).toBeInstanceOf(TypeError)
+    expect([
+      'frozen registration file changed while it was read',
+      'frozen registration file changed during evaluator startup',
+    ]).toContain((error as TypeError).message)
   })
 
   it('normalizes only algorithm-qualified external dataset identity without creating local manifest paths', () => {
@@ -238,9 +248,9 @@ describe('inert frozen registration files', () => {
     expect(Object.keys(deriveRegistrationManifest(paths.root, normalized))).toEqual(['bench/evaluate.mjs'])
     expect(() => normalizeEvaluatorRegistration({ ...normalized, dataset: { kind: 'external', digest: 'a'.repeat(64) as never } })).toThrow(/algorithm-qualified/)
   })
-  it('remains unreachable from production start, resume, controller, and recovery routes', () => {
+  it('remains unreachable from production index, controller, recovery, and retention routes', () => {
     const inertSymbols = /EVALUATOR_CONTRACT_GENERATION|deriveRegistrationManifestAtStartCommit|deriveRegistrationManifest|captureFrozenFileAttempt|revalidateFrozenFileAttempt|recomputeRegistrationManifest|validateFrozenCandidatePaths/
-    for (const path of ['src/index.ts', 'src/controller.ts', 'src/recovery.ts']) {
+    for (const path of ['src/index.ts', 'src/controller.ts', 'src/recovery.ts', 'src/retention.ts']) {
       const source = readFileSync(new URL(`../${path}`, import.meta.url), 'utf8')
       expect(source).not.toMatch(inertSymbols)
     }
@@ -520,7 +530,9 @@ describe('host-owned evaluator execution', () => {
   it('binds cwd and argv to the frozen normalized policy and immutable controller worktree identity', async () => {
     const mismatchedPolicy = options(fakeRuntime(), { evaluation: { command: 'node', args: ['evaluate.mjs'], cwd: 'bench' } })
     mismatchedPolicy.value.boundary = createEvaluatorBoundary(mismatchedPolicy.paths.root, { evaluation: { command: 'node', args: ['other.mjs'], cwd: 'bench' }, normalizedPolicySha256: 'a'.repeat(64), evaluatorFiles: ['bench/evaluate.mjs'] })
-    await expect(runEvaluator(mismatchedPolicy.value)).rejects.toThrow(/frozen normalized policy/)
+    const policyError = await runEvaluator(mismatchedPolicy.value).then(() => undefined, error => error)
+    expect(policyError).toBeInstanceOf(TypeError)
+    expect((policyError as TypeError).message).toBe('requested evaluation differs from captured evaluator boundary')
     expect(mismatchedPolicy.runtime.spec).toBeUndefined()
 
     const replaced = options()
@@ -638,7 +650,9 @@ describe('host-owned evaluator execution', () => {
     expect(Object.isFrozen(boundary.normalizedEvaluation.args)).toBe(true)
     setup.value.evaluation = original
     setup.value.boundary = boundary
-    await expect(runEvaluator(setup.value)).rejects.toThrow(/policy digest/)
+    const mutationError = await runEvaluator(setup.value).then(() => undefined, error => error)
+    expect(mutationError).toBeInstanceOf(TypeError)
+    expect((mutationError as TypeError).message).toBe('requested evaluation differs from captured evaluator boundary')
     expect(setup.runtime.spec).toBeUndefined()
   })
 

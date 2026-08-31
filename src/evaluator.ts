@@ -167,7 +167,7 @@ export function createEvaluatorBoundary(worktree: string, input: EvaluatorBounda
   return Object.freeze({
     worktree: captureEvaluatorWorktreeIdentity(root),
     normalizedEvaluation: evaluation,
-    evaluationSha256: evaluationDigest(evaluation),
+    evaluationSha256: evaluatorEvaluationSha256(evaluation),
     normalizedPolicySha256: input.normalizedPolicySha256,
     declaredFiles,
     ...(input.runId === undefined ? {} : { runId: input.runId }),
@@ -185,11 +185,26 @@ export function revalidateEvaluatorBoundary(worktree: string, boundary: Evaluato
 
 export function freezeEvaluatorProvenance(worktree: string, input: EvaluatorProvenanceInput): FrozenEvaluatorProvenance {
   const root = canonicalWorktree(worktree)
+  const evaluatorFileHashes: Record<string, string> = Object.create(null) as Record<string, string>
+  for (const file of [...(input.evaluatorFiles ?? [])].sort()) evaluatorFileHashes[file] = sha256(readContainedFile(root, file, 'evaluator file'))
+  return buildEvaluatorProvenance(input, evaluatorFileHashes)
+}
+
+export function freezeEvaluatorProvenanceFromManifest(input: EvaluatorProvenanceInput, manifest: RegistrationManifest): FrozenEvaluatorProvenance {
+  const normalizedManifest = normalizeRegistrationManifest(manifest)
+  const evaluatorFileHashes: Record<string, string> = Object.create(null) as Record<string, string>
+  for (const file of [...(input.evaluatorFiles ?? [])].sort()) {
+    const digest = normalizedManifest[file]
+    if (digest === undefined) throw new TypeError(`registration manifest is missing evaluator file: ${file}`)
+    evaluatorFileHashes[file] = digest
+  }
+  return buildEvaluatorProvenance(input, evaluatorFileHashes)
+}
+
+function buildEvaluatorProvenance(input: EvaluatorProvenanceInput, evaluatorFileHashes: Readonly<Record<string, string>>): FrozenEvaluatorProvenance {
   const secrets = secretsOf(input.environment)
   const fileHashes: Record<string, string> = Object.create(null) as Record<string, string>
-  for (const file of [...(input.evaluatorFiles ?? [])].sort()) {
-    assignDurableKey(fileHashes, redact(file, secrets), sha256(readContainedFile(root, file, 'evaluator file')), 'evaluator file path')
-  }
+  for (const [file, digest] of Object.entries(evaluatorFileHashes).sort(([left], [right]) => left.localeCompare(right))) assignDurableKey(fileHashes, redact(file, secrets), digest, 'evaluator file path')
   const value = {
     evaluation: durableSerialize(input.evaluation, secrets),
     evaluatorFileHashes: fileHashes,
@@ -363,7 +378,7 @@ function assertBoundaryIdentity(worktree: string, boundary: EvaluatorBoundaryIde
 }
 
 function assertNormalizedEvaluation(requested: EvaluatorArgv, capturedDigest: string): void {
-  if (evaluationDigest(requested) !== capturedDigest) throw new TypeError('evaluator argv/cwd does not match the frozen normalized policy digest')
+  if (evaluatorEvaluationSha256(requested) !== capturedDigest) throw new TypeError('requested evaluation differs from captured evaluator boundary')
 }
 
 function persistSafely(action: () => void, secrets: readonly string[]): void {
@@ -482,7 +497,7 @@ function safeErrorMessage(error: unknown, secrets: readonly string[]): string {
   return redact(error instanceof Error ? error.message : String(error), secrets)
 }
 
-function evaluationDigest(evaluation: EvaluatorArgv): string {
+export function evaluatorEvaluationSha256(evaluation: EvaluatorArgv): string {
   return sha256(canonicalJson({ command: evaluation.command, args: [...evaluation.args], ...(evaluation.cwd === undefined ? {} : { cwd: evaluation.cwd }) }))
 }
 

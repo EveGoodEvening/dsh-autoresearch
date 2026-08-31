@@ -81,7 +81,7 @@ export function normalizeEvaluatorRegistration(value: EvaluatorRegistration): Ev
   const cwd = value.cwd === undefined ? undefined : normalizedRepositoryRelativePath(value.cwd, 'cwd')
   const metricName = normalizedRegistrationText(value.metricName, 'metricName')
   if (value.metricDirection !== 'minimize' && value.metricDirection !== 'maximize') throw new TypeError('metricDirection must be minimize or maximize')
-  const environment = Object.fromEntries(Object.entries(value.environment).sort(([a], [b]) => compareRegistrationText(a, b)).map(([name, item]) => [normalizedEnvironmentName(name), normalizedRegistrationText(item, `environment.${name}`, true)]))
+  const environment = normalizeRegistrationEnvironment(value.environment)
   const declarations = normalizeFrozenFileDeclarations({
     evaluatorFiles: value.evaluatorFiles,
     datasetFiles: value.dataset.kind === 'local' ? value.dataset.files : [],
@@ -89,6 +89,11 @@ export function normalizeEvaluatorRegistration(value: EvaluatorRegistration): Ev
   const evaluatorFiles = declarations.evaluatorFiles
   const dataset = normalizeDatasetRegistration(value.dataset)
   return { evaluatorId, command, args, ...(cwd === undefined ? {} : { cwd }), environment, metricName, metricDirection: value.metricDirection, evaluatorFiles, dataset }
+}
+
+/** Normalize an explicit, closed evaluator environment into stable key order. */
+export function normalizeRegistrationEnvironment(value: Readonly<Record<string, string>> = {}): Readonly<Record<string, string>> {
+  return Object.fromEntries(Object.entries(value).sort(([a], [b]) => compareRegistrationText(a, b)).map(([name, item]) => [normalizedEnvironmentName(name), normalizedRegistrationText(item, `environment.${name}`, true)]))
 }
 
 export function normalizeRegistrationManifest(value: RegistrationManifest): RegistrationManifest {
@@ -201,19 +206,19 @@ const ACTIVATION_COMMON_PARAMETERS = {
   repository: { type: 'string', description: 'Repository or cwd; defaults to the initiating agent cwd.' },
   objective: { type: 'string', required: true, description: 'Immutable optimization objective.' },
   constraints: { type: 'array', items: { type: 'string' }, description: 'Immutable advisory proposal constraints.' },
-  mutable_globs: { type: 'array', required: true, minItems: 1, items: { type: 'string' }, description: 'Narrow relative mutable paths or globs.' },
-  timeout_ms: { type: 'number', minimum: 1, maximum: Number.MAX_SAFE_INTEGER, multipleOf: 1, description: 'Per-attempt timeout bounded by deployment policy.' },
-  max_experiments: { type: 'number', minimum: 1, maximum: Number.MAX_SAFE_INTEGER, multipleOf: 1, description: 'Candidate experiment cap; baseline is separate.' },
+  mutable_globs: { type: 'array', required: true, items: { type: 'string' }, description: 'Narrow relative mutable paths or globs.' },
+  timeout_ms: { type: 'number', description: 'Per-attempt positive safe integer bounded by deployment policy.' },
+  max_experiments: { type: 'number', description: 'Positive safe integer candidate experiment cap; baseline is separate.' },
   target: { type: 'number', description: 'Optional finite stopping threshold.' },
   mode: { type: 'string', enum: ['background', 'foreground'], description: 'Defaults to background.' },
 } as const
 
-/** Inert activation-ready schema. Chunk 04 is responsible for production registration. */
+/** Activation parameter map for the tool runtime's implicit object root. The decoder enforces the exact start/resume union. */
 export const ACTIVATION_AUTORESEARCH_TOOL_SCHEMA = {
-  oneOf: [
-    { type: 'object', additionalProperties: false, properties: { ...ACTIVATION_COMMON_PARAMETERS, run_tag: { type: 'string', required: true }, evaluator_id: { type: 'string', required: true } } },
-    { type: 'object', additionalProperties: false, properties: { ...ACTIVATION_COMMON_PARAMETERS, resume_run_id: { type: 'string', required: true } } },
-  ],
+  ...ACTIVATION_COMMON_PARAMETERS,
+  run_tag: { type: 'string', description: 'Required with evaluator_id for a new run; forbidden when resume_run_id is present.' },
+  evaluator_id: { type: 'string', description: 'Required with run_tag for a new run; forbidden when resume_run_id is present.' },
+  resume_run_id: { type: 'string', description: 'Required to resume a durable run; mutually exclusive with run_tag and evaluator_id.' },
 } as const
 
 const ACTIVATION_COMMON_KEYS = new Set(['repository', 'objective', 'constraints', 'mutable_globs', 'timeout_ms', 'max_experiments', 'target', 'mode'])

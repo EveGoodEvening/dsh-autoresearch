@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -93,6 +93,89 @@ describe('durable SQLite tracker', () => {
     expect(reopened.getRun('run-1')).toMatchObject({ repository_id: 'repo-identity', start_commit: SHA, provenance_sha256: HASH })
     reopened.close()
   })
+
+  it('reads a quiescent main database without creating or changing source sidecars', () => {
+    const path = fixturePath('quiescent-snapshot.sqlite')
+    const seed = DurableTracker.open(path); seed.createRun(initial()); seed.database.exec('PRAGMA wal_checkpoint(TRUNCATE)'); seed.close()
+    rmSync(`${path}-wal`, { force: true }); rmSync(`${path}-shm`, { force: true })
+    const mainBefore = readFileSync(path)
+    const sidecarExistenceBefore = [`${path}-wal`, `${path}-shm`].map(existsSync)
+    const snapshot = DurableTracker.openReadOnly(path)
+    expect(snapshot.getRun('run-1')).toMatchObject({ repository_id: 'repo-identity' })
+    snapshot.close()
+    expect(readFileSync(path)).toEqual(mainBefore)
+    expect([`${path}-wal`, `${path}-shm`].map(existsSync)).toEqual(sidecarExistenceBefore)
+  })
+
+  it('takes untorn committed WAL snapshots during writer/checkpoint churn without changing database or WAL bytes', async () => {
+    const path = fixturePath('snapshot.sqlite')
+    const seed = DurableTracker.open(path)
+    seed.database.exec('CREATE TABLE snapshot_pair (id INTEGER PRIMARY KEY, generation INTEGER NOT NULL) STRICT; INSERT INTO snapshot_pair VALUES (1, 0), (2, 0)')
+    const stop = new SharedArrayBuffer(4)
+    const writer = new Worker(`
+      const { parentPort, workerData } = require('node:worker_threads');
+      const { DatabaseSync } = require('node:sqlite');
+      const gate = new Int32Array(workerData.stop);
+      const db = new DatabaseSync(workerData.path);
+      db.exec('PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000');
+      parentPort.postMessage({ ready: true });
+      let generation = 0;
+      while (Atomics.load(gate, 0) === 0) {
+        generation += 1;
+        db.exec('BEGIN IMMEDIATE');
+        db.prepare('UPDATE snapshot_pair SET generation = ?').run(generation);
+        db.exec('COMMIT');
+        if (generation % 7 === 0) db.exec('PRAGMA wal_checkpoint(PASSIVE)');
+      }
+      db.close(); parentPort.postMessage(generation);
+    `, { eval: true, workerData: { path, stop } })
+    await new Promise<void>((resolve, reject) => { writer.once('message', () => resolve()); writer.once('error', reject) })
+    try {
+      for (let index = 0; index < 20; index += 1) {
+        const snapshot = DurableTracker.openReadOnly(path)
+        const rows = snapshot.database.prepare('SELECT generation FROM snapshot_pair ORDER BY id').all() as { generation: number }[]
+        expect(rows).toHaveLength(2)
+        expect(rows[0]!.generation).toBe(rows[1]!.generation)
+        snapshot.close()
+      }
+    } finally {
+      Atomics.store(new Int32Array(stop), 0, 1)
+      await new Promise<void>((resolve, reject) => { writer.once('message', () => resolve()); writer.once('error', reject) })
+    }
+    seed.database.exec('PRAGMA wal_checkpoint(PASSIVE)')
+    const sourceBefore = readFileSync(path)
+    const walBefore = existsSync(`${path}-wal`) ? readFileSync(`${path}-wal`) : null
+    const sidecarExistenceBefore = [`${path}-wal`, `${path}-shm`].map(existsSync)
+    const snapshot = DurableTracker.openReadOnly(path)
+    snapshot.close()
+    expect(readFileSync(path)).toEqual(sourceBefore)
+    expect(existsSync(`${path}-wal`) ? readFileSync(`${path}-wal`) : null).toEqual(walBefore)
+    expect([`${path}-wal`, `${path}-shm`].map(existsSync)).toEqual(sidecarExistenceBefore)
+    seed.close()
+  })
+
+  it('bounds online-backup lock waits and classifies busy separately from invalid data', async () => {
+    const path = fixturePath('busy-snapshot.sqlite')
+    const seed = DurableTracker.open(path); seed.createRun(initial()); seed.close()
+    const release = new SharedArrayBuffer(4)
+    const holder = new Worker(`
+      const { parentPort, workerData } = require('node:worker_threads');
+      const { DatabaseSync } = require('node:sqlite');
+      const gate = new Int32Array(workerData.release);
+      const db = new DatabaseSync(workerData.path);
+      db.exec("PRAGMA journal_mode = DELETE; BEGIN EXCLUSIVE; UPDATE schema_metadata SET created_at = created_at || '-locked'");
+      parentPort.postMessage('locked'); Atomics.wait(gate, 0, 0); db.exec('ROLLBACK'); db.close(); parentPort.postMessage('released');
+    `, { eval: true, workerData: { path, release } })
+    await new Promise<void>((resolve, reject) => { holder.once('message', () => resolve()); holder.once('error', reject) })
+    try {
+      expect(() => DurableTracker.openReadOnly(path)).toThrowError(expect.objectContaining({ status: 'blocked', code: 'tracker-busy' }))
+    } finally {
+      Atomics.store(new Int32Array(release), 0, 1); Atomics.notify(new Int32Array(release), 0)
+      await new Promise<void>((resolve, reject) => { holder.once('message', () => resolve()); holder.once('error', reject) })
+    }
+    const invalid = fixturePath('invalid-snapshot.sqlite'); writeFileSync(invalid, 'not sqlite', { mode: 0o600 })
+    expect(() => DurableTracker.openReadOnly(invalid)).toThrowError(expect.objectContaining({ status: 'blocked', code: 'tracker-schema-invalid' }))
+  }, 10_000)
 
   it('migrates under a write transaction and classifies newer, malformed, and corrupt schemas', () => {
     const path = fixturePath(); const seed = new DatabaseSync(path)
@@ -399,7 +482,7 @@ describe('durable SQLite tracker', () => {
     expect(() => registrationFingerprint(registration, { 'scripts/score.mjs': HASH, 'data/./train.json': HASH })).toThrow(/component/u)
   })
 
-  it('atomically writes and strictly reads a complete inert registration identity', () => {
+  it('atomically writes and strictly reads a complete registration identity', () => {
     const tracker = DurableTracker.open(fixturePath())
     const registration: EvaluatorRegistration = { evaluatorId: 'judge', command: 'node', args: ['score.mjs'], environment: {}, metricName: 'score', metricDirection: 'maximize', evaluatorFiles: ['scripts/score.mjs'], dataset: { kind: 'local', files: ['data/train.json'] } }
     const identity = tracker.createRegisteredRun({ ...initial(), registration, manifest: { 'data/train.json': HASH, 'scripts/score.mjs': 'c'.repeat(64) } })
