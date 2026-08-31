@@ -29,7 +29,8 @@ export interface ChangedPath { readonly path: string; readonly staged: boolean; 
 export interface CandidateSnapshot { readonly parentCommit: string; readonly changed: readonly ChangedPath[]; readonly ignoredUntracked: readonly string[]; readonly gitConfig: GitConfigBaseline }
 export interface GitConfigSnapshot { readonly logicalPath: string; readonly path: string; readonly exists: boolean; readonly sha256?: string }
 export interface GitConfigBaseline { readonly files: readonly GitConfigSnapshot[]; readonly allowedPaths: readonly string[] }
-export interface CandidateCommit { readonly parentCommit: string; readonly candidateCommit: string; readonly auditRef: string; readonly changedPaths: readonly string[] }
+export interface CandidateDiffStats { readonly files: number; readonly insertions: number; readonly deletions: number; readonly binaryFiles: number }
+export interface CandidateCommit { readonly parentCommit: string; readonly candidateCommit: string; readonly auditRef: string; readonly changedPaths: readonly string[]; readonly diffStats?: CandidateDiffStats }
 export interface PreparedCandidateTree extends CandidateCommit {}
 export interface RunGitInspection {
   readonly acceptedCommit?: string
@@ -292,7 +293,8 @@ export async function prepareCandidateTree(ctx: GitContext, executable: string, 
     const parentDate = (await invoke(['show', '-s', '--format=%aI', snapshot.parentCommit])).stdout.trim()
     const commitEnv = { ...indexEnv, GIT_AUTHOR_NAME: 'dsh-autoresearch', GIT_AUTHOR_EMAIL: 'autoresearch@localhost', GIT_COMMITTER_NAME: 'dsh-autoresearch', GIT_COMMITTER_EMAIL: 'autoresearch@localhost', GIT_AUTHOR_DATE: parentDate, GIT_COMMITTER_DATE: parentDate }
     const candidateCommit = (await invoke(['commit-tree', tree, '-p', snapshot.parentCommit, '-m', `autoresearch candidate ${experimentId}`], commitEnv)).stdout.trim()
-    const prepared = { parentCommit: snapshot.parentCommit, candidateCommit, auditRef, changedPaths: [...validatedPaths] }
+    const diffStats = parseDiffStats((await invoke(['diff', '--no-renames', '--numstat', '-z', snapshot.parentCommit, candidateCommit, '--', ...validatedPaths.map(path => `:(literal)${path}`)])).stdout)
+    const prepared = { parentCommit: snapshot.parentCommit, candidateCommit, auditRef, changedPaths: [...validatedPaths], diffStats }
     await verifyCandidateTree(ctx, executable, worktree, experimentId, snapshot, prepared, options)
     return prepared
   } finally { await rm(directory, { recursive: true, force: true }) }
@@ -310,7 +312,8 @@ export async function commitCandidate(ctx: GitContext, executable: string, workt
   const auditRef = `${identity.candidateRefPrefix}${safeIdentity(experimentId, 'experimentId')}`
   const existingAudit = await readOptionalRef(ctx, executable, auditRef, worktree, options)
   if (existingAudit) {
-    const recovered = { parentCommit: snapshot.parentCommit, candidateCommit: existingAudit, auditRef, changedPaths: [...validatedPaths] }
+    const diffStats = parseDiffStats((await runGit(ctx, executable, ['diff', '--no-renames', '--numstat', '-z', snapshot.parentCommit, existingAudit, '--', ...validatedPaths.map(path => `:(literal)${path}`)], { ...options, cwd: worktree })).stdout)
+    const recovered = { parentCommit: snapshot.parentCommit, candidateCommit: existingAudit, auditRef, changedPaths: [...validatedPaths], diffStats }
     await verifyCandidateTree(ctx, executable, worktree, experimentId, snapshot, recovered, options)
     return recovered
   }
@@ -526,3 +529,17 @@ async function verifyPreparedWorktree(invoke: (args: readonly string[]) => Promi
 export async function verifyExactWorktree(ctx: GitContext, executable: string, worktree: string, commit: string, options: Omit<GitCommandOptions, 'cwd'>): Promise<void> { requireSha(commit, 'verified commit'); await rejectExecutableGitConfig(ctx, executable, worktree, options); const invoke = (args: readonly string[], env?: Readonly<Record<string, string | undefined>>) => runGit(ctx, executable, args, { ...options, cwd: worktree, ...(env ? { env: env as GitEnvironmentOverrides } : {}) }); const head = (await invoke(['rev-parse', '--verify', 'HEAD^{commit}'])).stdout.trim(); if (head !== commit) throw new GitBoundaryError('git-verify-head', 'Worktree HEAD does not match verified commit'); await verifyPreparedWorktree(invoke, commit) }
 async function isClean(invoke: (args: readonly string[]) => Promise<GitCommandResult>): Promise<boolean> { return (await invoke(['status', '--porcelain=v1', '-z'])).stdout.length === 0 }
 async function requireClean(invoke: (args: readonly string[]) => Promise<GitCommandResult>): Promise<void> { if (!await isClean(invoke)) throw new GitBoundaryError('accepted-reconcile-dirty', 'Run worktree is not clean after reconciliation') }
+
+function parseDiffStats(value: string): CandidateDiffStats {
+  let files = 0; let insertions = 0; let deletions = 0; let binaryFiles = 0
+  for (const record of value.split('\0')) {
+    if (record.length === 0) continue
+    const first = record.indexOf('\t'); const second = record.indexOf('\t', first + 1)
+    if (first < 1 || second < first + 2) throw new GitBoundaryError('candidate-diff-invalid', 'Git returned malformed deterministic diff statistics')
+    const added = record.slice(0, first); const removed = record.slice(first + 1, second)
+    files += 1
+    if (added === '-' || removed === '-') binaryFiles += 1
+    else { const addCount = Number(added); const removeCount = Number(removed); if (!Number.isSafeInteger(addCount) || addCount < 0 || !Number.isSafeInteger(removeCount) || removeCount < 0) throw new GitBoundaryError('candidate-diff-invalid', 'Git returned invalid deterministic diff statistics'); insertions += addCount; deletions += removeCount }
+  }
+  return { files, insertions, deletions, binaryFiles }
+}

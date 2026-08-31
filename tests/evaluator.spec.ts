@@ -343,8 +343,10 @@ describe('host-owned evaluator execution', () => {
 
     const failing = options(fakeRuntime({ spawnError: new Error('cannot launch abcdef abc') }), { environment })
     const failure = await runEvaluator(failing.value)
-    expect(failure).toMatchObject({ kind: 'failed', message: 'cannot launch [REDACTED] [REDACTED]' })
-    expect(failing.value.persistence.outcome?.[0]).toMatchObject({ kind: 'failed', message: 'cannot launch [REDACTED] [REDACTED]', exit: { failureMessage: 'cannot launch [REDACTED] [REDACTED]' } })
+    expect(failure).toMatchObject({ kind: 'failed', message: 'evaluator provider spawn failed' })
+    expect(failing.value.persistence.outcome?.[0]).toMatchObject({ kind: 'failed', message: 'evaluator provider spawn failed', exit: { failureMessage: 'evaluator provider spawn failed' } })
+    expect(JSON.stringify(failure)).not.toContain('abc')
+    expect(JSON.stringify(failing.value.persistence.outcome)).not.toContain('abc')
     expect(JSON.stringify(failing.value.persistence.intent)).not.toContain('[REDACTED]def')
     expect(JSON.stringify(failing.value.persistence.outcome)).not.toContain('[REDACTED]def')
   })
@@ -395,6 +397,14 @@ describe('host-owned evaluator execution', () => {
     expect(setup.value.persistence.events).toEqual(['intent', 'outcome'])
     expect(setup.value.persistence.observed).toBeUndefined()
     expect(setup.value.persistence.outcome?.[0]).toMatchObject({ kind: 'failed', code: 'cancelled', exit: { cancelled: true, exitCode: null, signal: null } })
+  })
+
+  it('never persists arbitrary provider spawn exception text', async () => {
+    const secretProviderText = 'ENOENT /home/alice/private-token-file'
+    const setup = options(fakeRuntime({ spawnError: new Error(secretProviderText) }))
+    const result = await runEvaluator(setup.value)
+    expect(result).toMatchObject({ kind: 'failed', code: 'spawn', message: 'evaluator provider spawn failed', exit: { failureCode: 'spawn', failureMessage: 'evaluator provider spawn failed' } })
+    expect(JSON.stringify(setup.value.persistence.outcome)).not.toContain(secretProviderText)
   })
 
   it('atomically observes cancellation that races listener registration without spawning', async () => {
@@ -611,7 +621,9 @@ describe('host-owned evaluator execution', () => {
 
     const throwing = options(fakeRuntime(), { environment: { ORDINARY: secret } })
     throwing.value.persistence.persistSpawnObserved = () => { throw new Error(secret) }
-    await expect(runEvaluator(throwing.value)).resolves.toMatchObject({ kind: 'failed', code: 'spawn', message: '[REDACTED]' })
+    const throwingResult = await runEvaluator(throwing.value)
+    expect(throwingResult).toMatchObject({ kind: 'failed', code: 'spawn', message: 'evaluator provider spawn failed' })
+    expect(JSON.stringify(throwingResult)).not.toContain(secret)
     const outcomeThrowing = options(fakeRuntime(), { environment: { ORDINARY: secret } })
     outcomeThrowing.value.persistence.persistAttemptOutcome = () => { throw new Error(secret) }
     await expect(runEvaluator(outcomeThrowing.value)).rejects.toThrow('[REDACTED]')

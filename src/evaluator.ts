@@ -350,7 +350,7 @@ export async function runEvaluator(options: EvaluatorRunOptions): Promise<Evalua
     timedOut: cause === 'timeout', cancelled: cause === 'cancelled', processTreeQuiescent: quiescent,
   }
   let durableOutcome: EvaluatorOutcome
-  if (spawnFailure !== undefined) durableOutcome = failedOutcome('spawn', safeErrorMessage(spawnFailure, secrets), facts)
+  if (spawnFailure !== undefined) durableOutcome = failedOutcome('spawn', 'evaluator provider spawn failed', facts)
   else if (cause === 'cancelled') durableOutcome = failedOutcome('cancelled', 'evaluator cancelled', facts)
   else if (cause === 'timeout') durableOutcome = failedOutcome('timeout', 'evaluator timed out', facts)
   else if (!quiescent) durableOutcome = failedOutcome('signal', 'evaluator process tree did not become quiescent', facts)
@@ -359,7 +359,7 @@ export async function runEvaluator(options: EvaluatorRunOptions): Promise<Evalua
   else if (stdoutRead === undefined || stdoutRead.lossy) durableOutcome = failedOutcome('output-limit', 'evaluator stdout exceeded its authoritative parse limit', facts)
   else {
     try { durableOutcome = measuredOutcome(parseFinalLineMetric(stdoutRead.text, options.metricName), facts) }
-    catch (error) { durableOutcome = failedOutcome('metric-protocol', safeErrorMessage(error, secrets), facts) }
+    catch { durableOutcome = failedOutcome('metric-protocol', 'evaluator metric protocol rejected', facts) }
   }
   return persistOutcome(durableOutcome, artifacts)
 }

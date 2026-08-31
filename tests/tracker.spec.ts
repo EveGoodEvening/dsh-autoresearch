@@ -67,6 +67,7 @@ function initial(runId = 'run-1') {
 function artifact(id = 'stdout', overrides: Record<string, unknown> = {}) {
   return { artifactId: id, runId: 'run-1', experimentId: 'exp-0', attemptId: 'attempt-1', kind: id, location: `artifacts/${id}.txt`, sizeBytes: 4, sha256: HASH, owner: 'evaluator', retention: 'retain', ...overrides }
 }
+const annotation = { trust: 'untrusted-child-annotation' as const, redaction: 'exact-configured-secrets-only' as const, hypothesis: 'replace the slow scan', intendedEdits: ['src/scan.ts'], implementationSummary: 'used an indexed lookup' }
 function createRunningExperiment(tracker: DurableTracker, runId = 'run-1', experimentId = 'exp-0'): void {
   tracker.transitionRun(runId, 'baseline-running')
   tracker.createExperiment({ experimentId, runId, ordinal: 0, kind: 'baseline', parentCommit: SHA, command: 'node', args: ['evaluate.mjs'] })
@@ -199,7 +200,7 @@ describe('durable SQLite tracker', () => {
     const path = fixturePath('version-seven-readonly.sqlite')
     const seed = DurableTracker.open(path); seed.close()
     const versionSeven = new DatabaseSync(path)
-    versionSeven.exec('DROP TRIGGER run_registrations_presence_monotonic; UPDATE schema_metadata SET version = 7 WHERE singleton = 1')
+    versionSeven.exec('DROP TRIGGER experiments_annotation_immutable; ALTER TABLE experiments DROP COLUMN host_facts_json; ALTER TABLE experiments DROP COLUMN annotation_json; DROP TRIGGER run_registrations_presence_monotonic; UPDATE schema_metadata SET version = 7 WHERE singleton = 1')
     versionSeven.close()
     const snapshot = DurableTracker.openReadOnly(path)
     expect(snapshot.schemaVersion()).toBe(7)
@@ -226,7 +227,7 @@ describe('durable SQLite tracker', () => {
     tracker.createRegisteredRun({ ...initial(), registration, manifest: {} })
     tracker.close()
     const versionSeven = new DatabaseSync(path)
-    versionSeven.exec('DROP TRIGGER run_registrations_presence_monotonic; UPDATE schema_metadata SET version = 7 WHERE singleton = 1')
+    versionSeven.exec('DROP TRIGGER experiments_annotation_immutable; ALTER TABLE experiments DROP COLUMN host_facts_json; ALTER TABLE experiments DROP COLUMN annotation_json; DROP TRIGGER run_registrations_presence_monotonic; UPDATE schema_metadata SET version = 7 WHERE singleton = 1')
     versionSeven.close()
     const migrated = DurableTracker.open(path)
     expect(migrated.schemaVersion()).toBe(TRACKER_SCHEMA_VERSION)
@@ -242,6 +243,7 @@ describe('durable SQLite tracker', () => {
       attempts_immutable_intent: 'attempts',
       attempts_immutable_outcome: 'attempts',
       run_registrations_immutable: 'run_registrations',
+      experiments_annotation_immutable: 'experiments',
       run_registrations_presence_monotonic: 'run_registrations',
     }
     for (const [trigger, table] of Object.entries(triggerTables)) {
@@ -439,6 +441,67 @@ describe('durable SQLite tracker', () => {
     }
   })
 
+  it('atomically persists bounded untrusted annotations after snapshot and appends Host facts idempotently', () => {
+    const path = fixturePath(); const tracker = DurableTracker.open(path); tracker.createRun(initial()); tracker.transitionRun('run-1', 'baseline-running'); tracker.transitionRun('run-1', 'ready', { best: { metric: 1, commit: SHA, experimentId: 'baseline' } })
+    expect(() => tracker.prepareCandidate({ experimentId: 'candidate-1', runId: 'run-1', ordinal: 1, kind: 'candidate', parentCommit: SHA, command: 'node', args: [], annotation: { ...annotation, trust: 'trusted' as never } }, {})).toThrow(/explicitly untrusted/)
+    expect(tracker.database.prepare("SELECT COUNT(*) AS count FROM experiments WHERE kind='candidate'").get()).toEqual({ count: 0 })
+    tracker.prepareCandidate({ experimentId: 'candidate-1', runId: 'run-1', ordinal: 1, kind: 'candidate', parentCommit: SHA, command: 'node', args: [], annotation }, { intent: { kind: 'candidate-snapshot', validatedPaths: ['src/scan.ts'] } })
+    const commit = 'c'.repeat(40); const facts = { changedPaths: ['src/scan.ts'], diffStats: { files: 1, insertions: 3, deletions: 1, binaryFiles: 0 } }
+    tracker.recordCandidateCommit('candidate-1', commit, facts); tracker.recordCandidateCommit('candidate-1', commit, facts)
+    expect(() => tracker.recordCandidateCommit('candidate-1', commit, { ...facts, changedPaths: ['other.ts'] })).toThrow(/conflict/)
+    tracker.appendFailureResearchFacts('candidate-1', { code: 'exit', exitCode: 17 }); tracker.appendFailureResearchFacts('candidate-1', { code: 'exit', exitCode: 17 })
+    expect(() => tracker.appendFailureResearchFacts('candidate-1', { code: 'timeout', timedOut: true })).toThrow(/conflict/)
+    expect(tracker.researchHistory('run-1')).toEqual([{ ordinal: 1, experimentId: 'candidate-1', state: 'baseline-pending', candidateCommit: commit, annotation, hostFacts: { candidateCommit: commit, changedPaths: ['src/scan.ts'], diffStats: facts.diffStats, failure: { code: 'exit', exitCode: 17 } }, artifacts: 'unavailable' }])
+    expect(() => tracker.database.prepare("UPDATE experiments SET annotation_json='{}' WHERE experiment_id='candidate-1'").run()).toThrow(/immutable/)
+    tracker.close(); const reopened = DurableTracker.open(path); expect(reopened.researchHistory('run-1')[0]).toMatchObject({ annotation, hostFacts: { candidateCommit: commit } }); reopened.close()
+  })
+
+  it('redacts exact configured secrets from annotations and changed filenames before history and TSV persistence', () => {
+    const path = fixturePath(); const tracker = DurableTracker.open(path); tracker.createRun(initial()); tracker.transitionRun('run-1', 'baseline-running'); tracker.transitionRun('run-1', 'ready', { best: { metric: 1, commit: SHA, experimentId: 'baseline' } })
+    const secret = 'configured-secret'; const transformed = 'CONFIGURED-SECRET'
+    tracker.prepareCandidate({ experimentId: 'candidate-1', runId: 'run-1', ordinal: 1, kind: 'candidate', parentCommit: SHA, command: 'node', args: [], annotation: { ...annotation, hypothesis: `exact ${secret}; transformed ${transformed}`, intendedEdits: [`src/${secret}.ts`], implementationSummary: `summary ${secret}` }, redactionSecrets: [secret] }, {})
+    tracker.recordCandidateCommit('candidate-1', 'c'.repeat(40), { changedPaths: [`src/${secret}.ts`, `src/${transformed}.ts`] }, [secret])
+    const durable = JSON.parse(String(tracker.database.prepare('SELECT annotation_json FROM experiments WHERE experiment_id = ?').get('candidate-1')?.['annotation_json']))
+    expect(durable).toMatchObject({ hypothesis: `exact [REDACTED]; transformed ${transformed}`, intendedEdits: ['src/[REDACTED].ts'], implementationSummary: 'summary [REDACTED]', redaction: 'exact-configured-secrets-only' })
+    expect(tracker.researchHistory('run-1')[0]?.hostFacts.changedPaths).toEqual([`src/${transformed}.ts`, 'src/[REDACTED].ts'])
+    const exportPath = join(path, '..', 'redacted.tsv'); tracker.exportTsv('run-1', exportPath)
+    const [header, row] = readFileSync(exportPath, 'utf8').trimEnd().split('\n'); const columns = header!.split('\t'); const exported = Object.fromEntries(columns.map((column, index) => [column, row!.split('\t')[index]]))
+    expect(JSON.parse(exported['annotation_json']!)).toEqual(durable)
+    expect(JSON.parse(exported['host_facts_json']!).changedPaths).toEqual([`src/${transformed}.ts`, 'src/[REDACTED].ts'])
+    tracker.close(); const reopened = DurableTracker.open(path); expect(reopened.researchHistory('run-1')[0]?.hostFacts.changedPaths).toEqual([`src/${transformed}.ts`, 'src/[REDACTED].ts']); reopened.close()
+  })
+
+  it('reports tracker-side history truncation newest-first across reopen', () => {
+    const path = fixturePath(); const tracker = DurableTracker.open(path); tracker.createRun(initial()); tracker.transitionRun('run-1', 'baseline-running'); tracker.transitionRun('run-1', 'ready', { best: { metric: 1, commit: SHA, experimentId: 'baseline' } })
+    for (let ordinal = 1; ordinal <= 21; ordinal += 1) tracker.database.prepare(`INSERT INTO experiments (experiment_id, run_id, ordinal, kind, parent_commit, state, command, args_json, annotation_json, created_at, updated_at) VALUES (?, 'run-1', ?, 'candidate', ?, 'rejected', 'node', '[]', ?, ?, ?)`).run(`candidate-${ordinal}`, ordinal, SHA, JSON.stringify({ ...annotation, hypothesis: `candidate ${ordinal}` }), new Date(ordinal).toISOString(), new Date(ordinal).toISOString())
+    const page = tracker.researchHistoryPage('run-1')
+    expect(page.olderEntriesTruncated).toBe(true); expect(page.entries).toHaveLength(20); expect(page.entries.map(entry => entry.ordinal)).toEqual(Array.from({ length: 20 }, (_, index) => 21 - index))
+    tracker.close(); const reopened = DurableTracker.open(path); const reopenedPage = reopened.researchHistoryPage('run-1'); expect(reopenedPage.entries).toHaveLength(20); expect(reopenedPage.entries.map(entry => entry.ordinal)).toEqual(Array.from({ length: 20 }, (_, index) => 21 - index)); expect(reopenedPage.olderEntriesTruncated).toBe(true); reopened.close()
+  })
+
+  it('renders newest-first migrated unavailable fields and in-progress pruning honestly across reopen', () => {
+    const path = fixturePath(); const tracker = DurableTracker.open(path); tracker.createRun(initial()); tracker.transitionRun('run-1', 'baseline-running'); tracker.transitionRun('run-1', 'ready', { best: { metric: 1, commit: SHA, experimentId: 'baseline' } })
+    tracker.prepareCandidate({ experimentId: 'candidate-1', runId: 'run-1', ordinal: 1, kind: 'candidate', parentCommit: SHA, command: 'node', args: [], annotation }, {}); tracker.transitionExperiment('candidate-1', 'running'); tracker.transitionRun('run-1', 'candidate-running'); tracker.commitTerminalExperiment('candidate-1', 'rejected', { metric: 2, decision: 'reject', artifacts: [{ artifactId: 'artifact-1', runId: 'run-1', experimentId: 'candidate-1', kind: 'stdout', location: 'artifacts/stdout.txt', sizeBytes: 1, sha256: HASH, owner: 'evaluator', retention: 'retain' }] }); tracker.transitionRun('run-1', 'deciding'); tracker.transitionRun('run-1', 'ready', { best: { metric: 1, commit: SHA, experimentId: 'baseline' } })
+    tracker.prepareCandidate({ experimentId: 'candidate-2', runId: 'run-1', ordinal: 2, kind: 'candidate', parentCommit: SHA, command: 'node', args: [], annotation: { ...annotation, hypothesis: 'newest' } }, {})
+    const annotationTrigger = String(tracker.database.prepare("SELECT sql FROM sqlite_schema WHERE type = 'trigger' AND name = 'experiments_annotation_immutable'").get()?.['sql'])
+    tracker.database.exec('BEGIN IMMEDIATE')
+    try {
+      tracker.database.exec('DROP TRIGGER experiments_annotation_immutable')
+      tracker.database.prepare('UPDATE experiments SET annotation_json = NULL, host_facts_json = NULL WHERE experiment_id = ?').run('candidate-2')
+      tracker.database.prepare("UPDATE artifacts SET retention = 'pruning' WHERE artifact_id = 'artifact-1'").run()
+      tracker.database.exec(annotationTrigger)
+      tracker.database.exec('COMMIT')
+    } catch (error) {
+      tracker.database.exec('ROLLBACK')
+      throw error
+    }
+    expect(tracker.researchHistory('run-1', 2).map(item => [item.ordinal, item.annotation, item.hostFacts, item.artifacts])).toEqual([[2, 'unavailable', {}, 'unavailable'], [1, annotation, {}, 'pruned']])
+    const exportPath = join(path, '..', 'history.tsv'); tracker.exportTsv('run-1', exportPath); const first = readFileSync(exportPath, 'utf8')
+    const [header, ...lines] = first.trimEnd().split('\n'); const columns = header!.split('\t'); const rows = lines.map(line => Object.fromEntries(columns.map((column, index) => [column, line.split('\t')[index]])))
+    expect(rows.map(row => ({ ordinal: row['ordinal'], annotationJson: row['annotation_json'] === 'unavailable' ? 'unavailable' : JSON.parse(row['annotation_json']!), hostFactsJson: row['host_facts_json'], artifacts: row['artifacts'] }))).toEqual([{ ordinal: '2', annotationJson: 'unavailable', hostFactsJson: 'unavailable', artifacts: 'unavailable' }, { ordinal: '1', annotationJson: annotation, hostFactsJson: 'unavailable', artifacts: 'pruned' }])
+    tracker.close(); const reopened = DurableTracker.open(path); expect(reopened.researchHistory('run-1', 2)[1]?.artifacts).toBe('pruned'); reopened.exportTsv('run-1', exportPath); const [reopenedHeader, ...reopenedLines] = readFileSync(exportPath, 'utf8').trimEnd().split('\n'); const reopenedColumns = reopenedHeader!.split('\t'); const reopenedRows = reopenedLines.map(line => Object.fromEntries(reopenedColumns.map((column, index) => [column, line.split('\t')[index]]))); expect({ annotationJson: JSON.parse(reopenedRows[1]!['annotation_json']!), hostFactsJson: reopenedRows[1]!['host_facts_json'], artifacts: reopenedRows[1]!['artifacts'] }).toEqual({ annotationJson: annotation, hostFactsJson: 'unavailable', artifacts: 'pruned' }); reopened.close()
+  })
+
   it('publishes deterministic run-scoped TSV atomically and retries independently from committed state', () => {
     const databasePath = fixturePath(); const exportPath = join(databasePath, '..', 'compat', 'experiments.tsv'); mkdirSync(join(databasePath, '..', 'compat'), { mode: 0o700 })
     const tracker = DurableTracker.open(databasePath); tracker.createRun(initial()); createRunningExperiment(tracker); tracker.createAttemptIntent({ attemptId: 'attempt-1', runId: 'run-1', experimentId: 'exp-0', ordinal: 1 }, { kind: 'spawn' })
@@ -447,7 +510,7 @@ describe('durable SQLite tracker', () => {
     expect(() => tracker.exportTsv('run-1', join(escape, 'stolen.tsv'))).toThrow()
     expect(tracker.database.prepare('SELECT state FROM experiments WHERE experiment_id = ?').get('exp-0')).toEqual({ state: 'crashed' })
     tracker.exportTsv('run-1', exportPath); const first = readFileSync(exportPath, 'utf8'); tracker.exportTsv('run-1', exportPath)
-    expect(readFileSync(exportPath, 'utf8')).toBe(first); expect(first).toContain('line one\\nline two'); expect(statSync(exportPath).mode & 0o777).toBe(0o600)
+    expect(readFileSync(exportPath, 'utf8')).toBe(first); expect(first).not.toContain('line one'); expect(first).toContain('unavailable'); expect(statSync(exportPath).mode & 0o777).toBe(0o600)
     expect(readFileSync(join(databasePath, '..', 'compat', 'experiments.tsv'), 'utf8').split('\n')).toHaveLength(first.split('\n').length)
     tracker.close()
   })

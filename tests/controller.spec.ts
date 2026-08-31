@@ -15,11 +15,12 @@ import { resolveConfig, type Config } from '../src/config.ts'
 import { AutoresearchRunController, type AutoresearchRunReady } from '../src/controller.ts'
 import { currentControllerProcessIdentity, GitBoundaryError } from '../src/git.ts'
 
-import { DurableTracker } from '../src/tracker.ts'
+import { DurableTracker, TRACKER_SCHEMA_VERSION } from '../src/tracker.ts'
 import { sweepRepositoryRetention } from '../src/retention.ts'
 import { evaluatorEvaluationSha256, freezeEvaluatorProvenanceFromManifest } from '../src/evaluator.ts'
 import { EVALUATOR_CONTRACT_GENERATION } from '../src/types.ts'
 const evaluatorRegistration = { id: 'judge', command: 'fake-evaluator', args: [], metricName: 'score', metricDirection: 'minimize' as const, metricParserVersion: 'final-line-json-v1' as const, evaluatorFiles: ['evaluate.mjs'] }
+const DOWNGRADE_RESEARCH_MEMORY = 'DROP TRIGGER experiments_annotation_immutable; ALTER TABLE experiments DROP COLUMN host_facts_json; ALTER TABLE experiments DROP COLUMN annotation_json;'
 const input = {
   repository: '.', run_tag: 'controller-test', evaluator_id: 'judge', objective: 'improve score', mutable_globs: ['src/**'],
   max_experiments: 2, mode: 'foreground' as const,
@@ -154,10 +155,10 @@ describe('exclusive autoresearch controller contract', () => {
       const tracker = DurableTracker.open(join(root, 'tracker.sqlite')); const sha = 'a'.repeat(40)
       tracker.createRun({ runId: 'run', repositoryId: 'repo', repository: '/repo', gitCommonDir: '/repo/.git', callerCwd: '/repo', startCommit: sha, runTag: 'tag', branch: 'autoresearch/tag-run', worktree: '/worktree', policy: {}, policySha256: 'b'.repeat(64), provenance: {}, provenanceSha256: 'c'.repeat(64) })
       tracker.transitionRun('run', 'baseline-running'); tracker.transitionRun('run', 'ready', { best: { metric: 1, commit: sha, experimentId: 'baseline' } })
-      tracker.prepareCandidate({ experimentId: 'candidate-1', runId: 'run', ordinal: 1, kind: 'candidate', parentCommit: sha, command: 'node', args: [] }, { intent: { kind: 'candidate-snapshot', experimentId: 'candidate-1' } })
+      tracker.prepareCandidate({ experimentId: 'candidate-1', runId: 'run', ordinal: 1, kind: 'candidate', parentCommit: sha, command: 'node', args: [], annotation: { trust: 'untrusted-child-annotation', hypothesis: 'test hypothesis', intendedEdits: ['src/code.ts'], implementationSummary: 'test summary' } }, { intent: { kind: 'candidate-snapshot', experimentId: 'candidate-1' } })
       expect(tracker.getRun('run')?.['state']).toBe('candidate-prepared')
       expect(tracker.database.prepare('SELECT state FROM experiments WHERE experiment_id = ?').get('candidate-1')?.['state']).toBe('baseline-pending')
-      expect(() => tracker.prepareCandidate({ experimentId: 'candidate-2', runId: 'run', ordinal: 2, kind: 'candidate', parentCommit: sha, command: 'node', args: [] }, {})).toThrow(/ready run/)
+      expect(() => tracker.prepareCandidate({ experimentId: 'candidate-2', runId: 'run', ordinal: 2, kind: 'candidate', parentCommit: sha, command: 'node', args: [], annotation: { trust: 'untrusted-child-annotation', hypothesis: 'test hypothesis', intendedEdits: ['src/code.ts'], implementationSummary: 'test summary' } }, {})).toThrow(/ready run/)
       tracker.close()
     } finally { rmSync(root, { recursive: true, force: true }) }
   })
@@ -441,6 +442,7 @@ describe('controller real Git/SQLite outcomes', () => {
     try {
       const first = await runControllerCase(f, { max_experiments: 1, target: 1 })
       first.tracker.database.exec(`
+        ${DOWNGRADE_RESEARCH_MEMORY}
         DROP TRIGGER run_registrations_presence_monotonic;
         DROP TRIGGER run_registrations_immutable;
         DROP TABLE run_registrations;
@@ -461,6 +463,7 @@ describe('controller real Git/SQLite outcomes', () => {
     try {
       const first = await runControllerCase(f, { max_experiments: 1, target: 1 })
       first.tracker.database.exec(`
+        ${DOWNGRADE_RESEARCH_MEMORY}
         DROP TRIGGER run_registrations_presence_monotonic;
         UPDATE schema_metadata SET version = 7 WHERE singleton = 1;
       `)
@@ -469,7 +472,7 @@ describe('controller real Git/SQLite outcomes', () => {
       const replay = await createCaseController(f, { max_experiments: 1, target: 1 }, first.ready.runId).run()
       expect(replay).toMatchObject({ status: 'target-reached', counts: { attempts: 1 } })
       const migrated = DurableTracker.openReadOnly(first.ready.tracker)
-      expect(migrated.schemaVersion()).toBe(8)
+      expect(migrated.schemaVersion()).toBe(TRACKER_SCHEMA_VERSION)
       expect(migrated.database.prepare("SELECT name FROM sqlite_schema WHERE type = 'trigger' AND name = 'run_registrations_presence_monotonic'").get()).toEqual({ name: 'run_registrations_presence_monotonic' })
       migrated.close()
       expect(f.subprocess.evaluatorSpawns).toBe(1)
@@ -483,11 +486,13 @@ describe('controller real Git/SQLite outcomes', () => {
       first.tracker.database.prepare("UPDATE artifacts SET created_at = '2020-01-01T00:00:00.000Z' WHERE run_id = ?").run(first.ready.runId)
       if (kind === 'registered-v7') {
         first.tracker.database.exec(`
+          ${DOWNGRADE_RESEARCH_MEMORY}
           DROP TRIGGER run_registrations_presence_monotonic;
           UPDATE schema_metadata SET version = 7 WHERE singleton = 1;
         `)
       } else {
         first.tracker.database.exec(`
+          ${DOWNGRADE_RESEARCH_MEMORY}
           DROP TRIGGER run_registrations_presence_monotonic;
           DROP TRIGGER run_registrations_immutable;
           DROP TABLE run_registrations;
@@ -501,7 +506,7 @@ describe('controller real Git/SQLite outcomes', () => {
       const summary = sweepRepositoryRetention(String(run['git_common_dir']), '.autoresearch-test', resolveConfig({ artifactRetentionDays: 1, evaluatorRegistrations: [evaluatorRegistration] }), undefined, new Date('2030-01-01T00:00:00.000Z'))
       expect(summary.artifactsPruned).toBe(2)
       const migrated = DurableTracker.openReadOnly(first.ready.tracker)
-      expect(migrated.schemaVersion()).toBe(8)
+      expect(migrated.schemaVersion()).toBe(TRACKER_SCHEMA_VERSION)
       expect(migrated.database.prepare('SELECT DISTINCT retention FROM artifacts WHERE run_id = ?').all(first.ready.runId)).toEqual([{ retention: 'pruned' }])
       migrated.close()
     } finally { rmSync(f.root, { recursive: true, force: true }) }
@@ -511,6 +516,7 @@ describe('controller real Git/SQLite outcomes', () => {
     try {
       const first = await runControllerCase(f, { run_tag: `legacy-v${version}`, max_experiments: 1, target: 1 })
       first.tracker.database.exec(`
+        ${DOWNGRADE_RESEARCH_MEMORY}
         DROP TRIGGER run_registrations_presence_monotonic;
         DROP TRIGGER run_registrations_immutable;
         DROP TABLE run_registrations;
@@ -537,7 +543,7 @@ describe('controller real Git/SQLite outcomes', () => {
       expect(second.result).toMatchObject({ status: 'target-reached', best: { metric: 2 } })
       second.tracker.close()
       const migrated = DurableTracker.openReadOnly(first.ready.tracker)
-      expect(migrated.schemaVersion()).toBe(8)
+      expect(migrated.schemaVersion()).toBe(TRACKER_SCHEMA_VERSION)
       migrated.close()
     } finally { rmSync(f.root, { recursive: true, force: true }) }
   })
@@ -548,6 +554,7 @@ describe('controller real Git/SQLite outcomes', () => {
     try {
       const first = await runControllerCase(f, { max_experiments: 1, target: 1 }, { evaluatorRegistrations: [{ ...evaluatorRegistration, environment: { TOKEN: 'non-empty-secret' } }] })
       first.tracker.database.exec(`
+        ${DOWNGRADE_RESEARCH_MEMORY}
         DROP TRIGGER run_registrations_presence_monotonic;
         DROP TRIGGER run_registrations_immutable;
         DROP TABLE run_registrations;
@@ -623,6 +630,7 @@ describe('controller real Git/SQLite outcomes', () => {
     try {
       const first = await runControllerCase(f, { max_experiments: 1, target: 1 })
       first.tracker.database.exec(`
+        ${DOWNGRADE_RESEARCH_MEMORY}
         DROP TRIGGER run_registrations_presence_monotonic;
         DROP TRIGGER run_registrations_immutable;
         DROP TABLE run_registrations;
@@ -647,6 +655,7 @@ describe('controller real Git/SQLite outcomes', () => {
     try {
       const first = await runControllerCase(f, { max_experiments: 1, target: 1 })
       first.tracker.database.exec(`
+        ${DOWNGRADE_RESEARCH_MEMORY}
         DROP TRIGGER run_registrations_presence_monotonic;
         DROP TRIGGER run_registrations_immutable;
         DROP TABLE run_registrations;
@@ -699,6 +708,7 @@ describe('controller real Git/SQLite outcomes', () => {
       const first = await runControllerCase(f, { max_experiments: 1, target: 1 })
       const trackerPath = first.ready.tracker
       first.tracker.database.exec(`
+        ${DOWNGRADE_RESEARCH_MEMORY}
         DROP TRIGGER run_registrations_presence_monotonic;
         DROP TRIGGER run_registrations_immutable;
         DROP TABLE run_registrations;

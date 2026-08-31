@@ -14,7 +14,7 @@ import {
   type RepositoryDiscovery, type RunGitIdentity,
 } from './git.js'
 import { classifyDurableRegistration, reconcileRecovery, type RecoveredEvaluation, type RecoveredExperiment, type RecoveryDirective } from './recovery.js'
-import { DurableTracker, TRACKER_SCHEMA_VERSION, serializeDurablePolicy, serializeRedactedDurablePolicy, type ArtifactRecord } from './tracker.js'
+import { DurableTracker, TRACKER_SCHEMA_VERSION, serializeDurablePolicy, serializeRedactedDurablePolicy, type ArtifactRecord, type HostFailureFacts } from './tracker.js'
 import { applyRunRetention, sweepRepositoryRetention } from './retention.js'
 import {
   decodeRunResult, isTargetReached, registrationFingerprint, type ActivationAutoresearchToolInput, type AutoresearchRunResult,
@@ -364,13 +364,14 @@ export class AutoresearchRunController {
     r.tracker.checkpointRun(r.runId, { intent: { kind: 'proposal', experimentId, ordinal } })
     let trusted: GitConfigBaseline | undefined
     try {
-      const proposal = await requestProposal(this.ctx, { parent: this.options.parent, runId: r.runId, experimentId, ordinal, workspace: { repositoryId: r.discovery.repositoryId, branch: r.identity.branch, worktree: r.identity.worktree, startCommit: r.discovery.startCommit, acceptedCommit: best.commit }, policy: r.policy, policySha256: r.policySha256, provenanceSha256: r.provenanceSha256, best, history: history(r.tracker, r.runId), config: this.options.config, gitExecutable: r.gitExecutable, gitOptions: r.gitOptions, persistTrustedGitConfig: baseline => { trusted = baseline; r.tracker.checkpointRun(r.runId, { outcome: { kind: 'trusted-git-config', experimentId, baseline } }) }, signal: this.aborter.signal })
+      const historyPage = r.tracker.researchHistoryPage(r.runId)
+      const proposal = await requestProposal(this.ctx, { parent: this.options.parent, runId: r.runId, experimentId, ordinal, workspace: { repositoryId: r.discovery.repositoryId, branch: r.identity.branch, worktree: r.identity.worktree, startCommit: r.discovery.startCommit, acceptedCommit: best.commit }, policy: r.policy, policySha256: r.policySha256, provenanceSha256: r.provenanceSha256, best, history: historyPage.entries, historyOlderEntriesTruncated: historyPage.olderEntriesTruncated, config: this.options.config, gitExecutable: r.gitExecutable, gitOptions: r.gitOptions, persistTrustedGitConfig: baseline => { trusted = baseline; r.tracker.checkpointRun(r.runId, { outcome: { kind: 'trusted-git-config', experimentId, baseline } }) }, signal: this.aborter.signal })
       if (proposal.blockerClaim) r.tracker.checkpointRun(r.runId, { outcome: { kind: 'child-blocker-claim', experimentId, claim: proposal.blockerClaim, authoritative: false } })
       if (!trusted || !r.registration) throw new Error('proposal did not preserve trusted evaluator state')
       const snapshot = await snapshotCandidate(this.ctx, r.gitExecutable, r.identity.worktree, trusted, { ...r.gitOptions, signal: this.aborter.signal })
       validateFrozenCandidatePaths(snapshot, { evaluatorFiles: r.registration.registration.evaluatorFiles, datasetFiles: r.registration.registration.dataset.kind === 'local' ? r.registration.registration.dataset.files : [] })
       const validatedPaths = validateCandidate(snapshot, r.policy)
-      r.tracker.prepareCandidate({ experimentId, runId: r.runId, ordinal, kind: 'candidate', parentCommit: best.commit, command: r.policy.evaluation.command, args: r.policy.evaluation.args, ...(r.policy.evaluation.cwd ? { cwd: r.policy.evaluation.cwd } : {}) }, { intent: { kind: 'candidate-snapshot', experimentId, snapshot, validatedPaths } })
+      r.tracker.prepareCandidate({ experimentId, runId: r.runId, ordinal, kind: 'candidate', parentCommit: best.commit, command: r.policy.evaluation.command, args: r.policy.evaluation.args, ...(r.policy.evaluation.cwd ? { cwd: r.policy.evaluation.cwd } : {}), annotation: { trust: 'untrusted-child-annotation', redaction: 'exact-configured-secrets-only', hypothesis: proposal.hypothesis, intendedEdits: proposal.intendedEdits, implementationSummary: proposal.implementationSummary }, redactionSecrets: Object.values(r.policy.environment) }, { intent: { kind: 'candidate-snapshot', experimentId, snapshot, validatedPaths } })
     } catch (error) {
       if (error instanceof ProposalAgentError && (error.code === 'dispose-failed' || error.code === 'not-quiescent')) { this.quiescenceFailure = error; r.tracker.transitionRun(r.runId, 'blocked', { terminalReason: error.message, blockedCode: 'attempt-uncertain', quiescent: false, ...(best ? { best } : {}) }); return }
       if (this.aborter.signal.aborted) throw error
@@ -386,8 +387,8 @@ export class AutoresearchRunController {
     r.tracker.checkpointRun(r.runId, { intent: { kind: 'candidate-commit', experimentId: experiment.experimentId, snapshot: canonicalSnapshot, validatedPaths } })
     const candidate = await commitCandidate(this.ctx, r.gitExecutable, r.identity.worktree, r.identity, experiment.experimentId, canonicalSnapshot, validatedPaths, { ...r.gitOptions, signal: this.aborter.signal })
     await checkoutCandidateForEvaluation(this.ctx, r.gitExecutable, r.identity.worktree, r.identity, candidate.candidateCommit, experiment.parentCommit, { ...r.gitOptions, signal: this.aborter.signal })
-    r.tracker.recordCandidateCommit(experiment.experimentId, candidate.candidateCommit)
-    r.tracker.checkpointRun(r.runId, { outcome: { kind: 'candidate-committed', candidate } })
+    r.tracker.recordCandidateCommit(experiment.experimentId, candidate.candidateCommit, { changedPaths: candidate.changedPaths, ...(candidate.diffStats === undefined ? {} : { diffStats: candidate.diffStats }) }, Object.values(r.policy.environment))
+    r.tracker.checkpointRun(r.runId, { outcome: { kind: 'candidate-committed', candidateCommit: candidate.candidateCommit, parentCommit: candidate.parentCommit, auditRef: candidate.auditRef, ...(candidate.diffStats === undefined ? {} : { diffStats: candidate.diffStats }) } })
   }
 
   private async evaluate(r: Runtime, experiment: RecoveredExperiment, commit: string, createExperiment: boolean, attemptOrdinal: number): Promise<void> {
@@ -420,6 +421,7 @@ export class AutoresearchRunController {
   }
   private exhaustEvaluationRerun(r: Runtime, experiment: RecoveredExperiment): void {
     const message = 'proven-quiescent evaluator recovery rerun ended without a durable outcome'
+    if (experiment.kind === 'candidate') r.tracker.appendFailureResearchFacts(experiment.experimentId, { code: 'recovery-rerun-exhausted' })
     r.tracker.commitTerminalExperiment(experiment.experimentId, 'crashed', { failureCode: 'recovery-rerun-exhausted', failureMessage: message })
     if (experiment.kind === 'baseline') r.tracker.transitionRun(r.runId, 'baseline-blocked', { terminalReason: message, blockedCode: 'recovery-rerun-exhausted', quiescent: true })
     else r.tracker.transitionRun(r.runId, 'deciding', { outcome: { kind: 'candidate-evaluation-failed', code: 'recovery-rerun-exhausted', message } })
@@ -451,6 +453,7 @@ export class AutoresearchRunController {
 
   private failEvaluation(r: Runtime, experiment: RecoveredExperiment, evaluation: RecoveredEvaluation, code: string, message: string): void {
     const state: ExperimentDurableState = code === 'timeout' ? 'timed-out' : code === 'cancelled' ? 'cancelled' : code === 'provenance-mismatch' ? 'policy-violation' : 'crashed'
+    if (experiment.kind === 'candidate' && HANDOFF_FAILURE_CODES[code] === true) r.tracker.appendFailureResearchFacts(experiment.experimentId, mechanicalFailureFacts(code, evaluation))
     r.tracker.commitTerminalExperiment(experiment.experimentId, state, experimentFacts(evaluation, { failureCode: code, failureMessage: message }))
     if (experiment.kind === 'baseline') {
       const runState = code === 'cancelled' && evaluation.exit.processTreeQuiescent ? 'cancelled' : evaluation.exit.processTreeQuiescent ? 'baseline-blocked' : 'blocked'
@@ -559,7 +562,8 @@ function artifact(r: Runtime, experimentId: string, attemptId: string, item: { k
 function experimentFacts(evaluation: RecoveredEvaluation, extra: Record<string, unknown>) { return { ...extra, exitCode: evaluation.exit.exitCode, signal: evaluation.exit.signal, timedOut: evaluation.exit.timedOut } as never }
 function optionalBest(tracker: DurableTracker, runId: string): BestResult | undefined { const row = tracker.getRun(runId); return row?.['best_metric'] === null || row?.['best_metric'] === undefined ? undefined : { metric: Number(row['best_metric']), commit: String(row['best_commit']), experimentId: String(row['best_experiment_id']) } }
 function durableBest(tracker: DurableTracker, runId: string): BestResult { const best = optionalBest(tracker, runId); if (!best) throw new Error('durable best result is missing'); return best }
-function history(tracker: DurableTracker, runId: string): ProposalHistoryEntry[] { return (tracker.database.prepare('SELECT * FROM experiments WHERE run_id = ? AND kind = ? ORDER BY ordinal DESC LIMIT 20').all(runId, 'candidate') as Record<string, unknown>[]).reverse().map(row => ({ ordinal: Number(row['ordinal']), experimentId: String(row['experiment_id']), state: String(row['state']) as ExperimentDurableState, ...(row['candidate_commit'] ? { candidateCommit: String(row['candidate_commit']) } : {}), ...(row['metric'] === null ? {} : { metric: Number(row['metric']) }), ...(row['decision'] ? { decision: String(row['decision']) as 'accept'|'reject' } : {}), ...(row['failure_code'] ? { failureCode: String(row['failure_code']) } : {}) })) }
+const HANDOFF_FAILURE_CODES: Readonly<Record<string, true>> = { spawn: true, timeout: true, cancelled: true, exit: true, signal: true, 'output-limit': true, 'metric-protocol': true, 'provenance-mismatch': true, 'recovery-rerun-exhausted': true }
+function mechanicalFailureFacts(code: string, evaluation: RecoveredEvaluation): HostFailureFacts { if (code === 'spawn') return { code, spawn: 'provider-spawn-failed' }; if (code === 'exit') return { code, exitCode: evaluation.exit.exitCode ?? -1 }; if (code === 'signal') return { code, signal: evaluation.exit.signal ?? 'UNKNOWN' }; if (code === 'timeout') return { code, timedOut: true }; if (code === 'output-limit') return { code, output: 'stdout-limit-exceeded' }; if (code === 'metric-protocol') return { code, metricProtocol: 'rejected' }; return { code } }
 function counts(tracker: DurableTracker, runId: string): ResultCounts { const candidates = Number(tracker.database.prepare("SELECT COUNT(*) AS n FROM experiments WHERE run_id = ? AND kind = 'candidate'").get(runId)?.['n'] ?? 0); const completed = Number(tracker.database.prepare("SELECT COUNT(*) AS n FROM experiments WHERE run_id = ? AND kind = 'candidate' AND state NOT IN ('baseline-pending','running')").get(runId)?.['n'] ?? 0); const attempts = Number(tracker.database.prepare('SELECT COUNT(*) AS n FROM attempts WHERE run_id = ?').get(runId)?.['n'] ?? 0); return { experimentsStarted: candidates, experimentsCompleted: completed, attempts } }
 interface PublicArtifact { readonly artifactId: string; readonly kind: string; readonly location: string; readonly sizeBytes: number; readonly sha256: string }
 function publicArtifact(row: Pick<ArtifactRecord, 'artifactId' | 'kind' | 'location' | 'sizeBytes' | 'sha256'>): PublicArtifact { return { artifactId: row.artifactId, kind: row.kind, location: row.location, sizeBytes: row.sizeBytes, sha256: row.sha256 } }

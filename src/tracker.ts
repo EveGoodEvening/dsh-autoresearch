@@ -6,10 +6,11 @@ import { basename, dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { DatabaseSync, type SQLOutputValue } from 'node:sqlite'
 import { StateLayout } from './state-layout.js'
+import { redactConfiguredSecrets } from './evaluator-artifacts.js'
 import { EVALUATOR_CONTRACT_GENERATION, normalizeEvaluatorRegistration, normalizeRegistrationManifest, registrationFingerprint, serializeRegistrationJson } from './types.js'
 import type { DurableRegistrationIdentity, EvaluatorRegistration, ExperimentDurableState, RegistrationManifest, RunDurableState } from './types.js'
 
-export const TRACKER_SCHEMA_VERSION = 8
+export const TRACKER_SCHEMA_VERSION = 9
 export const TRACKER_BUSY_TIMEOUT_MS = 5_000
 const TRACKER_RETRY_WAIT = new Int32Array(new SharedArrayBuffer(4))
 
@@ -20,6 +21,7 @@ const RUN_TERMINAL: Readonly<Record<RunDurableState, boolean>> = {
 const EXPERIMENT_TERMINAL: Readonly<Record<ExperimentDurableState, boolean>> = {
   'baseline-pending': false, running: false, accepted: true, rejected: true, crashed: true, 'timed-out': true, 'policy-violation': true, cancelled: true,
 }
+const RESEARCH_FAILURE_CODES: Readonly<Record<string, true>> = { spawn: true, timeout: true, cancelled: true, exit: true, signal: true, 'output-limit': true, 'metric-protocol': true, 'provenance-mismatch': true, 'recovery-rerun-exhausted': true }
 const RUN_TRANSITIONS: Readonly<Record<RunDurableState, readonly RunDurableState[]>> = {
   initializing: ['baseline-running', 'baseline-blocked', 'blocked', 'cancelled'],
   'baseline-running': ['ready', 'completed', 'baseline-blocked', 'blocked', 'round-failed', 'cancelled'],
@@ -52,8 +54,14 @@ export interface RegisteredRunRecord extends InitialRunRecord {
 
 export interface ExperimentRecord {
   experimentId: string; runId: string; ordinal: number; kind: 'baseline' | 'candidate'; parentCommit: string
-  candidateCommit?: string; command: string; args: readonly string[]; cwd?: string; createdAt?: string
+  candidateCommit?: string; command: string; args: readonly string[]; cwd?: string; createdAt?: string; annotation?: UntrustedResearchAnnotation; redactionSecrets?: readonly string[]
 }
+export interface UntrustedResearchAnnotation { readonly trust: 'untrusted-child-annotation'; readonly redaction?: 'exact-configured-secrets-only'; readonly hypothesis: string; readonly intendedEdits: readonly string[]; readonly implementationSummary: string }
+export interface CandidateDiffStats { readonly files: number; readonly insertions: number; readonly deletions: number; readonly binaryFiles: number }
+export interface HostFailureFacts { readonly code: string; readonly spawn?: 'provider-spawn-failed'; readonly exitCode?: number; readonly signal?: string; readonly timedOut?: true; readonly output?: 'stdout-limit-exceeded'; readonly metricProtocol?: 'rejected' }
+export interface HostResearchFacts { readonly candidateCommit?: string; readonly changedPaths?: readonly string[]; readonly changedPathsStatus?: 'truncated' | 'unavailable'; readonly diffStats?: CandidateDiffStats; readonly failure?: HostFailureFacts }
+export interface ResearchHistoryRecord { readonly ordinal: number; readonly experimentId: string; readonly state: ExperimentDurableState; readonly candidateCommit?: string; readonly metric?: number; readonly decision?: 'accept' | 'reject'; readonly failureCode?: string; readonly annotation: UntrustedResearchAnnotation | 'unavailable'; readonly hostFacts: HostResearchFacts; readonly artifacts: 'available' | 'pruned' | 'unavailable' }
+export interface ResearchHistoryPage { readonly entries: readonly ResearchHistoryRecord[]; readonly olderEntriesTruncated: boolean }
 export interface AttemptRecord { attemptId: string; runId: string; experimentId: string; ordinal: number; providerAttemptId?: string; createdAt?: string }
 export interface ArtifactRecord {
   artifactId: string; runId: string; experimentId?: string; attemptId?: string; kind: string; location: string
@@ -231,10 +239,9 @@ export class DurableTracker {
     const at = record.createdAt ?? new Date().toISOString()
     this.transaction(() => {
       this.requireRun(record.runId)
+      if (record.annotation !== undefined && record.kind !== 'candidate') throw new TrackerTransitionError('research annotation belongs only to candidate experiments')
       if (this.database.prepare(`SELECT 1 FROM experiments WHERE run_id = ? AND state IN ('baseline-pending','running')`).get(record.runId)) throw new TrackerTransitionError('a run may not create a new experiment while another is unresolved')
-      this.database.prepare(`INSERT INTO experiments (experiment_id, run_id, ordinal, kind, parent_commit, candidate_commit, state, command, args_json, cwd, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, 'baseline-pending', ?, ?, ?, ?, ?)`).run(record.experimentId, record.runId, record.ordinal, record.kind, record.parentCommit, record.candidateCommit ?? null, record.command, canonicalJson(record.args), record.cwd ?? null, at, at)
-      this.insertTransition(record.runId, record.experimentId, 'experiment', null, 'baseline-pending', { intent: { kind: 'create-experiment' } }, at)
+      this.insertExperiment(record, at)
     })
   }
   prepareCandidate(record: ExperimentRecord, facts: TransitionFacts, at = new Date().toISOString()): void {
@@ -242,23 +249,23 @@ export class DurableTracker {
       const run = this.requireRun(record.runId)
       const from = String(run['state']) as RunDurableState
       if (from !== 'ready') throw new TrackerTransitionError('candidate preparation requires a ready run')
+      if (record.kind !== 'candidate' || record.annotation === undefined) throw new TrackerTransitionError('candidate preparation requires its validated untrusted annotation')
       if (this.database.prepare(`SELECT 1 FROM experiments WHERE run_id = ? AND state IN ('baseline-pending','running')`).get(record.runId)) throw new TrackerTransitionError('a run may not prepare a candidate while another is unresolved')
-      this.database.prepare(`INSERT INTO experiments (experiment_id, run_id, ordinal, kind, parent_commit, candidate_commit, state, command, args_json, cwd, created_at, updated_at)
-        VALUES (?, ?, ?, 'candidate', ?, NULL, 'baseline-pending', ?, ?, ?, ?, ?)`).run(record.experimentId, record.runId, record.ordinal, record.parentCommit, record.command, canonicalJson(record.args), record.cwd ?? null, at, at)
-      this.insertTransition(record.runId, record.experimentId, 'experiment', null, 'baseline-pending', { intent: { kind: 'create-experiment' } }, at)
-      validateTransition('run', from, 'candidate-prepared')
+      this.insertExperiment(record, at)
       this.database.prepare('UPDATE runs SET state = ?, updated_at = ? WHERE run_id = ?').run('candidate-prepared', at, record.runId)
-      this.insertTransition(record.runId, record.experimentId, 'run', from, 'candidate-prepared', facts, at)
+      this.insertTransition(record.runId, record.experimentId, 'run', from, 'candidate-prepared', redactExactSecrets(facts, record.redactionSecrets ?? []) as TransitionFacts, at)
     })
   }
-  recordCandidateCommit(experimentId: string, candidateCommit: string, updatedAt = new Date().toISOString()): void {
+  recordCandidateCommit(experimentId: string, candidateCommit: string, hostFacts: Omit<HostResearchFacts, 'candidateCommit'> = {}, redactionSecrets: readonly string[] = [], updatedAt = new Date().toISOString()): void {
     if (!/^[0-9a-f]{40}$/u.test(candidateCommit)) throw new TrackerTransitionError('candidate commit must be a full lowercase SHA')
     this.transaction(() => {
       const experiment = this.requireExperiment(experimentId)
       if (experiment['kind'] !== 'candidate' || experiment['state'] !== 'baseline-pending') throw new TrackerTransitionError('candidate commit outcome requires a pending candidate experiment')
-      if (experiment['candidate_commit'] === candidateCommit) return
-      if (experiment['candidate_commit'] !== null) throw new TrackerTransitionError('candidate commit conflicts with durable lineage')
-      this.database.prepare('UPDATE experiments SET candidate_commit = ?, updated_at = ? WHERE experiment_id = ?').run(candidateCommit, updatedAt, experimentId)
+      const serialized = canonicalJson(normalizeHostResearchFacts({ ...hostFacts, candidateCommit }, redactionSecrets))
+      if (experiment['candidate_commit'] !== null && experiment['candidate_commit'] !== candidateCommit) throw new TrackerTransitionError('candidate commit conflicts with durable lineage')
+      if (experiment['host_facts_json'] !== null && experiment['host_facts_json'] !== serialized) throw new TrackerTransitionError('candidate Host facts conflict with durable research memory')
+      if (experiment['candidate_commit'] === candidateCommit && experiment['host_facts_json'] === serialized) return
+      this.database.prepare('UPDATE experiments SET candidate_commit = ?, host_facts_json = ?, updated_at = ? WHERE experiment_id = ?').run(candidateCommit, serialized, updatedAt, experimentId)
     })
   }
 
@@ -359,6 +366,26 @@ export class DurableTracker {
     })
   }
   commitTerminalExperiment(experimentId: string, to: Exclude<ExperimentDurableState, 'baseline-pending' | 'running'>, facts: ExperimentTransitionFacts, at = new Date().toISOString()): number { return this.transitionExperiment(experimentId, to, facts, at) }
+  appendFailureResearchFacts(experimentId: string, failure: HostFailureFacts, updatedAt = new Date().toISOString()): void {
+    this.transaction(() => {
+      const experiment = this.requireExperiment(experimentId)
+      const existing = experiment['host_facts_json'] === null ? {} : parseJson(textJson(experiment['host_facts_json'], 'host research facts'), 'host research facts') as HostResearchFacts
+      if (existing.failure !== undefined && canonicalJson(existing.failure) !== canonicalJson(failure)) throw new TrackerTransitionError('failure Host facts conflict with durable research memory')
+      const serialized = canonicalJson(normalizeHostResearchFacts({ ...existing, failure }))
+      if (experiment['host_facts_json'] === serialized) return
+      this.database.prepare('UPDATE experiments SET host_facts_json = ?, updated_at = ? WHERE experiment_id = ?').run(serialized, updatedAt, experimentId)
+    })
+  }
+
+  researchHistoryPage(runId: string, limit = 20): ResearchHistoryPage {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new TypeError('research history limit must be between 1 and 100')
+    this.requireRun(runId)
+    const rows = this.database.prepare(`SELECT e.*, CASE WHEN COUNT(a.artifact_id)=0 THEN 'unavailable' WHEN SUM(CASE WHEN a.retention IN ('pruned','pruning') THEN 0 ELSE 1 END)=0 THEN 'pruned' ELSE 'available' END AS artifact_status FROM experiments e LEFT JOIN artifacts a ON a.experiment_id=e.experiment_id WHERE e.run_id=? AND e.kind='candidate' GROUP BY e.experiment_id ORDER BY e.ordinal DESC, e.experiment_id DESC LIMIT ?`).all(runId, limit + 1)
+    const olderEntriesTruncated = rows.length > limit
+    const entries = rows.slice(0, limit).map<ResearchHistoryRecord>(row => ({ ordinal: Number(row['ordinal']), experimentId: String(row['experiment_id']), state: String(row['state']) as ExperimentDurableState, ...(row['candidate_commit'] === null ? {} : { candidateCommit: String(row['candidate_commit']) }), ...(row['metric'] === null ? {} : { metric: Number(row['metric']) }), ...(row['decision'] === null ? {} : { decision: String(row['decision']) as 'accept' | 'reject' }), ...(row['failure_code'] === null || RESEARCH_FAILURE_CODES[String(row['failure_code'])] !== true ? {} : { failureCode: String(row['failure_code']) }), annotation: row['annotation_json'] === null ? 'unavailable' : normalizeUntrustedResearchAnnotation(parseJson(textJson(row['annotation_json'], 'research annotation'), 'research annotation') as UntrustedResearchAnnotation), hostFacts: row['host_facts_json'] === null ? {} : normalizeHostResearchFacts(parseJson(textJson(row['host_facts_json'], 'host research facts'), 'host research facts') as HostResearchFacts), artifacts: String(row['artifact_status']) as ResearchHistoryRecord['artifacts'] }))
+    return { entries, olderEntriesTruncated }
+  }
+  researchHistory(runId: string, limit = 20): ResearchHistoryRecord[] { return [...this.researchHistoryPage(runId, limit).entries] }
 
   getRun(runId: string): Record<string, SQLOutputValue> | undefined { return this.database.prepare('SELECT * FROM runs WHERE run_id = ?').get(runId) }
   listTransitions(runId: string): Record<string, SQLOutputValue>[] { return this.database.prepare('SELECT * FROM transitions WHERE run_id = ? ORDER BY sequence').all(runId) }
@@ -374,8 +401,8 @@ export class DurableTracker {
 
   exportTsv(runId: string, path: string): void {
     this.requireRun(runId); const destination = this.layout.assertContained(path)
-    const rows = this.database.prepare(`SELECT e.ordinal, e.kind, e.experiment_id, e.parent_commit, e.candidate_commit, e.state, e.metric, e.decision, e.exit_code, e.signal, e.timed_out, e.failure_code, e.failure_message, e.terminal_at FROM experiments e WHERE e.run_id = ? ORDER BY e.ordinal, e.experiment_id`).all(runId)
-    const columns = ['ordinal','kind','experiment_id','parent_commit','candidate_commit','state','metric','decision','exit_code','signal','timed_out','failure_code','failure_message','terminal_at']
+    const rows = this.database.prepare(`SELECT e.ordinal, e.kind, e.experiment_id, e.parent_commit, e.candidate_commit, e.state, e.metric, e.decision, e.exit_code, e.signal, e.timed_out, COALESCE(e.annotation_json, 'unavailable') AS annotation_json, COALESCE(e.host_facts_json, 'unavailable') AS host_facts_json, CASE WHEN COUNT(a.artifact_id)=0 THEN 'unavailable' WHEN SUM(CASE WHEN a.retention IN ('pruned','pruning') THEN 0 ELSE 1 END)=0 THEN 'pruned' ELSE 'available' END AS artifacts, e.terminal_at FROM experiments e LEFT JOIN artifacts a ON a.experiment_id=e.experiment_id WHERE e.run_id = ? GROUP BY e.experiment_id ORDER BY e.ordinal DESC, e.experiment_id DESC`).all(runId)
+    const columns = ['ordinal','kind','experiment_id','parent_commit','candidate_commit','state','metric','decision','exit_code','signal','timed_out','annotation_json','host_facts_json','artifacts','terminal_at']
     const body = [columns.join('\t'), ...rows.map((row) => columns.map((column) => tsvCell(row[column])).join('\t'))].join('\n') + '\n'
     const temporary = `${destination}.${process.pid}.${randomUUID()}.tmp`
     try {
@@ -476,6 +503,11 @@ export class DurableTracker {
       canonicalJson(redactEnvironment(record.provenance)), record.provenanceSha256, at, at)
     this.insertTransition(record.runId, null, 'run', null, 'initializing', { intent: contractGeneration === undefined ? { kind: 'create-run' } : { kind: 'create-run', contractGeneration } }, at)
   }
+  private insertExperiment(record: ExperimentRecord, at: string): void {
+    const annotation = record.annotation === undefined ? null : canonicalJson(normalizeUntrustedResearchAnnotation(record.annotation, record.redactionSecrets ?? []))
+    this.database.prepare(`INSERT INTO experiments (experiment_id, run_id, ordinal, kind, parent_commit, candidate_commit, state, command, args_json, cwd, annotation_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'baseline-pending', ?, ?, ?, ?, ?, ?)`).run(record.experimentId, record.runId, record.ordinal, record.kind, record.parentCommit, record.candidateCommit ?? null, record.command, canonicalJson(record.args), record.cwd ?? null, annotation, at, at)
+    this.insertTransition(record.runId, record.experimentId, 'experiment', null, 'baseline-pending', { intent: { kind: 'create-experiment' } }, at)
+  }
   private transaction<T>(operation: () => T): T { this.database.exec('BEGIN IMMEDIATE'); try { const result = operation(); this.database.exec('COMMIT'); return result } catch (error) { try { this.database.exec('ROLLBACK') } catch { /* transaction may already be aborted */ }; throw error } }
   private requireRun(runId: string): Record<string, SQLOutputValue> { const row = this.getRun(runId); if (!row) throw new TrackerTransitionError(`unknown run ${runId}`); return row }
   private requireExperiment(experimentId: string): Record<string, SQLOutputValue> { const row = this.database.prepare('SELECT * FROM experiments WHERE experiment_id = ?').get(experimentId); if (!row) throw new TrackerTransitionError(`unknown experiment ${experimentId}`); return row }
@@ -535,6 +567,7 @@ const MIGRATIONS: Record<number, (database: DatabaseSync) => void> = {
   6(database) { database.exec(`ALTER TABLE attempts ADD COLUMN outcome_json TEXT; CREATE TRIGGER attempts_immutable_outcome BEFORE UPDATE OF outcome_json ON attempts WHEN OLD.outcome_json IS NOT NULL OR NEW.outcome_json IS NULL BEGIN SELECT RAISE(ABORT, 'immutable attempt outcome'); END;`) },
   7(database) { database.exec(`CREATE TABLE run_registrations (run_id TEXT PRIMARY KEY REFERENCES runs(run_id) ON DELETE RESTRICT, contract_generation TEXT NOT NULL CHECK(contract_generation = 'host-registration-v1'), evaluator_id TEXT NOT NULL, registration_json TEXT NOT NULL, manifest_json TEXT NOT NULL, registration_fingerprint TEXT NOT NULL CHECK(length(registration_fingerprint)=64), created_at TEXT NOT NULL) STRICT; CREATE TRIGGER run_registrations_immutable BEFORE UPDATE ON run_registrations BEGIN SELECT RAISE(ABORT, 'immutable evaluator registration identity'); END;`) },
   8(database) { database.exec(`CREATE TRIGGER run_registrations_presence_monotonic BEFORE DELETE ON run_registrations BEGIN SELECT RAISE(ABORT, 'evaluator registration presence is monotonic'); END;`) },
+  9(database) { database.exec(`ALTER TABLE experiments ADD COLUMN annotation_json TEXT; ALTER TABLE experiments ADD COLUMN host_facts_json TEXT; CREATE TRIGGER experiments_annotation_immutable BEFORE UPDATE OF annotation_json ON experiments WHEN OLD.annotation_json IS NOT NEW.annotation_json BEGIN SELECT RAISE(ABORT, 'immutable untrusted research annotation'); END;`) },
 }
 
 const expectedSchemaFingerprints = new Map<number, string>()
@@ -592,6 +625,42 @@ function attemptOutcomeFacts(checkpoint: AttemptOutcomeCheckpoint): AttemptOutco
   if (facts.failureCode !== undefined && facts.failureCode !== result.code) throw new TrackerTransitionError('attempt failure code conflicts with its authoritative result')
   if (facts.failureMessage !== undefined && facts.failureMessage !== result.message) throw new TrackerTransitionError('attempt failure message conflicts with its authoritative result')
   return { ...facts, failureCode: result.code, failureMessage: result.message }
+}
+function normalizeUntrustedResearchAnnotation(value: UntrustedResearchAnnotation, secrets: readonly string[] = []): UntrustedResearchAnnotation {
+  const text = (item: string, label: string, max: number): string => { if (typeof item !== 'string' || item !== item.trim() || item.length === 0 || item.length > max || /[\0\r]/u.test(item)) throw new TrackerTransitionError(`${label} is not bounded normalized text`); return redactConfiguredSecrets(item, secrets) }
+  if (value.trust !== 'untrusted-child-annotation') throw new TrackerTransitionError('research annotation must be explicitly untrusted')
+  if (value.redaction !== undefined && value.redaction !== 'exact-configured-secrets-only') throw new TrackerTransitionError('research annotation redaction semantics are invalid')
+  if (!Array.isArray(value.intendedEdits) || value.intendedEdits.length > 64) throw new TrackerTransitionError('intended edits exceed the bounded annotation limit')
+  return { trust: value.trust, redaction: 'exact-configured-secrets-only', hypothesis: text(value.hypothesis, 'hypothesis', 4096), intendedEdits: value.intendedEdits.map((item, index) => text(item, `intendedEdits[${index}]`, 512)), implementationSummary: text(value.implementationSummary, 'implementationSummary', 4096) }
+}
+function redactExactSecrets(value: unknown, secrets: readonly string[]): unknown {
+  if (typeof value === 'string') return redactConfiguredSecrets(value, secrets)
+  if (Array.isArray(value)) return value.map(item => redactExactSecrets(item, secrets))
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, redactExactSecrets(item, secrets)]))
+  return value
+}
+function normalizeHostResearchFacts(value: HostResearchFacts, secrets: readonly string[] = []): HostResearchFacts {
+  const uniquePaths = value.changedPaths === undefined ? undefined : [...new Set(value.changedPaths.map(path => redactConfiguredSecrets(path, secrets)))].sort()
+  let pathBytes = 0
+  const changedPaths = uniquePaths?.filter(path => { const bytes = Buffer.byteLength(path); if (pathBytes + bytes > 4096) return false; pathBytes += bytes; return pathBytes <= 4096 }).slice(0, 32)
+  const pathsTruncated = uniquePaths !== undefined && changedPaths !== undefined && changedPaths.length < uniquePaths.length
+  const result: HostResearchFacts = { ...(value.candidateCommit === undefined ? {} : { candidateCommit: value.candidateCommit }), ...(changedPaths === undefined ? {} : { changedPaths }), ...(pathsTruncated ? { changedPathsStatus: 'truncated' as const } : value.changedPathsStatus === undefined ? {} : { changedPathsStatus: value.changedPathsStatus }), ...(value.diffStats === undefined ? {} : { diffStats: value.diffStats }), ...(value.failure === undefined ? {} : { failure: value.failure }) }
+  if (result.candidateCommit !== undefined && !/^[0-9a-f]{40}$/u.test(result.candidateCommit)) throw new TrackerTransitionError('Host candidate commit is invalid')
+  if (result.changedPaths?.some(path => typeof path !== 'string' || path.length === 0 || path.length > 1024 || /[\0\r\n]/u.test(path))) throw new TrackerTransitionError('Host changed paths are invalid')
+  if (result.diffStats && Object.values(result.diffStats).some(item => !Number.isSafeInteger(item) || item < 0)) throw new TrackerTransitionError('Host diff statistics are invalid')
+  if (result.failure) validateHostFailureFacts(result.failure)
+  return result
+}
+function validateHostFailureFacts(failure: HostFailureFacts): void {
+  if (RESEARCH_FAILURE_CODES[failure.code] !== true) throw new TrackerTransitionError('Host failure code is invalid')
+  const expected = failure.code === 'spawn' ? ['code', 'spawn'] : failure.code === 'exit' ? ['code', 'exitCode'] : failure.code === 'signal' ? ['code', 'signal'] : failure.code === 'timeout' ? ['code', 'timedOut'] : failure.code === 'output-limit' ? ['code', 'output'] : failure.code === 'metric-protocol' ? ['code', 'metricProtocol'] : ['code']
+  if (Object.keys(failure).sort().join(',') !== expected.sort().join(',')) throw new TrackerTransitionError('Host failure facts do not match the failure code')
+  if (failure.spawn !== undefined && failure.spawn !== 'provider-spawn-failed') throw new TrackerTransitionError('Host spawn fact is invalid')
+  if (failure.exitCode !== undefined && !Number.isSafeInteger(failure.exitCode)) throw new TrackerTransitionError('Host exit code is invalid')
+  if (failure.signal !== undefined && !/^[A-Z][A-Z0-9]{0,31}$/u.test(failure.signal)) throw new TrackerTransitionError('Host signal is invalid')
+  if (failure.timedOut !== undefined && failure.timedOut !== true) throw new TrackerTransitionError('Host timeout fact is invalid')
+  if (failure.output !== undefined && failure.output !== 'stdout-limit-exceeded') throw new TrackerTransitionError('Host output fact is invalid')
+  if (failure.metricProtocol !== undefined && failure.metricProtocol !== 'rejected') throw new TrackerTransitionError('Host metric protocol fact is invalid')
 }
 interface PrunableArtifact { readonly artifactId: string; readonly path: string; readonly sizeBytes: number; readonly sha256: string }
 

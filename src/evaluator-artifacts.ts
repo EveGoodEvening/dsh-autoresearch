@@ -105,8 +105,10 @@ export function normalizeRedactionSecrets(secrets: readonly string[]): readonly 
   return Object.freeze([...new Set(secrets.filter(secret => secret.length > 0))].sort((left, right) => right.length - left.length || left.localeCompare(right)))
 }
 
-function redact(value: string, secrets: readonly string[]): string {
-  return secrets.reduce((text, secret) => text.split(secret).join('[REDACTED]'), value)
+export function redactConfiguredSecrets(value: string, secrets: readonly string[]): string {
+  return normalizeRedactionSecrets(secrets).reduce((text, secret) => text.split(secret).join('[REDACTED]'), value)
 }
+
+function redact(value: string, secrets: readonly string[]): string { return redactConfiguredSecrets(value, secrets) }
 
 function hash(value: Uint8Array): string { return createHash('sha256').update(value).digest('hex') }
