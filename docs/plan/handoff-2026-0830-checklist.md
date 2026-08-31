@@ -275,12 +275,15 @@ Chunks 01-03 are deliberately inert preparation. Until Chunk 04 lands, the regis
 - **Work:** Define the normalized evaluator/dataset registration, contract-generation marker, evaluator ID, algorithm-qualified external digest, path→SHA-256 manifest, registration fingerprint, and typed registration/legacy block evidence. Add append/read transaction primitives that can atomically persist and validate a complete new-contract run identity, but do not call them from production start, resume, terminal replay, migration, or recovery dispatch. Schema recognition must distinguish legacy raw-policy evidence without reinterpreting it. Terminal legacy evidence remains unchanged; no preparatory migration may manufacture new authority.
 - **Depends on:** Chunk 00 and its tracker-accounting commit.
 - **Exact verification:** Focused tracker/recovery tests prove canonical normalization, length-prefix hashing, complete atomic write/rollback, corruption rejection, and legacy/new schema discrimination through helper APIs. The activation-gate test proves production start/resume cannot write or interpret the new marker, evaluator ID, fingerprint, or manifest and existing legacy behavior remains the only reachable route.
-- **Implementation commit:** `feat(tracker): prepare evaluator registration identity`
-- **Required tracker-accounting commit:** `docs(plan): record handoff chunk 01`; changes only this checklist and must land before Chunk 02 starts.
-- [ ] Implementation complete
-- [ ] Focused verification complete, including negative activation gate
-- [ ] Focused review complete
-- [ ] Tracker-accounting commit complete
+- **Implementation commit:** `174ecb01d2834398c9b0c2496c0f53a679ed5730` (`feat(tracker): prepare evaluator registration identity`).
+- **Focused verification:** `pnpm exec vitest run tests/tracker.spec.ts tests/recovery.spec.ts tests/controller.spec.ts` passed 3 files and 121 tests; `pnpm run typecheck` passed. LSP diagnostics were unavailable because no language server was installed.
+- **Focused review:** Clean after multiple fix loops; two independent final reviewers found no unresolved issue. Resolved findings included deterministic UTF-16 canonical ordering and length-prefixed fingerprinting, evaluator/local-dataset path-overlap rejection, strict rejection of malformed, extended, duplicate-key, non-canonical, or mismatched durable registration evidence, monotonic registration presence, atomic registered-run rollback, and negative activation gates keeping production start, recovery, and terminal replay on the legacy route.
+- **Required tracker-accounting commit:** `docs(plan): record handoff chunk 01`; this checklist-only accounting change is complete and ready to land before Chunk 02 starts. Its SHA remains external until the commit exists.
+- **Rollback:** Revert the Chunk 01 implementation and checklist-only accounting commits before Chunk 02 begins. Do not down-migrate a tracker already opened at the advanced schema; roll forward while preserving legacy/new discrimination and durable registration evidence.
+- [x] Implementation complete
+- [x] Focused verification complete, including negative activation gate
+- [x] Focused review complete
+- [x] Tracker-accounting commit complete
 
 ### Chunk 02 — Prepare inert frozen-file boundary primitives
 
@@ -409,7 +412,7 @@ Fill each implementation row only after the fact exists. Rows 00-07 require the 
 | Chunk | Implementation commit | Focused verification evidence | Review result | Tracker-accounting commit | Rollback note |
 |---|---|---|---|---|---|
 | 00 | `e2d3e1ef8a7fb053afad0f8874621a34aa67d712` | Commit changed only this checklist; H-01..H-15 rows contain every required field and three initially unchecked statuses. | Clean; independent plan gates found no unresolved issue. | `docs(plan): record handoff chunk 00` — complete and ready to land; SHA external until committed. | Revert the tracker-only implementation and accounting commits before dependent work; no code, runtime state, or historical plan migration. |
-| 01 | _unchecked_ | _unchecked_ | _unchecked_ | `docs(plan): record handoff chunk 01` — _unchecked_ | Inert primitives only; revert before dependent preparation, with legacy/new schema discrimination intact. |
+| 01 | `174ecb01d2834398c9b0c2496c0f53a679ed5730` | `pnpm exec vitest run tests/tracker.spec.ts tests/recovery.spec.ts tests/controller.spec.ts`: 3 files/121 tests passed; `pnpm run typecheck`: passed; LSP unavailable because no language server was installed. | Clean after multiple fix loops; two independent final reviewers found no unresolved issue. Key fixes covered canonical fingerprinting/order, path-overlap and corrupt/non-canonical evidence rejection, monotonic/atomic persistence, and inert production activation gates. | `docs(plan): record handoff chunk 01` — complete and ready to land; SHA external until committed. | Revert implementation and accounting before Chunk 02; never down-migrate a tracker opened at the advanced schema—roll forward preserving legacy/new discrimination and durable evidence. |
 | 02 | _unchecked_ | _unchecked_ | _unchecked_ | `docs(plan): record handoff chunk 02` — _unchecked_ | Inert helpers only; reverse before activation and preserve existing evaluator behavior. |
 | 03 | _unchecked_ | _unchecked_ | _unchecked_ | `docs(plan): record handoff chunk 03` — _unchecked_ | Inert registry/schema machinery only; reverse before activation without changing the registered legacy route. |
 | 04 | _unchecked_ | _unchecked_ | _unchecked_ | `docs(plan): record handoff chunk 04` — _unchecked_ | Before any new-contract run exists, reverse only with legacy/new guards intact. After one exists, roll forward; preserve manifests, fingerprints, provenance, and evidence; never reinterpret new or legacy policy. |
