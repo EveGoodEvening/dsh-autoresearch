@@ -346,6 +346,14 @@ For H-01, H-03, H-04, and H-05, this amendment adds Chunk 03R as an additional o
 - [x] Focused review complete
 - [x] Tracker-accounting commit complete
 
+#### Chunk 03R reopened review-fix accounting (append-only)
+
+- **Rationale:** Activation review reopened the already completed and accounted Chunk 03R because activation required a claim-preserving terminal lock recovery primitive; this was a defect in the shared helper contract, not a new activation chunk.
+- **Later review-fix commits:** `653add91657902e3e4889796da510dbdb1d191b9` and `9d6b3ca503fa27256095765a1dbdc807188c6689`.
+- **Clean-tip verification:** At the resulting clean Chunk 03R tip, `pnpm exec vitest run tests/git.spec.ts tests/tracker.spec.ts tests/evaluator.spec.ts tests/contracts.spec.ts` passed 4 files and 180 tests; `pnpm run typecheck` passed.
+- **Reopened review result:** Clean; two final reviewers found no unresolved issue.
+- **Accounting effect:** The prior Chunk 03R completion and tracker-accounting record remain valid historical facts. These later commits supersede the helper defect and are the current reviewed Chunk 03R preparation; Chunk 03R remains complete, with no new pending chunk or status introduced.
+
 ### Chunk 04 — Activate Host authority and frozen evaluator/data identity
 
 - **Claims:** H-01, H-03, H-04, H-05 activation and legacy v6/raw-policy resume contract.
