@@ -293,12 +293,15 @@ Chunks 01-03 are deliberately inert preparation. Until Chunk 04 lands, the regis
 - **Work:** Add reusable primitives that validate sorted normalized repository-relative regular-file declarations, derive SHA-256 digests only from an isolated worktree checked out at exactly `start_commit`, protect exact evaluator/local-dataset paths regardless of mutable globs, recompute run-creation manifest digests on attempts/resume, and perform attempt-local pre/post-spawn device/inode anti-swap checks. External datasets use only normalized algorithm-qualified immutable identity. These helpers remain uncalled by production controller/recovery routes.
 - **Depends on:** Chunk 01 and its tracker-accounting commit.
 - **Exact verification:** Focused evaluator/Git tests cover missing, symlinked, renamed, content-replaced, broad-glob, dirty-caller, external-digest, and attempt-local inode/dev swap cases. The activation-gate test proves production runs still cannot derive, persist, enforce, resume, or interpret a new-contract manifest.
-- **Implementation commit:** `feat(evaluator): prepare frozen input verification`
-- **Required tracker-accounting commit:** `docs(plan): record handoff chunk 02`; changes only this checklist and must land before Chunk 03 starts.
-- [ ] Implementation complete
-- [ ] Focused verification complete, including negative activation gate
-- [ ] Focused review complete
-- [ ] Tracker-accounting commit complete
+- **Implementation commit:** `75949d0fe7aa504537e98b5941e14f7da364279e` (`feat(evaluator): prepare frozen input verification`).
+- **Focused verification:** `pnpm exec vitest run tests/evaluator.spec.ts tests/git.spec.ts` passed 2 files and 78 tests; `pnpm run typecheck` passed.
+- **Focused review:** Clean after resolving alias handling, immutable-object behavior, and property-descriptor findings; one clean final reviewer found no unresolved issue. The sole contrary finding demanded runtime activation, but two independent reviews refuted it because production activation is explicitly prohibited until Chunk 04.
+- **Required tracker-accounting commit:** `docs(plan): record handoff chunk 02`; this checklist-only accounting change is complete and ready to land before Chunk 03 starts. Its SHA remains external until the commit exists.
+- **Rollback:** Revert the Chunk 02 implementation and checklist-only accounting commits before Chunk 03 begins; the helpers are inert, so preserve existing evaluator behavior and do not activate or interpret the new frozen-input contract.
+- [x] Implementation complete
+- [x] Focused verification complete, including negative activation gate
+- [x] Focused review complete
+- [x] Tracker-accounting commit complete
 
 ### Chunk 03 — Prepare inert Host registry and tool-contract machinery
 
@@ -413,7 +416,7 @@ Fill each implementation row only after the fact exists. Rows 00-07 require the 
 |---|---|---|---|---|---|
 | 00 | `e2d3e1ef8a7fb053afad0f8874621a34aa67d712` | Commit changed only this checklist; H-01..H-15 rows contain every required field and three initially unchecked statuses. | Clean; independent plan gates found no unresolved issue. | `docs(plan): record handoff chunk 00` — complete and ready to land; SHA external until committed. | Revert the tracker-only implementation and accounting commits before dependent work; no code, runtime state, or historical plan migration. |
 | 01 | `174ecb01d2834398c9b0c2496c0f53a679ed5730` | `pnpm exec vitest run tests/tracker.spec.ts tests/recovery.spec.ts tests/controller.spec.ts`: 3 files/121 tests passed; `pnpm run typecheck`: passed; LSP unavailable because no language server was installed. | Clean after multiple fix loops; two independent final reviewers found no unresolved issue. Key fixes covered canonical fingerprinting/order, path-overlap and corrupt/non-canonical evidence rejection, monotonic/atomic persistence, and inert production activation gates. | `docs(plan): record handoff chunk 01` — complete and ready to land; SHA external until committed. | Revert implementation and accounting before Chunk 02; never down-migrate a tracker opened at the advanced schema—roll forward preserving legacy/new discrimination and durable evidence. |
-| 02 | _unchecked_ | _unchecked_ | _unchecked_ | `docs(plan): record handoff chunk 02` — _unchecked_ | Inert helpers only; reverse before activation and preserve existing evaluator behavior. |
+| 02 | `75949d0fe7aa504537e98b5941e14f7da364279e` | `pnpm exec vitest run tests/evaluator.spec.ts tests/git.spec.ts`: 2 files/78 tests passed; `pnpm run typecheck`: passed. | Clean after resolving alias, immutable-object, and descriptor findings; one clean final reviewer found no unresolved issue. The sole contrary finding demanded runtime activation and was independently refuted twice because activation is explicitly prohibited until Chunk 04. | `docs(plan): record handoff chunk 02` — complete and ready to land; SHA external until committed. | Revert implementation and accounting before Chunk 03; helpers are inert, preserve existing evaluator behavior, and do not activate or interpret the new frozen-input contract. |
 | 03 | _unchecked_ | _unchecked_ | _unchecked_ | `docs(plan): record handoff chunk 03` — _unchecked_ | Inert registry/schema machinery only; reverse before activation without changing the registered legacy route. |
 | 04 | _unchecked_ | _unchecked_ | _unchecked_ | `docs(plan): record handoff chunk 04` — _unchecked_ | Before any new-contract run exists, reverse only with legacy/new guards intact. After one exists, roll forward; preserve manifests, fingerprints, provenance, and evidence; never reinterpret new or legacy policy. |
 | 05 | _unchecked_ | _unchecked_ | _unchecked_ | `docs(plan): record handoff chunk 05` — _unchecked_ | If schema advances, roll forward after migration; never down-migrate an opened tracker. |
