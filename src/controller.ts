@@ -3,33 +3,34 @@ import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { requestProposal, ProposalAgentError, type ProposalHistoryEntry } from './agent.js'
-import { normalizeRunPolicy, type ResolvedConfig } from './config.js'
+import { normalizeRunPolicy, type HostEvaluatorRegistration, type ResolvedConfig } from './config.js'
 import { createEvaluatorArtifactWriterFactory } from './evaluator-artifacts.js'
-import { createEvaluatorBoundary, freezeEvaluatorProvenance, revalidateEvaluatorBoundary, runEvaluator, type EvaluatorResult } from './evaluator.js'
+import { captureFrozenFileAttempt, createEvaluatorBoundary, evaluatorEvaluationSha256, freezeEvaluatorProvenanceFromManifest, recomputeRegistrationManifest, revalidateEvaluatorBoundary, revalidateFrozenFileAttempt, runEvaluator, type FrozenEvaluatorProvenance } from './evaluator.js'
 import {
-  acquireControllerClaim, acquireRunLock, allocateRunWorktree, checkoutCandidateForEvaluation, commitCandidate, currentControllerProcessIdentity, discoverRepository, durableGitIdentity,
-  heartbeatControllerClaim, makeRunGitIdentity, reconcileAcceptedHead, reconcileRejectedHead, recoverTerminalRunLock, releaseControllerClaim,
-  removeRunWorktree, resolveGitExecutable, restoreAcceptedWorktree, snapshotCandidate, validateCandidate,
+  acquireControllerClaim, acquireRunLock, allocateRunWorktree, checkoutCandidateForEvaluation, commitCandidate, currentControllerProcessIdentity, deriveRegistrationManifestAtStartCommit, discoverRepository, durableGitIdentity,
+  GitBoundaryError, heartbeatControllerClaim, makeRunGitIdentity, reconcileAcceptedHead, reconcileRejectedHead, recoverTerminalRunLock, recoverTerminalRunLockUnderControllerClaim, releaseControllerClaim, rollbackRunActivationAuthority,
+  removeRunWorktree, resolveGitExecutable, restoreAcceptedWorktree, runGit, snapshotCandidate, validateCandidate, validateFrozenCandidatePaths,
   verifyExactWorktree, type CandidateSnapshot, type ControllerProcessIdentity, type GitCommandOptions, type GitConfigBaseline,
   type RepositoryDiscovery, type RunGitIdentity,
 } from './git.js'
-import { reconcileRecovery, type RecoveredEvaluation, type RecoveredExperiment, type RecoveryDirective } from './recovery.js'
-import { DurableTracker, type ArtifactRecord } from './tracker.js'
+import { classifyDurableRegistration, reconcileRecovery, type RecoveredEvaluation, type RecoveredExperiment, type RecoveryDirective } from './recovery.js'
+import { DurableTracker, TRACKER_SCHEMA_VERSION, serializeDurablePolicy, serializeRedactedDurablePolicy, type ArtifactRecord } from './tracker.js'
 import { applyRunRetention, sweepRepositoryRetention } from './retention.js'
 import {
-  decodeRunResult, isTargetReached, type AutoresearchRunResult, type AutoresearchToolInput,
-  type BestResult, type BlockerEvidence, type DurableRunPolicy, type ExperimentDurableState,
+  decodeRunResult, isTargetReached, registrationFingerprint, type ActivationAutoresearchToolInput, type AutoresearchRunResult,
+  type BestResult, type BlockerEvidence, type DurableRegistrationIdentity, type DurableRunPolicy, type ExperimentDurableState,
   type NormalizedRunPolicy, type ResultCounts, type RunDurableState, type RunId,
 } from './types.js'
 
 export interface AutoresearchRunReady { readonly runId: RunId; readonly tracker: string; readonly branch: string; readonly worktree: string }
-export interface AutoresearchRunControllerOptions { readonly config: ResolvedConfig; readonly input: AutoresearchToolInput; readonly parent: Agent; readonly signal: AbortSignal; readonly jobId?: string }
+export interface AutoresearchRunControllerOptions { readonly config: ResolvedConfig; readonly input: ActivationAutoresearchToolInput; readonly parent: Agent; readonly signal: AbortSignal; readonly jobId?: string }
 
 interface Runtime {
   readonly runId: string; readonly policy: DurableRunPolicy; readonly discovery: RepositoryDiscovery
   readonly identity: RunGitIdentity; readonly tracker: DurableTracker; readonly gitExecutable: string
   readonly policySha256: string; readonly provenanceSha256: string; readonly gitOptions: Omit<GitCommandOptions, 'cwd' | 'signal'>
-  readonly claimOwner: string; readonly claimProcess: ControllerProcessIdentity
+  readonly claimOwner?: string; readonly claimProcess?: ControllerProcessIdentity
+  readonly registration?: DurableRegistrationIdentity; readonly legacy?: 'terminal' | 'nonterminal'; readonly readonlyTerminal?: true; readonly preclaimBlock?: { code: string; message: string }
 }
 const CONTROLLER_LEASE_MS = 30_000
 const CONTROLLER_HEARTBEAT_MS = 5_000
@@ -127,62 +128,173 @@ export class AutoresearchRunController {
   private async initialize(): Promise<Runtime> {
     let tracker: DurableTracker | undefined
     let claimed: { runId: string; ownerId: string } | undefined
+    let allocated: { discovery: RepositoryDiscovery; identity: RunGitIdentity; gitExecutable: string; gitOptions: Omit<GitCommandOptions, 'cwd' | 'signal'> } | undefined
+    let registeredRunPendingActivation: string | undefined
     try {
-      const normalizedPolicy = normalizeRunPolicy(this.options.input, this.options.config, String(this.options.parent.session.header.cwd))
-      const gitOptions = { timeoutMs: normalizedPolicy.timeoutMs, graceMs: this.options.config.terminationGraceMs, maxStdoutBytes: this.options.config.maxStdoutBytes, maxStderrBytes: this.options.config.maxStderrBytes }
+      const callerCwd = String(this.options.parent.session.header.cwd)
+      const resumeRunId = 'resume_run_id' in this.options.input ? this.options.input.resume_run_id : undefined
+      const isResume = resumeRunId !== undefined
+      const selected = 'evaluator_id' in this.options.input ? this.options.config.evaluatorRegistry.resolve(this.options.input.evaluator_id) : undefined
+      if (!isResume && selected === undefined) throw new TypeError('new autoresearch runs require a known evaluator_id')
+      const provisionalTimeout = this.options.input.timeout_ms ?? this.options.config.defaultTimeoutMs
+      if (!Number.isSafeInteger(provisionalTimeout) || provisionalTimeout < 1 || provisionalTimeout > this.options.config.maxTimeoutMs) throw new TypeError('timeout_ms exceeds deployment maximum')
+      const gitOptions = { timeoutMs: provisionalTimeout, graceMs: this.options.config.terminationGraceMs, maxStdoutBytes: this.options.config.maxStdoutBytes, maxStderrBytes: this.options.config.maxStderrBytes }
       const gitExecutable = await resolveGitExecutable(this.ctx, this.options.config.gitExecutable, this.aborter.signal)
-      let discovery = await discoverRepository(this.ctx, gitExecutable, normalizedPolicy.repository, { ...gitOptions, signal: this.aborter.signal })
-      const runId = normalizedPolicy.resumeRunId ?? randomUUID()
-      sweepRepositoryRetention(discovery.gitCommonDir, this.options.config.stateRoot, this.options.config, runId)
+      let discovery = await discoverRepository(this.ctx, gitExecutable, this.options.input.repository ?? callerCwd, { ...gitOptions, signal: this.aborter.signal })
+      const runId = resumeRunId ?? randomUUID()
+      if (!isResume) sweepRepositoryRetention(discovery.gitCommonDir, this.options.config.stateRoot, this.options.config, runId)
       const trackerPath = join(discovery.gitCommonDir, this.options.config.stateRoot, 'runs', runId, 'tracker.sqlite')
-      tracker = DurableTracker.open(trackerPath)
-      const existing = tracker.getRun(runId)
-      let runTag = normalizedPolicy.runTag
-      if (normalizedPolicy.resumeRunId) {
-        if (!existing) throw new Error(`resume run ${runId} has no durable tracker row`)
-        runTag = String(existing['run_tag'])
-        discovery = { ...discovery, startCommit: String(existing['start_commit']) }
+      if (isResume) {
+        const preflight = DurableTracker.openReadOnly(trackerPath)
+        let preflightAccepted = false
+        try {
+          const existing = preflight.getRun(runId)
+          if (!existing) throw new Error(`resume run ${runId} has no durable tracker row`)
+          const state = String(existing['state']) as RunDurableState
+          const durablePolicy = decodeDurablePolicy(existing['policy_json'])
+          const durableStartCommit = String(existing['start_commit'])
+          const resumeDiscovery = { ...discovery, startCommit: durableStartCommit }
+          const identity = makeRunGitIdentity(this.options.config, resumeDiscovery, String(existing['run_tag']), runId)
+          const terminal = isTerminalState(state)
+          const policySha256 = String(existing['policy_sha256'])
+          const provenanceSha256 = String(existing['provenance_sha256'])
+          const classification = classifyDurableRegistration(preflight, runId)
+          if (classification.kind === 'legacy') {
+            tracker = preflight
+            if (!terminal) return { runId, policy: durablePolicy, discovery: resumeDiscovery, identity, tracker, gitExecutable, policySha256, provenanceSha256, gitOptions, legacy: 'nonterminal' }
+            const identityBlock = validateReadOnlyResumeIdentity(existing, discovery, identity, durablePolicy, policySha256, undefined, true)
+            if (identityBlock) return { runId, policy: durablePolicy, discovery: resumeDiscovery, identity, tracker, gitExecutable, policySha256, provenanceSha256, gitOptions, preclaimBlock: identityBlock }
+            return { runId, policy: durablePolicy, discovery: resumeDiscovery, identity, tracker, gitExecutable, policySha256, provenanceSha256, gitOptions, legacy: 'terminal' }
+          }
+          if (classification.kind === 'blocked') {
+            tracker = preflight
+            return registrationBlockedRuntime(tracker, runId, durablePolicy, resumeDiscovery, identity, gitExecutable, gitOptions, classification.evidence.code, classification.evidence.message)
+          }
+          let current: HostEvaluatorRegistration
+          try {
+            current = this.options.config.evaluatorRegistry.resolve(classification.identity.evaluatorId)
+            if (registrationFingerprint(current, classification.identity.manifest) !== classification.identity.registrationFingerprint) throw new TypeError('evaluator registration differs from the immutable durable registration')
+          } catch (error) {
+            tracker = preflight
+            const message = error instanceof Error ? error.message : `evaluator registration ${classification.identity.evaluatorId} is unavailable`
+            return registrationBlockedRuntime(tracker, runId, durablePolicy, resumeDiscovery, identity, gitExecutable, gitOptions, 'evaluator-registration-mismatch', message)
+          }
+          let policy = durablePolicy
+          let acceptedPolicySha256 = policySha256
+          let expectedProvenance: FrozenEvaluatorProvenance | undefined
+          if (!terminal) {
+            policy = canonicalPolicy(normalizeRunPolicy(this.options.input, this.options.config, callerCwd, current), resumeDiscovery.repository, String(existing['run_tag']))
+            acceptedPolicySha256 = hash(policy)
+            try {
+              expectedProvenance = freezeEvaluatorProvenanceFromManifest(provenanceInput(policy, acceptedPolicySha256, evaluatorEvaluationSha256(policy.evaluation), current), classification.identity.manifest)
+            } catch (error) {
+              tracker = preflight
+              return { runId, policy, discovery: resumeDiscovery, identity, tracker, gitExecutable, policySha256: acceptedPolicySha256, provenanceSha256, gitOptions, registration: classification.identity, preclaimBlock: { code: 'provenance-mismatch', message: error instanceof Error ? error.message : 'durable evaluator provenance cannot be reconstructed' } }
+            }
+          }
+          const identityBlock = validateReadOnlyResumeIdentity(existing, discovery, identity, policy, acceptedPolicySha256, expectedProvenance, terminal)
+          if (identityBlock) {
+            tracker = preflight
+            return { runId, policy, discovery: resumeDiscovery, identity, tracker, gitExecutable, policySha256: acceptedPolicySha256, provenanceSha256, gitOptions, registration: classification.identity, preclaimBlock: identityBlock }
+          }
+          const acceptedIdentity = captureAcceptedResumeIdentity(preflight, runId)
+          preflight.close()
+          preflightAccepted = true
+          tracker = DurableTracker.open(trackerPath)
+          revalidateAcceptedResumeIdentity(tracker, runId, acceptedIdentity)
+          const writableRegistration = classifyDurableRegistration(tracker, runId)
+          if (writableRegistration.kind !== 'registered' || writableRegistration.identity.registrationFingerprint !== classification.identity.registrationFingerprint) throw new Error('durable evaluator registration changed between read-only classification and writable open')
+          const writableRow = tracker.getRun(runId)
+          if (!writableRow) throw new Error(`resume run ${runId} has no durable tracker row after writable open`)
+          if (terminal) {
+            const claimOwner = randomUUID(); const claimProcess = currentControllerProcessIdentity()
+            try {
+              acquireControllerClaim(tracker, runId, claimOwner, CONTROLLER_LEASE_MS, new Date(), claimProcess)
+            } catch (error) {
+              if (!(error instanceof GitBoundaryError) || error.code !== 'run-controller-active') throw error
+              tracker.close()
+              tracker = DurableTracker.openReadOnly(trackerPath)
+              const runtime = { runId, policy, discovery: resumeDiscovery, identity, tracker, gitExecutable, policySha256: acceptedPolicySha256, provenanceSha256, gitOptions, registration: writableRegistration.identity, readonlyTerminal: true as const }
+              this.runtime = runtime; tracker = undefined
+              return runtime
+            }
+            claimed = { runId, ownerId: claimOwner }
+            recoverTerminalRunLockUnderControllerClaim(tracker, runId, claimOwner, claimProcess)
+            applyRunRetention(tracker, runId, this.options.config)
+            sweepRepositoryRetention(resumeDiscovery.gitCommonDir, this.options.config.stateRoot, this.options.config, runId)
+
+            const runtime = { runId, policy, discovery: resumeDiscovery, identity, tracker, gitExecutable, policySha256: acceptedPolicySha256, provenanceSha256, gitOptions, claimOwner, claimProcess, registration: writableRegistration.identity }
+            this.startClaimHeartbeat(runtime); this.runtime = runtime; tracker = undefined
+            return runtime
+          }
+          const claimOwner = randomUUID(); const claimProcess = currentControllerProcessIdentity()
+          acquireControllerClaim(tracker, runId, claimOwner, CONTROLLER_LEASE_MS, new Date(), claimProcess); claimed = { runId, ownerId: claimOwner }
+          applyRunRetention(tracker, runId, this.options.config)
+          sweepRepositoryRetention(resumeDiscovery.gitCommonDir, this.options.config.stateRoot, this.options.config, runId)
+          const runtime = { runId, policy, discovery: resumeDiscovery, identity, tracker, gitExecutable, policySha256: acceptedPolicySha256, provenanceSha256, gitOptions, claimOwner, claimProcess, registration: writableRegistration.identity }
+          this.startClaimHeartbeat(runtime); this.runtime = runtime; tracker = undefined
+          return runtime
+        } finally {
+          if (!preflightAccepted && tracker !== preflight) preflight.close()
+        }
       }
-      if (!runTag) throw new TypeError('run tag is unavailable')
-      const policy = canonicalPolicy(normalizedPolicy, discovery.repository, runTag)
+      tracker = DurableTracker.open(trackerPath)
+      const registration = selected!
+      const normalized = normalizeRunPolicy(this.options.input, this.options.config, callerCwd, registration)
+      const runTag = normalized.runTag!
+      const policy = canonicalPolicy(normalized, discovery.repository, runTag)
       const policySha256 = hash(policy)
-      const discoveryBoundary = createEvaluatorBoundary(discovery.repository, { evaluation: policy.evaluation, normalizedPolicySha256: policySha256 })
-      const provenance = freezeEvaluatorProvenance(discovery.repository, provenanceInput(policy, policySha256, discoveryBoundary.evaluationSha256))
-      const provenanceSha256 = provenance.sha256
       const identity = makeRunGitIdentity(this.options.config, discovery, runTag, runId)
-      if (!existing) tracker.createRun({ runId, repositoryId: discovery.repositoryId, repository: discovery.repository, gitCommonDir: discovery.gitCommonDir, callerCwd: discovery.callerCwd, startCommit: discovery.startCommit, runTag, branch: identity.branch, worktree: identity.worktree, agentId: String(this.options.parent.id), sessionId: String(this.options.parent.session.header.id), policy, policySha256, provenance, provenanceSha256 })
-      const claimOwner = randomUUID()
-      const claimProcess = currentControllerProcessIdentity()
-      acquireControllerClaim(tracker, runId, claimOwner, CONTROLLER_LEASE_MS, new Date(), claimProcess)
-      claimed = { runId, ownerId: claimOwner }
-      applyRunRetention(tracker, runId, this.options.config)
+      await allocateRunWorktree(this.ctx, gitExecutable, discovery, identity, { runId, repositoryId: discovery.repositoryId, startCommit: discovery.startCommit, branch: identity.branch, worktree: identity.worktree }, { ...gitOptions, signal: this.aborter.signal })
+      allocated = { discovery, identity, gitExecutable, gitOptions }
+      const manifest = await deriveRegistrationManifestAtStartCommit(this.ctx, gitExecutable, discovery, identity, registration, { ...gitOptions, signal: this.aborter.signal })
+      const evaluationSha256 = evaluatorEvaluationSha256(policy.evaluation)
+      const provenance = freezeEvaluatorProvenanceFromManifest(provenanceInput(policy, policySha256, evaluationSha256, registration), manifest)
+      const registrationIdentity = tracker.createRegisteredRun({ runId, repositoryId: discovery.repositoryId, repository: discovery.repository, gitCommonDir: discovery.gitCommonDir, callerCwd: discovery.callerCwd, startCommit: discovery.startCommit, runTag, branch: identity.branch, worktree: identity.worktree, agentId: String(this.options.parent.id), sessionId: String(this.options.parent.session.header.id), policy, policySha256, provenance, provenanceSha256: provenance.sha256, registration, manifest })
+      registeredRunPendingActivation = runId
       if (this.jobId !== undefined) tracker.checkpointRun(runId, { outcome: { kind: 'background-job-registered', jobId: this.jobId } })
-      const runtime = { runId, policy, discovery, identity, tracker, gitExecutable, policySha256, provenanceSha256, gitOptions, claimOwner, claimProcess }
-      this.startClaimHeartbeat(runtime)
-      this.runtime = runtime
-      if (this.cancellationRequested) this.persistCancellationIntent()
-      tracker = undefined
+      acquireRunLock(tracker, identity, discovery.repositoryId, this.options.config.maxActiveRunsPerRepository)
+      const claimOwner = randomUUID(); const claimProcess = currentControllerProcessIdentity()
+      acquireControllerClaim(tracker, runId, claimOwner, CONTROLLER_LEASE_MS, new Date(), claimProcess); claimed = { runId, ownerId: claimOwner }
+      registeredRunPendingActivation = undefined
+      const runtime = { runId, policy, discovery, identity, tracker, gitExecutable, policySha256, provenanceSha256: provenance.sha256, gitOptions, claimOwner, claimProcess, registration: registrationIdentity }
+      this.startClaimHeartbeat(runtime); this.runtime = runtime; tracker = undefined; allocated = undefined
       return runtime
     } catch (error) {
-      if (tracker && claimed) releaseControllerClaim(tracker, claimed.runId, claimed.ownerId)
-      tracker?.close()
+      const cleanupErrors: unknown[] = []
+      const cleanup = (operation: () => void): void => { try { operation() } catch (cleanupError) { cleanupErrors.push(cleanupError) } }
+      const cleanupAsync = async (operation: () => Promise<unknown>): Promise<void> => { try { await operation() } catch (cleanupError) { cleanupErrors.push(cleanupError) } }
+      if (tracker && claimed) cleanup(() => { releaseControllerClaim(tracker!, claimed!.runId, claimed!.ownerId) })
+      if (tracker && registeredRunPendingActivation) {
+        cleanup(() => { rollbackRunActivationAuthority(tracker!, registeredRunPendingActivation!) })
+        cleanup(() => { tracker!.rollbackRegisteredRunActivation(registeredRunPendingActivation!) })
+      }
+      if (tracker) cleanup(() => { tracker!.close() })
+      if (allocated) {
+        await cleanupAsync(() => removeRunWorktree(this.ctx, allocated!.gitExecutable, allocated!.discovery, allocated!.identity, allocated!.gitOptions))
+        await cleanupAsync(() => runGit(this.ctx, allocated!.gitExecutable, ['update-ref', '-d', allocated!.identity.acceptedRef], { ...allocated!.gitOptions, cwd: allocated!.discovery.repository }))
+        await cleanupAsync(() => runGit(this.ctx, allocated!.gitExecutable, ['branch', '-D', allocated!.identity.branch], { ...allocated!.gitOptions, cwd: allocated!.discovery.repository }))
+      }
+      if (cleanupErrors.length > 0) throw new AggregateError([error, ...cleanupErrors], `autoresearch activation failed and ${cleanupErrors.length} cleanup phase(s) also failed`, { cause: error })
       throw error
     }
   }
   private startClaimHeartbeat(runtime: Runtime): void {
+    if (!runtime.claimOwner || !runtime.claimProcess) return
     this.claimHeartbeat = setInterval(() => {
-      try { heartbeatControllerClaim(runtime.tracker, runtime.runId, runtime.claimOwner, CONTROLLER_LEASE_MS, new Date(), runtime.claimProcess) }
+      try { heartbeatControllerClaim(runtime.tracker, runtime.runId, runtime.claimOwner!, CONTROLLER_LEASE_MS, new Date(), runtime.claimProcess!) }
       catch (error) { this.claimFailure = error; if (!this.aborter.signal.aborted) this.aborter.abort(error) }
     }, CONTROLLER_HEARTBEAT_MS)
     this.claimHeartbeat.unref()
   }
   private assertClaim(runtime: Runtime): void {
+    if (!runtime.claimOwner || !runtime.claimProcess) return
     if (this.claimFailure) throw this.claimFailure
     heartbeatControllerClaim(runtime.tracker, runtime.runId, runtime.claimOwner, CONTROLLER_LEASE_MS, new Date(), runtime.claimProcess)
   }
   private releaseClaim(runtime: Runtime): void {
     if (this.claimHeartbeat) { clearInterval(this.claimHeartbeat); this.claimHeartbeat = undefined }
-    releaseControllerClaim(runtime.tracker, runtime.runId, runtime.claimOwner, runtime.claimProcess)
+    if (runtime.claimOwner && runtime.claimProcess) releaseControllerClaim(runtime.tracker, runtime.runId, runtime.claimOwner, runtime.claimProcess)
   }
 
   private persistCancellationIntent(): void {
@@ -193,8 +305,16 @@ export class AutoresearchRunController {
     runtime.tracker.checkpointRun(runtime.runId, { intent: { kind: 'cancellation', reason: this.cancelReason } })
     this.cancellationPersisted = true
   }
-
   private async drive(runtime: Runtime): Promise<AutoresearchRunResult> {
+    if (runtime.legacy || runtime.readonlyTerminal || runtime.preclaimBlock) {
+      if (!this.readySettled) { this.readySettled = true; this.resolveReady({ runId: runtime.runId, tracker: runtime.tracker.path, branch: runtime.identity.branch, worktree: runtime.identity.worktree }) }
+      if (runtime.legacy === 'nonterminal') return readonlyBlockedResult(runtime, 'legacy-evaluator-policy-unsupported', 'legacy nonterminal runs cannot be resumed under the Host evaluator contract')
+      if (runtime.preclaimBlock) return readonlyBlockedResult(runtime, runtime.preclaimBlock.code, runtime.preclaimBlock.message)
+      const directive = await reconcileRecovery(this.ctx, { ...runtime, signal: this.aborter.signal })
+      if (directive.kind === 'blocked') return readonlyBlockedResult(runtime, directive.code, directive.evidence[0]?.message ?? 'legacy terminal evidence is invalid')
+      if (directive.kind !== 'terminal') throw new Error(`legacy terminal replay validation returned ${directive.kind}`)
+      return readonlyTerminalReplay(runtime, directive)
+    }
     this.assertClaim(runtime)
     let directive = await reconcileRecovery(this.ctx, { ...runtime, signal: this.aborter.signal })
     while (true) {
@@ -213,6 +333,13 @@ export class AutoresearchRunController {
       if (directive.kind === 'ready') {
         if (runtime.policy.target !== undefined && isTargetReached(runtime.policy.metricDirection, directive.best.metric, runtime.policy.target)) return this.complete(runtime, 'target-reached', directive.best)
         if (directive.nextOrdinal > runtime.policy.maxExperiments) return this.complete(runtime, 'budget-limited', directive.best)
+        try {
+          await restoreAcceptedWorktree(this.ctx, runtime.gitExecutable, runtime.identity.worktree, runtime.identity, directive.restoreCommit, { ...runtime.gitOptions, signal: this.aborter.signal })
+          if (!runtime.registration) throw new TypeError('durable evaluator registration is unavailable')
+          recomputeRegistrationManifest(runtime.identity.worktree, runtime.registration.manifest)
+        } catch (error) {
+          return readonlyBlockedResult(runtime, 'evaluator-registration-mismatch', error instanceof Error ? error.message : 'frozen evaluator registration could not be revalidated')
+        }
         await this.propose(runtime, directive.best, directive.nextOrdinal)
         this.assertClaim(runtime); directive = await reconcileRecovery(this.ctx, { ...runtime, signal: this.aborter.signal }); continue
       }
@@ -239,16 +366,13 @@ export class AutoresearchRunController {
     try {
       const proposal = await requestProposal(this.ctx, { parent: this.options.parent, runId: r.runId, experimentId, ordinal, workspace: { repositoryId: r.discovery.repositoryId, branch: r.identity.branch, worktree: r.identity.worktree, startCommit: r.discovery.startCommit, acceptedCommit: best.commit }, policy: r.policy, policySha256: r.policySha256, provenanceSha256: r.provenanceSha256, best, history: history(r.tracker, r.runId), config: this.options.config, gitExecutable: r.gitExecutable, gitOptions: r.gitOptions, persistTrustedGitConfig: baseline => { trusted = baseline; r.tracker.checkpointRun(r.runId, { outcome: { kind: 'trusted-git-config', experimentId, baseline } }) }, signal: this.aborter.signal })
       if (proposal.blockerClaim) r.tracker.checkpointRun(r.runId, { outcome: { kind: 'child-blocker-claim', experimentId, claim: proposal.blockerClaim, authoritative: false } })
-      if (!trusted) throw new Error('proposal did not persist trusted Git configuration')
+      if (!trusted || !r.registration) throw new Error('proposal did not preserve trusted evaluator state')
       const snapshot = await snapshotCandidate(this.ctx, r.gitExecutable, r.identity.worktree, trusted, { ...r.gitOptions, signal: this.aborter.signal })
+      validateFrozenCandidatePaths(snapshot, { evaluatorFiles: r.registration.registration.evaluatorFiles, datasetFiles: r.registration.registration.dataset.kind === 'local' ? r.registration.registration.dataset.files : [] })
       const validatedPaths = validateCandidate(snapshot, r.policy)
       r.tracker.prepareCandidate({ experimentId, runId: r.runId, ordinal, kind: 'candidate', parentCommit: best.commit, command: r.policy.evaluation.command, args: r.policy.evaluation.args, ...(r.policy.evaluation.cwd ? { cwd: r.policy.evaluation.cwd } : {}) }, { intent: { kind: 'candidate-snapshot', experimentId, snapshot, validatedPaths } })
     } catch (error) {
-      if (error instanceof ProposalAgentError && (error.code === 'dispose-failed' || error.code === 'not-quiescent')) {
-        this.quiescenceFailure = error
-        r.tracker.transitionRun(r.runId, 'blocked', { terminalReason: error.message, blockedCode: 'attempt-uncertain', quiescent: false, ...(best ? { best } : {}) })
-        return
-      }
+      if (error instanceof ProposalAgentError && (error.code === 'dispose-failed' || error.code === 'not-quiescent')) { this.quiescenceFailure = error; r.tracker.transitionRun(r.runId, 'blocked', { terminalReason: error.message, blockedCode: 'attempt-uncertain', quiescent: false, ...(best ? { best } : {}) }); return }
       if (this.aborter.signal.aborted) throw error
       const evidence = errorEvidence(error)
       r.tracker.checkpointRun(r.runId, { intent: { kind: 'restore-after-proposal-failure', commit: best.commit } })
@@ -269,29 +393,26 @@ export class AutoresearchRunController {
   private async evaluate(r: Runtime, experiment: RecoveredExperiment, commit: string, createExperiment: boolean, attemptOrdinal: number): Promise<void> {
     if (experiment.kind === 'candidate') await checkoutCandidateForEvaluation(this.ctx, r.gitExecutable, r.identity.worktree, r.identity, commit, experiment.parentCommit, { ...r.gitOptions, signal: this.aborter.signal })
     await verifyExactWorktree(this.ctx, r.gitExecutable, r.identity.worktree, commit, { ...r.gitOptions, signal: this.aborter.signal })
+    if (!r.registration) throw new Error('durable evaluator registration is unavailable')
+    recomputeRegistrationManifest(r.identity.worktree, r.registration.manifest)
+    const frozenFiles = captureFrozenFileAttempt(r.identity.worktree, r.registration.manifest)
     if (createExperiment) r.tracker.createExperiment({ experimentId: experiment.experimentId, runId: r.runId, ordinal: experiment.ordinal, kind: experiment.kind, parentCommit: experiment.parentCommit, command: r.policy.evaluation.command, args: r.policy.evaluation.args, ...(r.policy.evaluation.cwd ? { cwd: r.policy.evaluation.cwd } : {}) })
     const row = r.tracker.database.prepare('SELECT state FROM experiments WHERE experiment_id = ?').get(experiment.experimentId)
     if (row?.['state'] === 'baseline-pending') r.tracker.transitionExperiment(experiment.experimentId, 'running')
     const desired = experiment.kind === 'baseline' ? 'baseline-running' : 'candidate-running'
-    const run = r.tracker.getRun(r.runId)!
-    if (run['state'] !== desired) r.tracker.transitionRun(r.runId, desired, { intent: { kind: 'evaluation', experimentId: experiment.experimentId, attemptOrdinal } })
+    if (r.tracker.getRun(r.runId)?.['state'] !== desired) r.tracker.transitionRun(r.runId, desired, { intent: { kind: 'evaluation', experimentId: experiment.experimentId, attemptOrdinal } })
     const attemptId = `${experiment.experimentId}-attempt-${attemptOrdinal}`
-    const boundary = createEvaluatorBoundary(r.identity.worktree, { evaluation: r.policy.evaluation, normalizedPolicySha256: r.policySha256, runId: r.runId, attemptId })
-    revalidateEvaluatorBoundary(r.identity.worktree, boundary)
+    const boundary = createEvaluatorBoundary(r.identity.worktree, { evaluation: r.policy.evaluation, normalizedPolicySha256: r.policySha256, evaluatorFiles: r.registration.registration.evaluatorFiles, runId: r.runId, attemptId })
+    revalidateEvaluatorBoundary(r.identity.worktree, boundary); revalidateFrozenFileAttempt(r.identity.worktree, frozenFiles)
     let intentCreated = false
-    const result = await runEvaluator({ subprocess: this.ctx.subprocess, worktree: r.identity.worktree, boundary, evaluation: r.policy.evaluation, metricName: r.policy.metricName, metricDirection: r.policy.metricDirection, timeoutMs: r.policy.timeoutMs, terminationGraceMs: this.options.config.terminationGraceMs, maxStdoutBytes: this.options.config.maxStdoutBytes, maxStderrBytes: this.options.config.maxStderrBytes, artifactWriterFactory: () => { if (!intentCreated) throw new Error('artifact capability requested before durable attempt intent'); return createEvaluatorArtifactWriterFactory(r.tracker.layout, r.runId, experiment.experimentId, attemptId)() }, environment: r.policy.environment, policy: r.policy, signal: this.aborter.signal, persistence: {
+    const dataset = registrationDatasetMetadata(r.registration.registration)
+    const result = await runEvaluator({ subprocess: this.ctx.subprocess, worktree: r.identity.worktree, boundary, evaluation: r.policy.evaluation, metricName: r.policy.metricName, metricDirection: r.policy.metricDirection, timeoutMs: r.policy.timeoutMs, terminationGraceMs: this.options.config.terminationGraceMs, maxStdoutBytes: this.options.config.maxStdoutBytes, maxStderrBytes: this.options.config.maxStderrBytes, artifactWriterFactory: () => { if (!intentCreated) throw new Error('artifact capability requested before durable attempt intent'); return createEvaluatorArtifactWriterFactory(r.tracker.layout, r.runId, experiment.experimentId, attemptId)() }, environment: r.policy.environment, ...(dataset ? { dataset } : {}), policy: r.policy, signal: this.aborter.signal, persistence: {
       persistSpawnIntent: intent => { r.tracker.createAttemptIntent({ attemptId, runId: r.runId, experimentId: experiment.experimentId, ordinal: attemptOrdinal }, intent); intentCreated = true },
       persistSpawnObserved: facts => r.tracker.recordAttemptObserved(attemptId, facts),
-      persistAttemptOutcome: (outcome, artifacts) => {
-        const attemptResult = outcome.kind === 'measured'
-          ? { kind: 'measured' as const, metric: outcome.metric }
-          : { kind: 'failed' as const, code: outcome.code, message: outcome.message }
-        r.tracker.recordAttemptOutcome(attemptId, {
-          facts: outcome.exit,
-          artifacts: artifacts.map(item => artifact(r, experiment.experimentId, attemptId, item)),
-          result: attemptResult,
-          outcome: { kind: 'evaluator-outcome', result: attemptResult },
-        })
+      persistAttemptOutcome: (outcome, outputArtifacts) => {
+        revalidateFrozenFileAttempt(r.identity.worktree, frozenFiles)
+        const attemptResult = outcome.kind === 'measured' ? { kind: 'measured' as const, metric: outcome.metric } : { kind: 'failed' as const, code: outcome.code, message: outcome.message }
+        r.tracker.recordAttemptOutcome(attemptId, { facts: outcome.exit, artifacts: outputArtifacts.map(item => artifact(r, experiment.experimentId, attemptId, item)), result: attemptResult, outcome: { kind: 'evaluator-outcome', result: attemptResult } })
       },
     } })
     const recovered = { ...result, attemptId, artifacts: result.artifacts.map(item => artifact(r, experiment.experimentId, attemptId, item)) } as RecoveredEvaluation
@@ -413,11 +534,10 @@ export class AutoresearchRunController {
   }
 
   private async finish(r: Runtime, specific: Record<string, unknown>, release = true): Promise<AutoresearchRunResult> {
-    const value = { ...common(r), ...specific }
+    const result = decodeRunResult({ ...common(r), ...specific }, r.policy.metricDirection)
     const recovery = r.tracker.recoveryState(r.runId)
     const safeRelease = release && recovery.run['terminal_quiescent'] === 1 && recovery.processDisposition === 'quiescent'
-    const status = String(specific['status'] ?? '')
-    const successful = status === 'target-reached' || status === 'budget-limited'
+    const successful = result.status === 'target-reached' || result.status === 'budget-limited'
     const removeWorktree = !this.options.config.retainWorktrees && (!this.options.config.cleanupWorktreesOnSuccess || successful)
     if (this.options.config.exportTsv) r.tracker.exportTsv(r.runId, r.tracker.layout.resolve(join('exports', `${r.runId}.tsv`)))
     if (safeRelease && removeWorktree) await removeRunWorktree(this.ctx, r.gitExecutable, r.discovery, r.identity, r.gitOptions)
@@ -425,11 +545,11 @@ export class AutoresearchRunController {
       recoverTerminalRunLock(r.tracker, r.runId)
       applyRunRetention(r.tracker, r.runId, this.options.config)
     }
-    return decodeRunResult(value, r.policy.metricDirection)
+    return result
   }
 }
 
-function provenanceInput(policy: DurableRunPolicy, policySha256: string, evaluationSha256: string) { return { evaluation: policy.evaluation, metricName: policy.metricName, metricDirection: policy.metricDirection, environment: policy.environment, policy: { normalizedPolicySha256: policySha256, evaluationSha256, policy }, ...(policy.provenance.dataset ? { dataset: { dataset: policy.provenance.dataset } } : {}) } }
+function provenanceInput(policy: DurableRunPolicy, policySha256: string, evaluationSha256: string, registration: HostEvaluatorRegistration) { const dataset = registrationDatasetMetadata(registration); return { evaluation: policy.evaluation, evaluatorFiles: registration.evaluatorFiles, metricName: policy.metricName, metricDirection: policy.metricDirection, environment: policy.environment, policy: { normalizedPolicySha256: policySha256, evaluationSha256, policy }, ...(dataset ? { dataset } : {}) } }
 function canonicalPolicy(policy: NormalizedRunPolicy, repository: string, runTag: string): DurableRunPolicy { const { resumeRunId: _resume, mode: _mode, ...durable } = policy; return { ...durable, repository, runTag } }
 function hash(value: unknown): string { return createHash('sha256').update(JSON.stringify(sort(value))).digest('hex') }
 function sort(value: unknown): unknown { if (Array.isArray(value)) return value.map(sort); if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).sort(([a],[b]) => a.localeCompare(b)).map(([k,v]) => [k, sort(v)])); return value }
@@ -455,4 +575,68 @@ function baselineBlocked(r: Runtime, refs: PublicArtifact[]): Record<string, unk
   const attemptId = attempt?.['attempt_id']
   if (!attempt || typeof attemptId !== 'string' || !attemptId) throw new Error('baseline-blocked run is missing its baseline attempt')
   return { ...common(r, refs), status: 'baseline-blocked', baselineAttemptId: attemptId, reason: String(attempt['failure_message'] ?? 'baseline evaluation failed'), exit: { exitCode: attempt['exit_code'] === null ? null : Number(attempt['exit_code']), signal: attempt['signal'] === null ? null : String(attempt['signal']), timedOut: attempt['timed_out'] === 1, stdout: refs.find(item => item.kind === 'stdout')!, stderr: refs.find(item => item.kind === 'stderr')! } }
+}
+function captureAcceptedResumeIdentity(tracker: DurableTracker, runId: string): string {
+  const run = tracker.database.prepare('SELECT * FROM runs WHERE run_id = ?').get(runId)
+  const registration = tracker.database.prepare('SELECT * FROM run_registrations WHERE run_id = ?').get(runId)
+  if (!run || !registration) throw new Error('accepted durable resume identity is incomplete')
+  return JSON.stringify({ run, registration })
+}
+function revalidateAcceptedResumeIdentity(tracker: DurableTracker, runId: string, accepted: string): void {
+  if (tracker.schemaVersion() !== TRACKER_SCHEMA_VERSION) throw new Error('writable resume tracker did not reach the canonical current schema')
+  if (captureAcceptedResumeIdentity(tracker, runId) !== accepted) throw new Error('durable resume identity changed between read-only classification and writable open')
+}
+function validateReadOnlyResumeIdentity(row: Record<string, unknown>, discovery: RepositoryDiscovery, identity: RunGitIdentity, policy: DurableRunPolicy, policySha256: string, expectedProvenance?: FrozenEvaluatorProvenance, policyAlreadyRedacted = false): { code: string; message: string } | undefined {
+  if (String(row['policy_json']) !== (policyAlreadyRedacted ? serializeRedactedDurablePolicy(policy) : serializeDurablePolicy(policy))) return { code: 'policy-mismatch', message: 'durable policy bytes differ from the accepted policy identity' }
+  if (String(row['repository_id']) !== discovery.repositoryId || String(row['repository']) !== discovery.repository || String(row['git_common_dir']) !== discovery.gitCommonDir) return { code: 'repository-mismatch', message: 'canonical repository identity differs from immutable durable identity' }
+  if (!/^[0-9a-f]{40}$/u.test(String(row['start_commit']))) return { code: 'start-commit-mismatch', message: 'durable start commit is not a full commit identity' }
+  if (String(row['branch']) !== identity.branch || String(row['worktree']) !== identity.worktree || String(row['run_tag']) !== identity.runTag || String(row['run_id']) !== identity.runId) return { code: 'repository-mismatch', message: 'run Git identity differs from immutable durable identity' }
+  if (String(row['policy_sha256']) !== policySha256) return { code: 'policy-mismatch', message: 'normalized policy hash differs from durable policy' }
+  const provenance = parseJson(row['provenance_json'])
+  if (!provenance || typeof provenance !== 'object' || Array.isArray(provenance)) return { code: 'provenance-mismatch', message: 'durable evaluator provenance identity is malformed or inconsistent' }
+  const durableProvenance = provenance as Record<string, unknown>
+  if (policyAlreadyRedacted) {
+    const semantic = parseJson(durableProvenance.canonical)
+    if (!semantic || typeof semantic !== 'object' || Array.isArray(semantic)) return { code: 'provenance-mismatch', message: 'durable evaluator provenance canonical payload is malformed' }
+    const durableSemantic = semantic as Record<string, unknown>
+    if (durableSemantic.metricName !== policy.metricName || durableSemantic.metricDirection !== policy.metricDirection) return { code: 'provenance-mismatch', message: 'durable evaluator provenance differs from immutable terminal policy' }
+  }
+  const provenanceSha256 = String(row['provenance_sha256'])
+  if (!/^[0-9a-f]{64}$/u.test(provenanceSha256) || String(durableProvenance.sha256 ?? '') !== provenanceSha256 || typeof durableProvenance.canonical !== 'string' || createHash('sha256').update(durableProvenance.canonical).digest('hex') !== provenanceSha256) return { code: 'provenance-mismatch', message: 'durable evaluator provenance identity is malformed or inconsistent' }
+  if (expectedProvenance && (String(row['provenance_json']) !== JSON.stringify(sort(expectedProvenance)) || provenanceSha256 !== expectedProvenance.sha256)) return { code: 'provenance-mismatch', message: 'durable evaluator provenance differs from validated policy, registration, manifest, or dataset identity' }
+}
+
+function registrationDatasetMetadata(registration: HostEvaluatorRegistration | DurableRegistrationIdentity['registration']): Readonly<Record<string, string>> | undefined {
+  const dataset = registration.dataset
+  if (dataset.kind === 'none') return undefined
+  if (dataset.kind === 'external') return { kind: 'external', digest: dataset.digest, ...(dataset.identity ? { identity: dataset.identity } : {}) }
+  return { kind: 'local', files: dataset.files.join('\n'), ...(dataset.identity ? { identity: dataset.identity } : {}) }
+}
+function decodeDurablePolicy(value: unknown): DurableRunPolicy {
+  const parsed = parseJson(value)
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('durable run policy is malformed')
+  return parsed as DurableRunPolicy
+}
+function isTerminalState(state: RunDurableState): boolean { return ['completed', 'baseline-blocked', 'blocked', 'round-failed', 'cancelled'].includes(state) }
+function registrationBlockedRuntime(tracker: DurableTracker, runId: string, policy: DurableRunPolicy, discovery: RepositoryDiscovery, identity: RunGitIdentity, gitExecutable: string, gitOptions: Omit<GitCommandOptions, 'cwd' | 'signal'>, code: string, message: string): Runtime {
+  return { runId, policy, discovery, identity, tracker, gitExecutable, policySha256: String(tracker.getRun(runId)?.['policy_sha256'] ?? ''), provenanceSha256: String(tracker.getRun(runId)?.['provenance_sha256'] ?? ''), gitOptions, preclaimBlock: { code, message } }
+}
+function readonlyBlockedResult(r: Runtime, code: string, message: string): AutoresearchRunResult {
+  const best = optionalBest(r.tracker, r.runId)
+  const value = best ? { ...common(r), status: 'blocked', best, evidence: [{ code, message, artifacts: [] }] } : { ...common(r), status: 'round-failed', reason: message, evidence: [{ code, message, artifacts: [] }] }
+  return decodeRunResult(value, r.policy.metricDirection)
+}
+function readonlyTerminalReplay(r: Runtime, directive: Extract<RecoveryDirective, { kind: 'terminal' }>): AutoresearchRunResult {
+  const row = r.tracker.getRun(r.runId)!
+  const state = String(row['state']) as RunDurableState
+  if (!isTerminalState(state) || directive.state !== state) throw new Error(`terminal replay requires matching terminal durable state, received ${state}`)
+  const refs = directive.artifacts.map(publicArtifact)
+  const best = optionalBest(r.tracker, r.runId)
+  let value: Record<string, unknown>
+  if (state === 'completed') value = { ...common(r, refs), status: r.policy.target !== undefined && best && isTargetReached(r.policy.metricDirection, best.metric, r.policy.target) ? 'target-reached' : 'budget-limited', ...(r.policy.target !== undefined && best && isTargetReached(r.policy.metricDirection, best.metric, r.policy.target) ? { target: r.policy.target } : {}), best }
+  else if (state === 'baseline-blocked') value = baselineBlocked(r, refs)
+  else if (state === 'cancelled') value = { ...common(r, refs), status: 'cancelled', lastState: 'initializing', reason: String(row['terminal_reason'] ?? 'cancelled'), quiescent: true, ...(best ? { best } : {}) }
+  else if (state === 'blocked' && best) value = { ...common(r, refs), status: 'blocked', best, evidence: evidenceFromRun(row) }
+  else value = { ...common(r, refs), status: 'round-failed', reason: String(row['terminal_reason'] ?? state), evidence: evidenceFromRun(row), ...(best ? { best } : {}) }
+  return decodeRunResult(value, r.policy.metricDirection)
 }

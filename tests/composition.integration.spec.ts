@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process'
 import { readdirSync } from 'node:fs'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { DatabaseSync } from 'node:sqlite'
@@ -16,7 +17,15 @@ const run = promisify(execFile)
 const active: RealHarness[] = []
 const evaluator = new URL('./fixtures/loader/evaluator.mjs', import.meta.url).pathname
 const holdingEvaluator = new URL('./fixtures/loader/evaluator-hold.mjs', import.meta.url).pathname
+async function evaluatorMarker(prefix: string): Promise<{ path: string; dispose(): Promise<void> }> {
+  const directory = await mkdtemp(join(tmpdir(), `${prefix}-`))
+  return { path: join(directory, 'evaluator.pid'), dispose: () => rm(directory, { recursive: true, force: true }) }
+}
 
+
+function evaluatorConfig(commandArgs: string[], direction: 'minimize' | 'maximize' = 'maximize') {
+  return { evaluatorRegistrations: [{ id: 'judge', command: process.execPath, args: commandArgs, metricName: 'score', metricDirection: direction, metricParserVersion: 'final-line-json-v1', evaluatorFiles: [] }] }
+}
 afterEach(async () => {
   calls.length = 0
   releaseModel()
@@ -61,11 +70,9 @@ function request(cwd: string, mode: 'background' | 'foreground' = 'background') 
   return {
     repository: cwd,
     run_tag: `loader-${crypto.randomUUID().slice(0, 8)}`,
+    evaluator_id: 'judge',
     objective: 'Increase the strict fixture score',
     mutable_globs: ['score.txt'],
-    evaluation: { command: process.execPath, args: [evaluator] },
-    metric_name: 'score',
-    metric_direction: 'maximize',
     max_experiments: 1,
     timeout_ms: 10_000,
     mode,
@@ -178,12 +185,12 @@ describe('real Loader/profile production composition', () => {
     } finally { await parent.dispose() }
   }, 30_000)
 
-  it('constructs LocalJobRegistry hooks synchronously, persists its returned id before owned side effects, and cancels execution through the job', async () => {
-    const harness = await composeHarness()
+  it('constructs LocalJobRegistry hooks synchronously, returns its id before worktree side effects, persists it before evaluator spawn, and cancels execution through the job', async () => {
+    const marker = await evaluatorMarker('ordered-evaluator')
+    const harness = await composeHarness({ autoresearchConfig: evaluatorConfig([holdingEvaluator, marker.path]) })
     active.push(harness)
     const cwd = await repository(harness.root)
     const parent = await parentAgent(harness, cwd, 'ordering')
-    const marker = join(harness.root, 'ordered-evaluator.pid')
     const events: string[] = []
     let evaluatorSignal: AbortSignal | undefined
     let evaluatorHandle: SubprocessHandle | undefined
@@ -205,12 +212,13 @@ describe('real Loader/profile production composition', () => {
     }
     subprocess.spawn = spec => {
       const argv = spec.argv.map(String)
-      const ownedSideEffect = (argv.includes('worktree') && argv.includes('add')) || argv.includes(holdingEvaluator)
-      if (ownedSideEffect) {
+      const addsWorktree = argv.includes('worktree') && argv.includes('add')
+      const startsEvaluator = argv.includes(holdingEvaluator)
+      if (addsWorktree || startsEvaluator) {
         const returnedJobIds = events.filter(event => event.startsWith('registry-start-return:')).map(event => event.slice('registry-start-return:'.length))
         expect(returnedJobIds).not.toHaveLength(0)
-        expect(persistedBackgroundJobIds(cwd)).toEqual(expect.arrayContaining(returnedJobIds))
-        if (argv.includes(holdingEvaluator)) {
+        if (startsEvaluator) {
+          expect(persistedBackgroundJobIds(cwd)).toEqual(expect.arrayContaining(returnedJobIds))
           evaluatorSignal = spec.signal
           evaluatorHandle = originalSpawn(spec)
           void evaluatorHandle.done.finally(() => { evaluatorHandleSettled = true })
@@ -220,14 +228,11 @@ describe('real Loader/profile production composition', () => {
       return originalSpawn(spec)
     }
     try {
-      const execution = execute(harness, 'autoresearch', {
-        ...request(cwd),
-        evaluation: { command: process.execPath, args: [holdingEvaluator, marker] },
-      }, parent.agent)
+      const execution = execute(harness, 'autoresearch', request(cwd), parent.agent)
       await waitUntil(() => events.some(event => event.startsWith('registry-start-return:')), 'job registry did not return an id')
       const returned = events.find(event => event.startsWith('registry-start-return:'))!
       const jobId = returned.slice('registry-start-return:'.length)
-      const pid = await evaluatorPid(marker)
+      const pid = await evaluatorPid(marker.path)
       expect(events.slice(0, 4)).toEqual(['registry-start-enter', 'run-hook-enter', 'run-hook-return', `registry-start-return:${jobId}`])
       expect(persistedBackgroundJobIds(cwd)).toContain(jobId)
       expect(evaluatorSignal?.aborted).toBe(false)
@@ -253,7 +258,7 @@ describe('real Loader/profile production composition', () => {
     } finally {
       jobs.start = originalStart
       subprocess.spawn = originalSpawn
-      await parent.dispose()
+      try { await parent.dispose() } finally { await marker.dispose() }
     }
   }, 45_000)
 
@@ -299,17 +304,14 @@ describe('real Loader/profile production composition', () => {
   }, 30_000)
 
   it('terminates an active production evaluator and its job before HMR returns', async () => {
-    const harness = await composeHarness()
+    const marker = await evaluatorMarker('hmr-evaluator')
+    const harness = await composeHarness({ autoresearchConfig: evaluatorConfig([holdingEvaluator, marker.path]) })
     active.push(harness)
     const cwd = await repository(harness.root)
     const parent = await parentAgent(harness, cwd)
-    const marker = join(harness.root, 'evaluator.pid')
     try {
-      const execution = execute(harness, 'autoresearch', {
-        ...request(cwd),
-        evaluation: { command: process.execPath, args: [holdingEvaluator, marker] },
-      }, parent.agent)
-      const pid = await evaluatorPid(marker)
+      const execution = execute(harness, 'autoresearch', request(cwd), parent.agent)
+      const pid = await evaluatorPid(marker.path)
       const initialProcessState = await processState(pid)
       expect(initialProcessState).toBeDefined()
       expect(initialProcessState).not.toBe('Z')
@@ -326,7 +328,7 @@ describe('real Loader/profile production composition', () => {
       expect(harness.ctx.jobs.list(parent.agent).every(job => job.status !== 'running' && job.status !== 'stopping')).toBe(true)
       expect(harness.ctx.agents.list().map(agent => agent.id)).toEqual([parent.agent.id])
     } finally {
-      await parent.dispose()
+      try { await parent.dispose() } finally { await marker.dispose() }
     }
   }, 30_000)
 
@@ -368,6 +370,11 @@ describe('Loader activation failures', () => {
     ['agent', 'agents'],
   ])('fails clearly when the shipped profile omits %s', async (entry, service) => {
     await expect(composeHarness({ omitEntry: entry })).rejects.toThrow(new RegExp(service, 'i'))
+  }, 30_000)
+
+  it('rejects reserved DSH_* Host evaluator environment during real Loader activation', async () => {
+    const registration = evaluatorConfig([evaluator]).evaluatorRegistrations[0]!
+    await expect(composeHarness({ autoresearchConfig: { evaluatorRegistrations: [{ ...registration, environment: { DSH_TOKEN: 'reserved' } }] } })).rejects.toThrow(/environment name DSH_TOKEN is reserved/)
   }, 30_000)
 
   it('rejects duplicate Host evaluator registrations during real Loader activation', async () => {

@@ -1,18 +1,18 @@
-import { createHash } from 'node:crypto'
-import { lstatSync, openSync, closeSync, constants, fstatSync, readFileSync, realpathSync } from 'node:fs'
-import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
-import { GitBoundaryError, inspectRunGitState, validateCandidate, verifyCandidateTree } from './git.js'
-import type { CandidateSnapshot, GitCommandOptions, RepositoryDiscovery, RunGitIdentity, RunGitInspection } from './git.js'
+import { createHash } from 'node:crypto'
+import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, realpathSync } from 'node:fs'
+import { join } from 'node:path'
+import type { DurableRegistrationIdentity } from './types.js'
+import { GitBoundaryError, inspectRunGitState, validateCandidate, validateFrozenCandidatePaths, verifyCandidateTree, type CandidateSnapshot, type GitCommandOptions, type RepositoryDiscovery, type RunGitIdentity, type RunGitInspection } from './git.js'
 import type { EvaluatorAttemptFacts, EvaluatorFailureCode } from './evaluator.js'
-import type { ArtifactRecord, DurableTracker, RecoveryState } from './tracker.js'
-import type { AttemptId, BestResult, BlockerEvidence, DurableRegistrationIdentity, DurableRunPolicy, ExperimentId, FullCommitSha, RegistrationBlockEvidence, RunDurableState, RunId } from './types.js'
+import { DurableTracker, type ArtifactRecord, type RecoveryState } from './tracker.js'
+import type { AttemptId, BestResult, BlockerEvidence, DurableRunPolicy, ExperimentId, FullCommitSha, RegistrationBlockEvidence, RunDurableState, RunId } from './types.js'
 import type { SQLOutputValue } from 'node:sqlite'
 
 export type RecoveryBlockCode = 'run-missing' | 'repository-mismatch' | 'start-commit-mismatch' | 'policy-mismatch' | 'provenance-mismatch' | 'lock-mismatch' | 'state-ambiguous' | 'commit-missing' | 'git-external-mutation' | 'protected-change' | 'artifact-incomplete' | 'attempt-uncertain' | 'decision-mismatch' | 'reconciliation-unauthorized'
 export interface RecoveredExperiment { readonly experimentId: ExperimentId; readonly ordinal: number; readonly kind: 'baseline' | 'candidate'; readonly parentCommit: FullCommitSha; readonly candidateCommit?: FullCommitSha }
 export type RecoveredEvaluation = { readonly kind: 'measured'; readonly attemptId: AttemptId; readonly metric: number; readonly provenanceSha256: string; readonly exit: EvaluatorAttemptFacts; readonly artifacts: readonly ArtifactRecord[] } | { readonly kind: 'failed'; readonly attemptId: AttemptId; readonly code: EvaluatorFailureCode; readonly message: string; readonly provenanceSha256: string; readonly exit: EvaluatorAttemptFacts; readonly artifacts: readonly ArtifactRecord[] }
-export interface RecoveryRequest { readonly tracker: DurableTracker; readonly runId: RunId; readonly discovery: RepositoryDiscovery; readonly identity: RunGitIdentity; readonly policy: DurableRunPolicy; readonly policySha256: string; readonly provenanceSha256: string; readonly gitExecutable: string; readonly gitOptions: Omit<GitCommandOptions, 'cwd' | 'signal'>; readonly signal: AbortSignal }
+export interface RecoveryRequest { readonly tracker: DurableTracker; readonly runId: RunId; readonly discovery: RepositoryDiscovery; readonly identity: RunGitIdentity; readonly policy: DurableRunPolicy; readonly policySha256: string; readonly provenanceSha256: string; readonly registration?: DurableRegistrationIdentity; readonly gitExecutable: string; readonly gitOptions: Omit<GitCommandOptions, 'cwd' | 'signal'>; readonly signal: AbortSignal }
 export type RecoveryDirective =
   | { readonly kind: 'initialize'; readonly runId: RunId; readonly startCommit: FullCommitSha; readonly reuseLock: boolean }
   | { readonly kind: 'settle-baseline'; readonly runId: RunId; readonly experiment: RecoveredExperiment; readonly outcome: ({ readonly kind: 'accept'; readonly metric: number } | { readonly kind: 'fail'; readonly state: 'crashed' | 'timed-out' | 'policy-violation' | 'cancelled'; readonly code: string; readonly message: string; readonly quiescent: boolean }) }
@@ -30,6 +30,7 @@ const TERMINAL: Readonly<Record<RunDurableState, boolean>> = { initializing: fal
 const FAILURE_CODES: Readonly<Record<string, true>> = { spawn: true, timeout: true, cancelled: true, exit: true, signal: true, 'output-limit': true, 'metric-protocol': true }
 
 type Row = Record<string, SQLOutputValue>
+function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === 'object' && value !== null && !Array.isArray(value) }
 type RecoveredAttemptResult = { readonly kind: 'measured'; readonly metric: number } | { readonly kind: 'failed'; readonly code: EvaluatorFailureCode; readonly message: string }
 class RecoveryEvidenceError extends Error {
   constructor(readonly code: RecoveryBlockCode, message: string) { super(message); this.name = 'RecoveryEvidenceError' }
@@ -39,12 +40,20 @@ export type DurableRegistrationClassification =
   | { readonly kind: 'registered'; readonly identity: DurableRegistrationIdentity }
   | { readonly kind: 'blocked'; readonly evidence: RegistrationBlockEvidence }
 
-/** Inert Chunk 01 inspection seam. Production recovery dispatch intentionally remains legacy-only. */
+/** Classify durable evaluator authority before resume ownership or mutation. */
 export function classifyDurableRegistration(tracker: DurableTracker, runId: RunId): DurableRegistrationClassification {
   try {
-    const identity = tracker.readRegistration(runId)
-    if (!identity) return { kind: 'legacy', evidence: { kind: 'legacy-run', code: 'legacy-contract', message: 'run contains only legacy raw policy/provenance evidence' } }
-    return { kind: 'registered', identity }
+    const creation = tracker.database.prepare("SELECT intent_json FROM transitions WHERE run_id = ? AND scope = 'run' AND from_state IS NULL AND to_state = 'initializing' ORDER BY sequence LIMIT 1").get(runId)
+    const intent = creation?.['intent_json'] === null || creation?.['intent_json'] === undefined ? undefined : JSON.parse(String(creation['intent_json'])) as unknown
+    const currentContract = isRecord(intent) && intent['kind'] === 'create-run' && intent['contractGeneration'] === 'host-registration-v1'
+    if (!currentContract) return { kind: 'legacy', evidence: { kind: 'legacy-run', code: 'legacy-contract', message: 'run contains only legacy raw policy/provenance evidence' } }
+    try {
+      const identity = tracker.readRegistration(runId)
+      if (identity) return { kind: 'registered', identity }
+    } catch (error) {
+      if (!(error instanceof Error) || !error.message.includes('no such table: run_registrations')) throw error
+    }
+    return { kind: 'blocked', evidence: { kind: 'registration-blocked', code: 'registration-corrupt', message: 'current evaluator-contract run is missing its durable registration' } }
   } catch (error) {
     return { kind: 'blocked', evidence: { kind: 'registration-blocked', code: 'registration-corrupt', message: error instanceof Error ? error.message : 'durable evaluator registration is corrupt' } }
   }
@@ -86,6 +95,7 @@ export async function reconcileRecovery(ctx: Context, request: RecoveryRequest):
     if (!experiment.candidateCommit) {
       if (!intent) return blocked(request, 'state-ambiguous', 'candidate preparation has no durable snapshot intent', 'retain')
       try {
+        if (request.registration) validateFrozenCandidatePaths(intent, { evaluatorFiles: request.registration.registration.evaluatorFiles, datasetFiles: request.registration.registration.dataset.kind === 'local' ? request.registration.registration.dataset.files : [] })
         const validatedPaths = validateCandidate(intent, request.policy)
         return { kind: 'commit-candidate', runId: request.runId, experiment, snapshot: intent, validatedPaths }
       } catch (error) { return gitBlocked(request, error) }

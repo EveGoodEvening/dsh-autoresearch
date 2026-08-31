@@ -72,13 +72,12 @@ function harness(): Harness {
     jobs: { start(spec: JobStart) { if (state.startError) throw state.startError; thisJob = spec; thisHooks = spec.run(); if (state.throwAfterRun) throw new Error('registry failed after run'); return 'autoresearch-1' } },
     effect(factory: () => () => Promise<void>) { cleanup = factory(); return cleanup },
   }
-  apply(ctx as unknown as Context, {})
+  apply(ctx as unknown as Context, { evaluatorRegistrations: [{ id: 'judge', command: 'node', args: ['score.mjs'], metricName: 'score', metricDirection: 'minimize', metricParserVersion: 'final-line-json-v1', evaluatorFiles: [] }] })
   return value
 }
 
 const input = {
-  objective: 'reduce score', run_tag: 'trial', mutable_globs: ['src/**'],
-  evaluation: { command: 'node', args: ['score.mjs'] }, metric_name: 'score', metric_direction: 'minimize',
+  objective: 'reduce score', run_tag: 'trial', evaluator_id: 'judge', mutable_globs: ['src/**'],
 } as const
 const parent = { id: 'parent', session: { header: { id: 'session', cwd: '/repo' } } }
 const execution = (signal = new AbortController().signal) => ({ agent: parent, signal }) as never
@@ -92,11 +91,10 @@ beforeEach(() => {
   state.throwAfterRun = false
 })
 
-describe('autoresearch input object validation', () => {
-  it.each(['exceptional_allowlists', 'provenance', 'environment'] as const)('requires %s to be a plain object', key => {
-    for (const malformed of [7, false, 'value', [], null]) {
-      expect(() => normalizeRunPolicy({ ...input, [key]: malformed } as never, resolveConfig(), '/repo')).toThrow(`${key} must be a plain object`)
-    }
+describe('autoresearch Host authority normalization', () => {
+  it('derives evaluator argv, metric, environment, and provenance only from the selected registration', () => {
+    const registration = createEvaluatorRegistry([{ id: 'judge', command: 'node', args: ['score.mjs'], environment: { SAFE: '1' }, metricName: 'score', metricDirection: 'minimize', metricParserVersion: 'final-line-json-v1', evaluatorFiles: [] }]).resolve('judge')
+    expect(normalizeRunPolicy(input, resolveConfig(), '/repo', registration)).toMatchObject({ evaluation: { command: 'node', args: ['score.mjs'] }, metricName: 'score', metricDirection: 'minimize', environment: { SAFE: '1' }, provenance: { evaluator: 'judge' } })
   })
 })
 
@@ -105,17 +103,30 @@ describe('autoresearch production wiring', () => {
     expect(inject).toEqual(['agents', 'jobs', 'subprocess', 'systemPrompt', 'tools'])
     const test = harness()
     expect(test.tool.name).toBe('autoresearch')
-    expect(test.prompt?.text).toContain('direct human')
+    expect(test.prompt?.text).toBe('Use autoresearch only when the direct human explicitly requests autonomous metric-driven experimentation. For a new run, select a Host-provided evaluator_id and provide a narrow mutable path set. To resume, provide resume_run_id instead; never supply evaluator_id or any other evaluator authority on resume. Runs are background jobs by default and can be inspected or stopped with the generic job tools. Do not invoke it for ordinary coding or open-ended research.')
     expect(JSON.stringify(test.tool.parameters)).not.toContain('evaluation_command')
   })
 
-  it('keeps the Host registry and activation schema unreachable from the registered production tool', () => {
-    const registry = createEvaluatorRegistry([{ id: 'judge', command: 'node', args: ['score.mjs'], metricName: 'score', metricDirection: 'minimize', metricParserVersion: 'final-line-json-v1', evaluatorFiles: [] }])
-    expect(registry.resolve('judge').evaluatorId).toBe('judge')
-    const test = harness()
-    expect(test.tool.parameters).not.toBe(ACTIVATION_AUTORESEARCH_TOOL_SCHEMA)
-    expect(JSON.stringify(test.tool.parameters)).not.toContain('evaluator_id')
-    expect(JSON.stringify(test.tool.parameters)).toContain('evaluation')
+  it('registers the activated discriminated Host-authority schema', () => {
+    const { parameters } = harness().tool
+    expect(parameters).toMatchObject({
+      type: 'object',
+      properties: {
+        objective: expect.objectContaining({ type: 'string' }),
+        mutable_globs: expect.objectContaining({ type: 'array', items: { type: 'string' } }),
+        evaluator_id: expect.objectContaining({ type: 'string' }),
+        resume_run_id: expect.objectContaining({ type: 'string' }),
+      },
+    })
+    expect([...parameters.required].sort()).toEqual(['mutable_globs', 'objective'])
+    expect(parameters).not.toBe(ACTIVATION_AUTORESEARCH_TOOL_SCHEMA)
+    const compiled = JSON.stringify(parameters)
+    expect(compiled).not.toContain('evaluation')
+    expect(compiled).not.toContain('evaluation_command')
+    expect(compiled).not.toContain('environment')
+    expect(compiled).not.toContain('metric_direction')
+    expect(compiled).not.toContain('metric_name')
+    expect(compiled).not.toContain('provenance')
   })
 
   it('returns the canonical foreground controller result', async () => {

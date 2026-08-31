@@ -9,10 +9,11 @@ import type { Config as AutoresearchConfig } from './config.js'
 import { AutoresearchRunController } from './controller.js'
 import { renderToolResult } from './render.js'
 import {
+  ACTIVATION_AUTORESEARCH_TOOL_SCHEMA,
   AUTORESEARCH_TOOL_OUTPUT_SCHEMA,
-  AUTORESEARCH_TOOL_PARAMETERS,
+  decodeActivationToolInput,
+  type ActivationAutoresearchToolInput,
   type AutoresearchRunResult,
-  type AutoresearchToolInput,
   type AutoresearchToolResult,
   type BackgroundStartFailedToolResult,
 } from './types.js'
@@ -29,7 +30,7 @@ export const name = 'autoresearch'
 export const inject = ['agents', 'jobs', 'subprocess', 'systemPrompt', 'tools']
 
 const DESCRIPTION = 'Run a bounded, baseline-first metric optimization loop in an isolated Git worktree. Trusted host code owns evaluation, metric decisions, persistence, cancellation, and recovery.'
-const GUIDANCE = 'Use autoresearch only when the direct human explicitly requests autonomous metric-driven experimentation. Require one scalar metric, a shell-free evaluator command plus argv, and a narrow mutable path set. Runs are background jobs by default and can be inspected or stopped with the generic job tools. Do not invoke it for ordinary coding or open-ended research.'
+const GUIDANCE = 'Use autoresearch only when the direct human explicitly requests autonomous metric-driven experimentation. For a new run, select a Host-provided evaluator_id and provide a narrow mutable path set. To resume, provide resume_run_id instead; never supply evaluator_id or any other evaluator authority on resume. Runs are background jobs by default and can be inspected or stopped with the generic job tools. Do not invoke it for ordinary coding or open-ended research.'
 
 
 interface Deferred<T> {
@@ -68,7 +69,7 @@ function jobOutcome(result: AutoresearchRunResult, maxResultChars: number): JobO
   return { status: 'completed', detail, output: output.length <= maxResultChars ? output : JSON.stringify({ status: result.status, runId: result.runId, tracker: result.tracker }) }
 }
 
-function presentCall(args: AutoresearchToolInput): ToolCallView {
+function presentCall(args: ActivationAutoresearchToolInput): ToolCallView {
   return { card: 'generic', title: 'autoresearch', rawInput: args.objective }
 }
 
@@ -83,7 +84,7 @@ function requireServices(ctx: Context): void {
   if (typeof jobs.start !== 'function') throw new Error('autoresearch requires a compatible ctx.jobs registry')
 }
 
-/** Register the legacy production controller and model tool. The resolved Host evaluator registry and activation schema remain inert until Chunk 04. */
+/** Register the Host-authoritative evaluator contract and its sole production start/resume route. */
 export function apply(ctx: Context, config: AutoresearchConfig = {}): void {
   requireServices(ctx)
   const resolved = resolveConfig(config)
@@ -93,7 +94,7 @@ export function apply(ctx: Context, config: AutoresearchConfig = {}): void {
   const releaseTool = ctx.tools.register(defineTool({
     name: 'autoresearch',
     description: DESCRIPTION,
-    parameters: AUTORESEARCH_TOOL_PARAMETERS,
+    parameters: ACTIVATION_AUTORESEARCH_TOOL_SCHEMA,
     output: {
       schema: AUTORESEARCH_TOOL_OUTPUT_SCHEMA,
       render: (_args, value) => [{ type: 'text', text: renderToolResult(value as unknown as AutoresearchToolResult, resolved.maxResultChars) }],
@@ -101,7 +102,7 @@ export function apply(ctx: Context, config: AutoresearchConfig = {}): void {
     async execute(args, exec) {
       const parent = exec.agent
       if (parent === undefined) throw new Error('autoresearch requires the exact calling agent in exec.agent')
-      const input = args as unknown as AutoresearchToolInput
+      const input = decodeActivationToolInput(args) as ActivationAutoresearchToolInput
       if ((input.mode ?? 'background') === 'foreground') {
         const controller = new AutoresearchRunController(ctx, { config: resolved, input, parent, signal: exec.signal })
         active.add(controller)
@@ -193,7 +194,7 @@ export function apply(ctx: Context, config: AutoresearchConfig = {}): void {
         return startupFailure(jobId || 'unregistered', error, false) as never
       }
     },
-    presentCall: args => presentCall(args as unknown as AutoresearchToolInput),
+    presentCall: args => presentCall(args as unknown as ActivationAutoresearchToolInput),
     presentResult: () => ({ card: 'generic' }),
   }))
 

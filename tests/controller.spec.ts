@@ -1,5 +1,7 @@
+import { createHash } from 'node:crypto'
 import { execFileSync, spawn } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, rmSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { DatabaseSync } from 'node:sqlite'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
@@ -8,17 +10,21 @@ import type { JobSnapshot } from '@deepseek-ai/dsh-jobs'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { SubprocessHandle, SubprocessOutcome, SubprocessOutputReader, SubprocessSpawnSpec } from '@deepseek-ai/dsh-subprocess'
 import type { ToolDefinition, ToolExecutionResult } from '@deepseek-ai/dsh-tools'
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it, vi, type MockInstance } from 'vitest'
 import { resolveConfig, type Config } from '../src/config.ts'
-import { AutoresearchRunController } from '../src/controller.ts'
+import { AutoresearchRunController, type AutoresearchRunReady } from '../src/controller.ts'
+import { currentControllerProcessIdentity, GitBoundaryError } from '../src/git.ts'
 
 import { DurableTracker } from '../src/tracker.ts'
+import { sweepRepositoryRetention } from '../src/retention.ts'
+import { evaluatorEvaluationSha256, freezeEvaluatorProvenanceFromManifest } from '../src/evaluator.ts'
 import { EVALUATOR_CONTRACT_GENERATION } from '../src/types.ts'
+const evaluatorRegistration = { id: 'judge', command: 'fake-evaluator', args: [], metricName: 'score', metricDirection: 'minimize' as const, metricParserVersion: 'final-line-json-v1' as const, evaluatorFiles: ['evaluate.mjs'] }
 const input = {
-  repository: '.', run_tag: 'controller-test', objective: 'improve score', mutable_globs: ['src/**'],
-  evaluation: { command: 'node', args: ['evaluate.mjs'] }, metric_name: 'score', metric_direction: 'minimize' as const,
+  repository: '.', run_tag: 'controller-test', evaluator_id: 'judge', objective: 'improve score', mutable_globs: ['src/**'],
   max_experiments: 2, mode: 'foreground' as const,
 }
+const controllerConfig = () => resolveConfig({ evaluatorRegistrations: [evaluatorRegistration] })
 
 function parent(): Agent {
   return { id: 'parent', session: { header: { id: 'session', cwd: process.cwd() } } } as unknown as Agent
@@ -27,20 +33,28 @@ function parent(): Agent {
 describe('exclusive autoresearch controller contract', () => {
   it('performs no repository, tracker, child, or evaluator effect during construction', () => {
     const ctx = new Proxy({}, { get: vi.fn(() => { throw new Error('constructor touched runtime service') }) }) as Context
-    const controller = new AutoresearchRunController(ctx, { config: resolveConfig(), input, parent: parent(), signal: new AbortController().signal })
+    const controller = new AutoresearchRunController(ctx, { config: controllerConfig(), input, parent: parent(), signal: new AbortController().signal })
     expect(controller.ready).toBeInstanceOf(Promise)
   })
 
   it('memoizes the single state-machine execution', async () => {
     const resolveExecutable = vi.fn(async () => { throw new Error('discovery stopped') })
     const ctx = { subprocess: { resolveExecutable } } as unknown as Context
-    const controller = new AutoresearchRunController(ctx, { config: resolveConfig(), input, parent: parent(), signal: new AbortController().signal })
+    const controller = new AutoresearchRunController(ctx, { config: controllerConfig(), input, parent: parent(), signal: new AbortController().signal })
     const first = controller.run()
     const second = controller.run()
     expect(second).toBe(first)
     await expect(first).rejects.toThrow('discovery stopped')
     await expect(controller.ready).rejects.toThrow('discovery stopped')
     expect(resolveExecutable).toHaveBeenCalledTimes(1)
+  })
+
+  it('rejects an unknown evaluator id before Git discovery or any mutation', async () => {
+    const resolveExecutable = vi.fn()
+    const ctx = { subprocess: { resolveExecutable }, agents: { create: vi.fn() } } as unknown as Context
+    const controller = new AutoresearchRunController(ctx, { config: resolveConfig({ evaluatorRegistrations: [evaluatorRegistration] }), input: { ...input, evaluator_id: 'unknown' }, parent: parent(), signal: new AbortController().signal })
+    await expect(controller.run()).rejects.toThrow('unknown evaluator registration id "unknown"')
+    expect(resolveExecutable).not.toHaveBeenCalled()
   })
 
   it('promptly aborts cancellation while pre-tracker executable discovery is held open', async () => {
@@ -52,7 +66,7 @@ describe('exclusive autoresearch controller contract', () => {
       signal?.addEventListener('abort', () => reject(signal.reason), { once: true })
     }))
     const ctx = { subprocess: { resolveExecutable }, agents: { create } } as unknown as Context
-    const controller = new AutoresearchRunController(ctx, { config: resolveConfig(), input, parent: parent(), signal: new AbortController().signal })
+    const controller = new AutoresearchRunController(ctx, { config: controllerConfig(), input, parent: parent(), signal: new AbortController().signal })
     const running = controller.run()
     await discoveryEntered
     controller.cancel('operator stop')
@@ -67,7 +81,7 @@ describe('exclusive autoresearch controller contract', () => {
     const create = vi.fn()
     const ctx = { subprocess: { resolveExecutable }, agents: { create } } as unknown as Context
     const signal = new AbortController()
-    const controller = new AutoresearchRunController(ctx, { config: resolveConfig(), input, parent: parent(), signal: signal.signal })
+    const controller = new AutoresearchRunController(ctx, { config: controllerConfig(), input, parent: parent(), signal: signal.signal })
     controller.cancel('operator stop')
     controller.cancel('later reason must not replace the first')
     await expect(controller.run()).rejects.toThrow()
@@ -78,7 +92,7 @@ describe('exclusive autoresearch controller contract', () => {
   it('disposal before run is quiescent and does not touch runtime services', async () => {
     const touched = vi.fn()
     const ctx = new Proxy({}, { get: () => { touched(); return undefined } }) as Context
-    const controller = new AutoresearchRunController(ctx, { config: resolveConfig(), input, parent: parent(), signal: new AbortController().signal })
+    const controller = new AutoresearchRunController(ctx, { config: controllerConfig(), input, parent: parent(), signal: new AbortController().signal })
     await controller.dispose()
     await expect(controller.ready).rejects.toThrow('disposed before start')
     expect(touched).not.toHaveBeenCalled()
@@ -223,17 +237,19 @@ function controllerFixture(evaluations: EvaluationStep[], edits: Array<(worktree
   return { root, ctx, parent: parentAgent, subprocess, creates, order, trackerPath: () => lastTracker, liveCount: () => live.size }
 }
 
-async function runControllerCase(f: ControllerFixture, overrides: Partial<typeof input> = {}, configOverrides: Config = {}) {
+async function runControllerCase(f: ControllerFixture, overrides: Partial<typeof input> & Record<string, unknown> = {}, configOverrides: Config = {}) {
   const controller = createCaseController(f, overrides, undefined, configOverrides)
   const result = await controller.run(); const ready = await controller.ready; return { result, ready, tracker: DurableTracker.open(ready.tracker) }
 }
 
-function createCaseController(f: ControllerFixture, overrides: Partial<typeof input> = {}, resumeRunId?: string, configOverrides: Config = {}) {
-  const { run_tag: _runTag, ...baseInput } = input
-  const identity = resumeRunId ? { resume_run_id: resumeRunId } : { run_tag: input.run_tag }
+function createCaseController(f: ControllerFixture, overrides: Partial<typeof input> & Record<string, unknown> = {}, resumeRunId?: string, configOverrides: Config = {}) {
+  const { run_tag: _runTag, evaluator_id: _evaluatorId, ...baseInput } = input
+  const { metric_direction: hostDirection, ...toolOverrides } = overrides
+  const identity = resumeRunId ? { resume_run_id: resumeRunId } : { run_tag: input.run_tag, evaluator_id: input.evaluator_id }
+  const registration = { ...evaluatorRegistration, metricDirection: hostDirection === 'maximize' ? 'maximize' as const : 'minimize' as const }
   return new AutoresearchRunController(f.ctx, {
-    config: resolveConfig({ stateRoot: '.autoresearch-test', cleanupWorktreesOnSuccess: false, retainWorktrees: true, exportTsv: false, ...configOverrides }),
-    input: { ...baseInput, ...identity, repository: f.root, evaluation: { command: 'fake-evaluator', args: [] }, mutable_globs: ['src/**'], ...overrides },
+    config: resolveConfig({ stateRoot: '.autoresearch-test', cleanupWorktreesOnSuccess: false, retainWorktrees: true, exportTsv: false, evaluatorRegistrations: [registration], ...configOverrides }),
+    input: { ...baseInput, ...identity, repository: f.root, mutable_globs: ['src/**'], ...toolOverrides } as never,
     parent: f.parent,
     signal: new AbortController().signal,
   })
@@ -243,16 +259,39 @@ function candidateAuditCommits(root: string, runId: string): string[] {
   return execFileSync('git', ['-C', root, 'for-each-ref', '--format=%(objectname)', `refs/autoresearch/runs/${runId}/candidates/`]).toString().trim().split('\n').filter(Boolean)
 }
 
+function seedImmutableEvidence(database: DatabaseSync, triggerNames: readonly string[], mutation: () => void): void {
+  const triggers = triggerNames.map(name => {
+    const sql = database.prepare("SELECT sql FROM sqlite_schema WHERE type = 'trigger' AND name = ?").get(name)?.['sql']
+    if (typeof sql !== 'string') throw new Error(`canonical trigger ${name} is missing`)
+    return { name, sql }
+  })
+  database.exec('BEGIN IMMEDIATE')
+  try {
+    for (const trigger of triggers) database.exec(`DROP TRIGGER ${trigger.name}`)
+    mutation()
+    for (const trigger of triggers) database.exec(trigger.sql)
+    database.exec('COMMIT')
+  } catch (error) {
+    database.exec('ROLLBACK')
+    throw error
+  }
+}
+
+function controllerClaims(gitCommonDir: string, runId: string): unknown[] {
+  const authority = new DatabaseSync(join(gitCommonDir, 'dsh-autoresearch-locks.sqlite'), { readOnly: true })
+  try { return authority.prepare('SELECT * FROM controller_claims WHERE run_id = ? ORDER BY owner_id').all(runId) }
+  finally { authority.close() }
+}
+
 describe('controller real Git/SQLite outcomes', () => {
-  it('keeps production controller start on the legacy route without writing registration evidence', async () => {
+  it('activates Host registration authority and atomically persists its identity', async () => {
     const f = controllerFixture([{ stdout: '{"score":1}\n' }])
     const controller = createCaseController(f)
     try {
       const ready = await controller.prepare()
       const tracker = DurableTracker.open(ready.tracker)
-      expect(tracker.database.prepare('SELECT COUNT(*) AS count FROM run_registrations').get()).toEqual({ count: 0 })
-      expect(tracker.database.prepare("SELECT COUNT(*) AS count FROM transitions WHERE coalesce(intent_json, '') LIKE '%host-registration-v1%' OR coalesce(outcome_json, '') LIKE '%host-registration-v1%'").get()).toEqual({ count: 0 })
-      expect(String(tracker.getRun(ready.runId)?.['policy_json'])).not.toContain('registrationFingerprint')
+      expect(tracker.database.prepare('SELECT contract_generation, evaluator_id FROM run_registrations WHERE run_id = ?').get(ready.runId)).toEqual({ contract_generation: EVALUATOR_CONTRACT_GENERATION, evaluator_id: 'judge' })
+      expect(String(tracker.getRun(ready.runId)?.['policy_json'])).toContain('fake-evaluator')
       tracker.close()
     } finally {
       await controller.dispose()
@@ -260,27 +299,452 @@ describe('controller real Git/SQLite outcomes', () => {
     }
   })
 
-  it('keeps production terminal resume from classifying or replaying malformed registration evidence', async () => {
+  it('blocks terminal resume on corrupt durable registration before spawn or mutation', async () => {
     const f = controllerFixture([{ stdout: '{"score":1}\n' }])
     try {
       const first = await runControllerCase(f, { max_experiments: 1, target: 1 })
-      first.tracker.database.prepare(`INSERT INTO run_registrations (run_id, contract_generation, evaluator_id, registration_json, manifest_json, registration_fingerprint, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`).run(
-        first.ready.runId, EVALUATOR_CONTRACT_GENERATION, 'inactive-judge', '{malformed', '{}', '0'.repeat(64), new Date().toISOString(),
-      )
-      const seededRow = first.tracker.database.prepare('SELECT * FROM run_registrations WHERE run_id = ?').get(first.ready.runId)
+      seedImmutableEvidence(first.tracker.database, ['run_registrations_immutable'], () => {
+        first.tracker.database.prepare('UPDATE run_registrations SET registration_json = ? WHERE run_id = ?').run('{malformed', first.ready.runId)
+      })
       const transitionCount = first.tracker.listTransitions(first.ready.runId).length
       const evaluatorSpawns = f.subprocess.evaluatorSpawns
       first.tracker.close()
-
       const resumed = await createCaseController(f, { max_experiments: 1, target: 1 }, first.ready.runId).run()
-      expect(resumed).toEqual(first.result)
+      expect(resumed).toMatchObject({ status: 'blocked', evidence: [expect.objectContaining({ code: 'registration-corrupt' })] })
       const tracker = DurableTracker.open(first.ready.tracker)
-      expect(tracker.database.prepare('SELECT * FROM run_registrations WHERE run_id = ?').get(first.ready.runId)).toEqual(seededRow)
       expect(tracker.listTransitions(first.ready.runId)).toHaveLength(transitionCount)
       expect(f.subprocess.evaluatorSpawns).toBe(evaluatorSpawns)
       tracker.close()
     } finally { rmSync(f.root, { recursive: true, force: true }) }
   })
+
+  it('blocks nonterminal resume when the current Host registration changed or was removed', async () => {
+    const f = controllerFixture([{ stdout: '{"score":1}\n' }])
+    try {
+      const first = createCaseController(f, { max_experiments: 1, target: 1 })
+      const ready = await first.prepare()
+      await first.dispose()
+      const seeded = DurableTracker.open(ready.tracker)
+      expect(seeded.getRun(ready.runId)?.['state']).toBe('initializing')
+      const transitionCount = seeded.listTransitions(ready.runId).length
+      seeded.close()
+      const changed = await createCaseController(f, {}, ready.runId, { evaluatorRegistrations: [{ ...evaluatorRegistration, args: ['changed'] }] }).run()
+      expect(changed).toMatchObject({ status: 'round-failed', evidence: [expect.objectContaining({ code: 'evaluator-registration-mismatch' })] })
+      const removed = await createCaseController(f, {}, ready.runId, { evaluatorRegistrations: [] }).run()
+      expect(removed).toMatchObject({ status: 'round-failed', evidence: [expect.objectContaining({ code: 'evaluator-registration-mismatch' })] })
+      const evaluatorPathDrift = await createCaseController(f, {}, ready.runId, { evaluatorRegistrations: [{ ...evaluatorRegistration, evaluatorFiles: ['evaluate.mjs', 'other.mjs'] }] }).run()
+      expect(evaluatorPathDrift).toMatchObject({ status: 'round-failed', evidence: [expect.objectContaining({ code: 'evaluator-registration-mismatch' })] })
+      const datasetPathDrift = await createCaseController(f, {}, ready.runId, { evaluatorRegistrations: [{ ...evaluatorRegistration, dataset: { kind: 'local', files: ['dataset.json'] } }] }).run()
+      expect(datasetPathDrift).toMatchObject({ status: 'round-failed', evidence: [expect.objectContaining({ code: 'evaluator-registration-mismatch' })] })
+      const tracker = DurableTracker.open(ready.tracker)
+      expect(tracker.listTransitions(ready.runId)).toHaveLength(transitionCount)
+      tracker.close()
+    } finally { rmSync(f.root, { recursive: true, force: true }) }
+  })
+  it('requires the exact current Host registration before registered terminal replay', async () => {
+    const f = controllerFixture([{ stdout: '{"score":1}\n' }])
+    try {
+      const first = await runControllerCase(f, { max_experiments: 1, target: 1 })
+      const transitionCount = first.tracker.listTransitions(first.ready.runId).length
+      first.tracker.close()
+      const exact = await createCaseController(f, { max_experiments: 1, target: 1 }, first.ready.runId).run()
+      const changed = await createCaseController(f, { max_experiments: 1, target: 1 }, first.ready.runId, { evaluatorRegistrations: [{ ...evaluatorRegistration, args: ['changed'] }] }).run()
+      const removed = await createCaseController(f, { max_experiments: 1, target: 1 }, first.ready.runId, { evaluatorRegistrations: [] }).run()
+      expect(exact).toMatchObject({ status: 'target-reached', counts: { attempts: 1 } })
+      expect(changed).toMatchObject({ status: 'blocked', evidence: [expect.objectContaining({ code: 'evaluator-registration-mismatch' })] })
+      expect(removed).toMatchObject({ status: 'blocked', evidence: [expect.objectContaining({ code: 'evaluator-registration-mismatch' })] })
+      const tracker = DurableTracker.open(first.ready.tracker)
+      expect(tracker.listTransitions(first.ready.runId)).toHaveLength(transitionCount)
+      expect(f.subprocess.evaluatorSpawns).toBe(1)
+      tracker.close()
+    } finally { rmSync(f.root, { recursive: true, force: true }) }
+  })
+  it.each(['nonterminal', 'terminal'] as const)('rejects semantically drifted canonical provenance before writable %s resume', async (kind) => {
+    const f = controllerFixture([{ stdout: '{"score":1}\n' }])
+    try {
+      let ready: AutoresearchRunReady
+      if (kind === 'terminal') { const completed = await runControllerCase(f, { max_experiments: 1, target: 1 }); ready = completed.ready; completed.tracker.close() }
+      else { const controller = createCaseController(f, { max_experiments: 1, target: 1 }); ready = await controller.prepare(); await controller.dispose() }
+      const tracker = DurableTracker.open(ready.tracker)
+      const row = tracker.getRun(ready.runId)!
+      const wrapper = JSON.parse(String(row['provenance_json'])) as { canonical: string; sha256: string }
+      const semantic = JSON.parse(wrapper.canonical) as Record<string, unknown>
+      semantic.metricName = 'tampered-score'
+      wrapper.canonical = JSON.stringify(semantic)
+      wrapper.sha256 = createHash('sha256').update(wrapper.canonical).digest('hex')
+      seedImmutableEvidence(tracker.database, ['runs_immutable_identity'], () => {
+        tracker.database.prepare('UPDATE runs SET provenance_json = ?, provenance_sha256 = ? WHERE run_id = ?').run(JSON.stringify(wrapper), wrapper.sha256, ready.runId)
+      })
+      const versionBefore = tracker.schemaVersion()
+      const schemaBefore = tracker.database.prepare("SELECT type, name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name").all()
+      const claimsBefore = controllerClaims(String(row['git_common_dir']), ready.runId)
+      const transitionCount = tracker.listTransitions(ready.runId).length
+      tracker.close()
+      const bytesBefore = readFileSync(ready.tracker)
+      const walBefore = existsSync(`${ready.tracker}-wal`) ? readFileSync(`${ready.tracker}-wal`) : null
+      const sidecarExistenceBefore = [`${ready.tracker}-wal`, `${ready.tracker}-shm`].map(existsSync)
+      const resumed = await createCaseController(f, { max_experiments: 1, target: 1 }, ready.runId).run()
+      expect(resumed).toMatchObject({ evidence: [expect.objectContaining({ code: 'provenance-mismatch' })] })
+      expect(readFileSync(ready.tracker)).toEqual(bytesBefore)
+      expect(existsSync(`${ready.tracker}-wal`) ? readFileSync(`${ready.tracker}-wal`) : null).toEqual(walBefore)
+      expect([`${ready.tracker}-wal`, `${ready.tracker}-shm`].map(existsSync)).toEqual(sidecarExistenceBefore)
+      const inspection = DurableTracker.openReadOnly(ready.tracker)
+      expect(inspection.schemaVersion()).toBe(versionBefore)
+      expect(inspection.database.prepare("SELECT type, name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name").all()).toEqual(schemaBefore)
+      expect(inspection.listTransitions(ready.runId)).toHaveLength(transitionCount)
+      inspection.close()
+      expect(controllerClaims(String(row['git_common_dir']), ready.runId)).toEqual(claimsBefore)
+      expect(f.subprocess.evaluatorSpawns).toBe(kind === 'terminal' ? 1 : 0)
+      expect(f.creates).toHaveLength(0)
+    } finally { rmSync(f.root, { recursive: true, force: true }) }
+  })
+  it.each([
+    ['missing', "DELETE FROM run_registrations"],
+    ['corrupt', "UPDATE run_registrations SET registration_json = '{'"],
+    ['changed', "UPDATE run_registrations SET evaluator_id = 'other'"],
+  ] as const)('blocks a %s current-contract registration without changing main/WAL bytes, schema version, or sidecar existence', async (_kind, mutation) => {
+    const f = controllerFixture([{ stdout: '{"score":1}\n' }])
+    try {
+      const first = await runControllerCase(f, { max_experiments: 1, target: 1 })
+      const trackerPath = first.ready.tracker
+      const durableRun = first.tracker.getRun(first.ready.runId)!
+      const transitionCount = first.tracker.listTransitions(first.ready.runId).length
+      const evaluatorSpawns = f.subprocess.evaluatorSpawns
+      const claimsBefore = controllerClaims(String(durableRun['git_common_dir']), first.ready.runId)
+      seedImmutableEvidence(first.tracker.database, ['run_registrations_presence_monotonic', 'run_registrations_immutable'], () => {
+        first.tracker.database.exec(mutation)
+      })
+      const versionBefore = first.tracker.schemaVersion()
+      const schemaBefore = first.tracker.database.prepare("SELECT type, name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name").all()
+      first.tracker.close()
+      const bytesBefore = readFileSync(trackerPath)
+      const walBefore = existsSync(`${trackerPath}-wal`) ? readFileSync(`${trackerPath}-wal`) : null
+      const sidecarExistenceBefore = [`${trackerPath}-wal`, `${trackerPath}-shm`].map(existsSync)
+      const resumed = await createCaseController(f, {}, first.ready.runId).run()
+      expect(resumed).toMatchObject({ evidence: [expect.objectContaining({ code: 'registration-corrupt' })] })
+      expect(readFileSync(trackerPath)).toEqual(bytesBefore)
+      expect(existsSync(`${trackerPath}-wal`) ? readFileSync(`${trackerPath}-wal`) : null).toEqual(walBefore)
+      expect([`${trackerPath}-wal`, `${trackerPath}-shm`].map(existsSync)).toEqual(sidecarExistenceBefore)
+      const inspection = DurableTracker.openReadOnly(trackerPath)
+      expect(inspection.schemaVersion()).toBe(versionBefore)
+      expect(inspection.database.prepare("SELECT type, name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name").all()).toEqual(schemaBefore)
+      expect(inspection.listTransitions(first.ready.runId)).toHaveLength(transitionCount)
+      inspection.close()
+      expect(controllerClaims(String(durableRun['git_common_dir']), first.ready.runId)).toEqual(claimsBefore)
+      expect(f.subprocess.evaluatorSpawns).toBe(evaluatorSpawns)
+      expect(f.creates).toHaveLength(0)
+    } finally { rmSync(f.root, { recursive: true, force: true }) }
+  })
+
+  it('blocks a current-contract terminal tracker missing registration even when its schema is labeled v6', async () => {
+    const f = controllerFixture([{ stdout: '{"score":1}\n' }])
+    try {
+      const first = await runControllerCase(f, { max_experiments: 1, target: 1 })
+      first.tracker.database.exec(`
+        DROP TRIGGER run_registrations_presence_monotonic;
+        DROP TRIGGER run_registrations_immutable;
+        DROP TABLE run_registrations;
+        UPDATE schema_metadata SET version = 6 WHERE singleton = 1;
+      `)
+      const run = first.tracker.getRun(first.ready.runId)!
+      first.tracker.close()
+
+      expect(() => sweepRepositoryRetention(String(run['git_common_dir']), '.autoresearch-test', resolveConfig({ artifactRetentionDays: 1, evaluatorRegistrations: [evaluatorRegistration] }))).toThrow(/current evaluator-contract run is missing its durable registration/)
+      const inspection = DurableTracker.openReadOnly(first.ready.tracker)
+      expect(inspection.schemaVersion()).toBe(6)
+      inspection.close()
+    } finally { rmSync(f.root, { recursive: true, force: true }) }
+  })
+
+  it('migrates a supported v7 registered terminal tracker before canonical resume revalidation', async () => {
+    const f = controllerFixture([{ stdout: '{"score":1}\n' }])
+    try {
+      const first = await runControllerCase(f, { max_experiments: 1, target: 1 })
+      first.tracker.database.exec(`
+        DROP TRIGGER run_registrations_presence_monotonic;
+        UPDATE schema_metadata SET version = 7 WHERE singleton = 1;
+      `)
+      first.tracker.close()
+
+      const replay = await createCaseController(f, { max_experiments: 1, target: 1 }, first.ready.runId).run()
+      expect(replay).toMatchObject({ status: 'target-reached', counts: { attempts: 1 } })
+      const migrated = DurableTracker.openReadOnly(first.ready.tracker)
+      expect(migrated.schemaVersion()).toBe(8)
+      expect(migrated.database.prepare("SELECT name FROM sqlite_schema WHERE type = 'trigger' AND name = 'run_registrations_presence_monotonic'").get()).toEqual({ name: 'run_registrations_presence_monotonic' })
+      migrated.close()
+      expect(f.subprocess.evaluatorSpawns).toBe(1)
+    } finally { rmSync(f.root, { recursive: true, force: true }) }
+  })
+
+  it.each(['registered-v7', 'legacy-v6'] as const)('migrates a supported older %s terminal tracker before retention identity revalidation', async (kind) => {
+    const f = controllerFixture([{ stdout: '{"score":1}\n' }])
+    try {
+      const first = await runControllerCase(f, { max_experiments: 1, target: 1 })
+      first.tracker.database.prepare("UPDATE artifacts SET created_at = '2020-01-01T00:00:00.000Z' WHERE run_id = ?").run(first.ready.runId)
+      if (kind === 'registered-v7') {
+        first.tracker.database.exec(`
+          DROP TRIGGER run_registrations_presence_monotonic;
+          UPDATE schema_metadata SET version = 7 WHERE singleton = 1;
+        `)
+      } else {
+        first.tracker.database.exec(`
+          DROP TRIGGER run_registrations_presence_monotonic;
+          DROP TRIGGER run_registrations_immutable;
+          DROP TABLE run_registrations;
+          UPDATE schema_metadata SET version = 6 WHERE singleton = 1;
+          UPDATE transitions SET intent_json = '{"kind":"create-run"}' WHERE scope = 'run' AND from_state IS NULL AND to_state = 'initializing';
+        `)
+      }
+      const run = first.tracker.getRun(first.ready.runId)!
+      first.tracker.close()
+
+      const summary = sweepRepositoryRetention(String(run['git_common_dir']), '.autoresearch-test', resolveConfig({ artifactRetentionDays: 1, evaluatorRegistrations: [evaluatorRegistration] }), undefined, new Date('2030-01-01T00:00:00.000Z'))
+      expect(summary.artifactsPruned).toBe(2)
+      const migrated = DurableTracker.openReadOnly(first.ready.tracker)
+      expect(migrated.schemaVersion()).toBe(8)
+      expect(migrated.database.prepare('SELECT DISTINCT retention FROM artifacts WHERE run_id = ?').all(first.ready.runId)).toEqual([{ retention: 'pruned' }])
+      migrated.close()
+    } finally { rmSync(f.root, { recursive: true, force: true }) }
+  })
+  it.each([1, 2] as const)('starts a new run after sweeping a canonical v%s terminal tracker', async (version) => {
+    const f = controllerFixture([{ stdout: '{"score":1}\n' }, { stdout: '{"score":2}\n' }])
+    try {
+      const first = await runControllerCase(f, { run_tag: `legacy-v${version}`, max_experiments: 1, target: 1 })
+      first.tracker.database.exec(`
+        DROP TRIGGER run_registrations_presence_monotonic;
+        DROP TRIGGER run_registrations_immutable;
+        DROP TABLE run_registrations;
+        DROP TRIGGER attempts_immutable_outcome;
+        ALTER TABLE attempts DROP COLUMN outcome_json;
+        DROP TABLE schema_metadata;
+        CREATE TABLE schema_metadata (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), version INTEGER NOT NULL, created_at TEXT NOT NULL) STRICT;
+        INSERT INTO schema_metadata VALUES (1, ${version}, 'legacy');
+        DROP TRIGGER experiments_immutable_lineage;
+        CREATE TRIGGER experiments_immutable_lineage BEFORE UPDATE OF run_id, ordinal, kind, parent_commit, candidate_commit, command, args_json, cwd ON experiments BEGIN SELECT RAISE(ABORT, 'immutable experiment lineage/evaluator'); END;
+        UPDATE transitions SET intent_json = '{"kind":"create-run"}' WHERE scope = 'run' AND from_state IS NULL AND to_state = 'initializing';
+      `)
+      if (version === 1) {
+        first.tracker.database.exec(`
+          DROP TRIGGER runs_immutable_identity;
+          DROP TRIGGER experiments_immutable_lineage;
+          DROP TRIGGER attempts_immutable_intent;
+          ALTER TABLE runs DROP COLUMN terminal_quiescent;
+        `)
+      }
+      first.tracker.close()
+
+      const second = await runControllerCase(f, { run_tag: `after-v${version}`, max_experiments: 1, target: 2 })
+      expect(second.result).toMatchObject({ status: 'target-reached', best: { metric: 2 } })
+      second.tracker.close()
+      const migrated = DurableTracker.openReadOnly(first.ready.tracker)
+      expect(migrated.schemaVersion()).toBe(8)
+      migrated.close()
+    } finally { rmSync(f.root, { recursive: true, force: true }) }
+  })
+
+
+  it('replays a legacy terminal result canonically without mutation, ownership, cleanup, or spawn', async () => {
+    const f = controllerFixture([{ stdout: '{"score":1}\n' }])
+    try {
+      const first = await runControllerCase(f, { max_experiments: 1, target: 1 }, { evaluatorRegistrations: [{ ...evaluatorRegistration, environment: { TOKEN: 'non-empty-secret' } }] })
+      first.tracker.database.exec(`
+        DROP TRIGGER run_registrations_presence_monotonic;
+        DROP TRIGGER run_registrations_immutable;
+        DROP TABLE run_registrations;
+        UPDATE schema_metadata SET version = 6 WHERE singleton = 1;
+        UPDATE transitions SET intent_json = '{"kind":"create-run"}' WHERE scope = 'run' AND from_state IS NULL AND to_state = 'initializing';
+      `)
+      first.tracker.database.prepare('UPDATE active_locks SET released_at = NULL WHERE run_id = ?').run(first.ready.runId)
+      const durableRun = first.tracker.getRun(first.ready.runId)!
+      const authority = new DatabaseSync(join(String(durableRun['git_common_dir']), 'dsh-autoresearch-locks.sqlite'))
+      authority.prepare('INSERT INTO active_locks (repository_id, run_tag, run_id, acquired_at) VALUES (?, ?, ?, ?)').run(durableRun['repository_id'], durableRun['run_tag'], first.ready.runId, '2026-01-01T00:00:00.000Z')
+      authority.prepare('INSERT INTO controller_claims (run_id, owner_id, owner_pid, owner_start_token, acquired_at, heartbeat_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)').run(first.ready.runId, 'legacy-owner', null, null, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')
+      const sharedAuthorityBefore = { lock: authority.prepare('SELECT * FROM active_locks WHERE run_id = ?').get(first.ready.runId), claim: authority.prepare('SELECT * FROM controller_claims WHERE run_id = ?').get(first.ready.runId) }
+      authority.close()
+      const transitionCount = first.tracker.listTransitions(first.ready.runId).length
+      const artifactsBefore = first.tracker.database.prepare('SELECT artifact_id, retention FROM artifacts WHERE run_id = ? ORDER BY artifact_id').all(first.ready.runId)
+      first.tracker.close()
+      expect(JSON.parse(String(durableRun['policy_json'])).environment).toEqual({ TOKEN: { sha256: createHash('sha256').update('non-empty-secret').digest('hex') } })
+      const replay = await createCaseController(f, {}, first.ready.runId, { evaluatorRegistrations: [] }).run()
+      expect(replay).toMatchObject({ status: 'target-reached', counts: { attempts: 1 } })
+      const tracker = DurableTracker.openReadOnly(first.ready.tracker)
+      expect(tracker.listTransitions(first.ready.runId)).toHaveLength(transitionCount)
+      expect(tracker.database.prepare('SELECT released_at FROM active_locks WHERE run_id = ?').get(first.ready.runId)).toEqual({ released_at: null })
+      const replayAuthority = new DatabaseSync(join(String(durableRun['git_common_dir']), 'dsh-autoresearch-locks.sqlite'))
+      expect({ lock: replayAuthority.prepare('SELECT * FROM active_locks WHERE run_id = ?').get(first.ready.runId), claim: replayAuthority.prepare('SELECT * FROM controller_claims WHERE run_id = ?').get(first.ready.runId) }).toEqual(sharedAuthorityBefore)
+      replayAuthority.close()
+      expect(tracker.database.prepare('SELECT artifact_id, retention FROM artifacts WHERE run_id = ? ORDER BY artifact_id').all(first.ready.runId)).toEqual(artifactsBefore)
+      expect(f.subprocess.evaluatorSpawns).toBe(1)
+      expect(f.creates).toHaveLength(0)
+      tracker.close()
+    } finally { rmSync(f.root, { recursive: true, force: true }) }
+  })
+  it('replays a registered terminal result without pruning under a live controller claim, then takes over a stale claim', async () => {
+    const f = controllerFixture([{ stdout: '{"score":1}\n' }])
+    try {
+      const first = await runControllerCase(f, { max_experiments: 1, target: 1 })
+      const old = new Date(Date.now() - 3 * 86_400_000).toISOString()
+      first.tracker.database.prepare('UPDATE artifacts SET created_at = ? WHERE run_id = ?').run(old, first.ready.runId)
+      const run = first.tracker.getRun(first.ready.runId)!
+      const authority = new DatabaseSync(join(String(run['git_common_dir']), 'dsh-autoresearch-locks.sqlite'))
+      const live = currentControllerProcessIdentity()
+      authority.prepare('INSERT INTO controller_claims (run_id, owner_id, owner_pid, owner_start_token, acquired_at, heartbeat_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)').run(first.ready.runId, 'live-owner', live.pid, live.startToken ?? null, old, old, old)
+      authority.prepare('INSERT INTO active_locks (repository_id, run_tag, run_id, acquired_at) VALUES (?, ?, ?, ?)').run(run['repository_id'], run['run_tag'], first.ready.runId, old)
+      const liveAuthority = {
+        lock: authority.prepare('SELECT * FROM active_locks WHERE run_id = ?').get(first.ready.runId),
+        claim: authority.prepare('SELECT * FROM controller_claims WHERE run_id = ?').get(first.ready.runId),
+      }
+      first.tracker.close()
+
+      const replay = await createCaseController(f, {}, first.ready.runId, { artifactRetentionDays: 1 }).run()
+      expect(replay).toMatchObject({ status: 'target-reached', counts: { attempts: 1 } })
+      const retained = DurableTracker.openReadOnly(first.ready.tracker)
+      expect(retained.database.prepare('SELECT DISTINCT retention FROM artifacts WHERE run_id = ?').all(first.ready.runId)).toEqual([{ retention: 'retain' }])
+      expect({
+        lock: authority.prepare('SELECT * FROM active_locks WHERE run_id = ?').get(first.ready.runId),
+        claim: authority.prepare('SELECT * FROM controller_claims WHERE run_id = ?').get(first.ready.runId),
+      }).toEqual(liveAuthority)
+      retained.close()
+
+      authority.prepare('UPDATE controller_claims SET owner_start_token = ? WHERE run_id = ?').run(live.startToken === undefined ? 'provably-stale' : `${BigInt(live.startToken) + 1n}`, first.ready.runId)
+      const staleReplay = await createCaseController(f, {}, first.ready.runId, { artifactRetentionDays: 1 }).run()
+      expect(staleReplay).toMatchObject({ status: 'target-reached', counts: { attempts: 1 } })
+      const pruned = DurableTracker.openReadOnly(first.ready.tracker)
+      expect(pruned.database.prepare('SELECT DISTINCT retention FROM artifacts WHERE run_id = ?').all(first.ready.runId)).toEqual([{ retention: 'pruned' }])
+      expect(authority.prepare('SELECT owner_id FROM controller_claims WHERE run_id = ?').get(first.ready.runId)).toBeUndefined()
+      expect(authority.prepare('SELECT 1 FROM active_locks WHERE run_id = ?').get(first.ready.runId)).toBeUndefined()
+      pruned.close()
+      authority.close()
+      expect(f.subprocess.evaluatorSpawns).toBe(1)
+    } finally { rmSync(f.root, { recursive: true, force: true }) }
+  })
+  it.each(['missing', 'corrupt'] as const)('typed-blocks legacy terminal replay with %s retained artifact bytes without mutating durable state', async (fault) => {
+    const f = controllerFixture([{ stdout: '{"score":1}\n' }])
+    try {
+      const first = await runControllerCase(f, { max_experiments: 1, target: 1 })
+      first.tracker.database.exec(`
+        DROP TRIGGER run_registrations_presence_monotonic;
+        DROP TRIGGER run_registrations_immutable;
+        DROP TABLE run_registrations;
+        UPDATE schema_metadata SET version = 6 WHERE singleton = 1;
+        UPDATE transitions SET intent_json = '{"kind":"create-run"}' WHERE scope = 'run' AND from_state IS NULL AND to_state = 'initializing';
+      `)
+      const artifact = first.tracker.database.prepare("SELECT experiment_id, attempt_id, kind FROM artifacts WHERE run_id = ? AND retention = 'retain' ORDER BY kind LIMIT 1").get(first.ready.runId)!
+      const artifactPath = join(first.tracker.layout.root, 'artifacts', first.ready.runId, String(artifact['experiment_id']), String(artifact['attempt_id']), `${String(artifact['kind'])}.log`)
+      first.tracker.close()
+      if (fault === 'missing') unlinkSync(artifactPath)
+      else writeFileSync(artifactPath, 'tampered')
+      const before = readFileSync(first.ready.tracker)
+      const replay = await createCaseController(f, {}, first.ready.runId, { evaluatorRegistrations: [] }).run()
+      expect(replay).toMatchObject({ status: 'blocked', evidence: [{ code: 'artifact-incomplete' }] })
+      expect(readFileSync(first.ready.tracker)).toEqual(before)
+      expect(f.subprocess.evaluatorSpawns).toBe(1)
+    } finally { rmSync(f.root, { recursive: true, force: true }) }
+  })
+
+  it('allows legacy terminal replay after artifact metadata is durably pruned', async () => {
+    const f = controllerFixture([{ stdout: '{"score":1}\n' }])
+    try {
+      const first = await runControllerCase(f, { max_experiments: 1, target: 1 })
+      first.tracker.database.exec(`
+        DROP TRIGGER run_registrations_presence_monotonic;
+        DROP TRIGGER run_registrations_immutable;
+        DROP TABLE run_registrations;
+        UPDATE schema_metadata SET version = 6 WHERE singleton = 1;
+        UPDATE transitions SET intent_json = '{"kind":"create-run"}' WHERE scope = 'run' AND from_state IS NULL AND to_state = 'initializing';
+      `)
+      first.tracker.database.prepare("UPDATE artifacts SET retention = 'pruned' WHERE run_id = ?").run(first.ready.runId)
+      const files = first.tracker.database.prepare('SELECT experiment_id, attempt_id, kind FROM artifacts WHERE run_id = ?').all(first.ready.runId)
+      for (const artifact of files) unlinkSync(join(first.tracker.layout.root, 'artifacts', first.ready.runId, String(artifact['experiment_id']), String(artifact['attempt_id']), `${String(artifact['kind'])}.log`))
+      first.tracker.close()
+      const replay = await createCaseController(f, {}, first.ready.runId, { evaluatorRegistrations: [] }).run()
+      expect(replay).toMatchObject({ status: 'target-reached', counts: { attempts: 1 } })
+    } finally { rmSync(f.root, { recursive: true, force: true }) }
+  })
+  it('rejects a legacy terminal tracker replacement between read-only retention classification and writable claim', async () => {
+    const f = controllerFixture([{ stdout: '{"score":1}\n' }])
+    const originalOpen = DurableTracker.open.bind(DurableTracker)
+    let openSpy: MockInstance | undefined
+    try {
+      const first = await runControllerCase(f, { max_experiments: 1, target: 1 })
+      const registrationTriggers = first.tracker.database.prepare("SELECT sql FROM sqlite_schema WHERE type = 'trigger' AND name IN ('run_registrations_presence_monotonic', 'run_registrations_immutable') ORDER BY name").all().map(row => String(row['sql']))
+      first.tracker.database.exec(`
+        DROP TRIGGER run_registrations_presence_monotonic;
+        DROP TRIGGER run_registrations_immutable;
+        DELETE FROM run_registrations;
+        UPDATE transitions SET intent_json = '{"kind":"create-run"}' WHERE scope = 'run' AND from_state IS NULL AND to_state = 'initializing';
+        UPDATE artifacts SET created_at = '2020-01-01T00:00:00.000Z';
+      `)
+      first.tracker.database.exec(registrationTriggers.join(';'))
+      const run = first.tracker.getRun(first.ready.runId)!
+      first.tracker.close()
+      openSpy = vi.spyOn(DurableTracker, 'open').mockImplementationOnce((path: string) => {
+        const tracker = originalOpen(path)
+        tracker.database.prepare("UPDATE runs SET updated_at = '2030-01-01T00:00:00.000Z' WHERE run_id = ?").run(first.ready.runId)
+        return tracker
+      })
+      expect(() => sweepRepositoryRetention(String(run['git_common_dir']), '.autoresearch-test', resolveConfig({ artifactRetentionDays: 1, evaluatorRegistrations: [evaluatorRegistration] }), undefined, new Date('2026-01-01T00:00:00.000Z'))).toThrow(/changed between read-only retention classification and writable open/)
+      openSpy.mockRestore(); openSpy = undefined
+      const inspection = DurableTracker.openReadOnly(first.ready.tracker)
+      expect(inspection.database.prepare('SELECT DISTINCT retention FROM artifacts WHERE run_id = ?').all(first.ready.runId)).toEqual([{ retention: 'retain' }])
+      inspection.close()
+    } finally {
+      openSpy?.mockRestore()
+      rmSync(f.root, { recursive: true, force: true })
+    }
+  })
+  it('rejects a pre-cutover v6 nonterminal resume without changing schema, main/WAL bytes, state, lock, or sidecar existence', async () => {
+    const f = controllerFixture([{ stdout: '{"score":1}\n' }])
+    try {
+      const first = await runControllerCase(f, { max_experiments: 1, target: 1 })
+      const trackerPath = first.ready.tracker
+      first.tracker.database.exec(`
+        DROP TRIGGER run_registrations_presence_monotonic;
+        DROP TRIGGER run_registrations_immutable;
+        DROP TABLE run_registrations;
+        UPDATE schema_metadata SET version = 6 WHERE singleton = 1;
+        UPDATE transitions SET intent_json = '{"kind":"create-run"}' WHERE scope = 'run' AND from_state IS NULL AND to_state = 'initializing';
+      `)
+      first.tracker.database.prepare("UPDATE runs SET state = 'ready', terminal_quiescent = NULL WHERE run_id = ?").run(first.ready.runId)
+      first.tracker.database.prepare('UPDATE active_locks SET released_at = NULL WHERE run_id = ?').run(first.ready.runId)
+      const exportDirectory = join(trackerPath, '..', 'exports')
+      mkdirSync(exportDirectory, { recursive: true })
+      const tsvPath = join(exportDirectory, `${first.ready.runId}.tsv`)
+      writeFileSync(tsvPath, 'preserve\n')
+      const durableBefore = {
+        version: first.tracker.schemaVersion(),
+        run: first.tracker.getRun(first.ready.runId),
+        lock: first.tracker.database.prepare('SELECT * FROM active_locks WHERE run_id = ?').get(first.ready.runId),
+        schema: first.tracker.database.prepare("SELECT type, name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name").all(),
+        artifacts: first.tracker.database.prepare('SELECT * FROM artifacts WHERE run_id = ? ORDER BY artifact_id').all(first.ready.runId),
+        tsv: readFileSync(tsvPath),
+      }
+      first.tracker.close()
+      const bytesBefore = readFileSync(trackerPath)
+      const walBefore = existsSync(`${trackerPath}-wal`) ? readFileSync(`${trackerPath}-wal`) : null
+      const sidecarExistenceBefore = [`${trackerPath}-wal`, `${trackerPath}-shm`].map(existsSync)
+      sweepRepositoryRetention(String(durableBefore.run?.['git_common_dir']), '.autoresearch-test', resolveConfig({ evaluatorRegistrations: [evaluatorRegistration] }))
+
+      const resumed = await createCaseController(f, {}, first.ready.runId, { evaluatorRegistrations: [] }).run()
+      expect(resumed).toMatchObject({ status: 'blocked', evidence: [expect.objectContaining({ code: 'legacy-evaluator-policy-unsupported' })] })
+      expect(readFileSync(trackerPath)).toEqual(bytesBefore)
+      expect(existsSync(`${trackerPath}-wal`) ? readFileSync(`${trackerPath}-wal`) : null).toEqual(walBefore)
+      expect([`${trackerPath}-wal`, `${trackerPath}-shm`].map(existsSync)).toEqual(sidecarExistenceBefore)
+      const inspection = DurableTracker.openReadOnly(trackerPath)
+      expect({
+        version: inspection.schemaVersion(),
+        run: inspection.getRun(first.ready.runId),
+        artifacts: inspection.database.prepare('SELECT * FROM artifacts WHERE run_id = ? ORDER BY artifact_id').all(first.ready.runId),
+        tsv: readFileSync(tsvPath),
+        lock: inspection.database.prepare('SELECT * FROM active_locks WHERE run_id = ?').get(first.ready.runId),
+        schema: inspection.database.prepare("SELECT type, name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name").all(),
+      }).toEqual(durableBefore)
+      inspection.close()
+      expect(f.subprocess.evaluatorSpawns).toBe(1)
+      expect(f.creates).toHaveLength(0)
+    } finally { rmSync(f.root, { recursive: true, force: true }) }
+  })
+
   it.each([
     ['minimize', 5, 5, 'target-reached'],
     ['maximize', 5, 5, 'target-reached'],
@@ -306,6 +770,9 @@ describe('controller real Git/SQLite outcomes', () => {
       const first = await initial.run(); const ready = await initial.ready
       const tracker = DurableTracker.open(ready.tracker); const row = tracker.getRun(ready.runId)!
       const startCommit = String(row['start_commit']); const persistedPolicy = JSON.parse(String(row['policy_json'])) as Record<string, unknown>
+      const provenanceSha256 = String(row['provenance_sha256'])
+      const attemptProvenance = (tracker.database.prepare('SELECT spawn_intent_json FROM attempts ORDER BY ordinal').all() as Array<{ spawn_intent_json: string }>).map(attempt => { const parsed: unknown = JSON.parse(attempt.spawn_intent_json); if (!parsed || typeof parsed !== 'object' || !('provenanceSha256' in parsed)) throw new Error('attempt spawn intent lacks provenanceSha256'); return String(parsed.provenanceSha256) })
+      expect(attemptProvenance).toEqual([provenanceSha256, provenanceSha256])
       tracker.close()
       expect(first.status).toBe('budget-limited')
       expect(persistedPolicy).toMatchObject({ repository: f.root, runTag: input.run_tag })
@@ -321,18 +788,81 @@ describe('controller real Git/SQLite outcomes', () => {
     } finally { rmSync(f.root, { recursive: true, force: true }) }
   })
 
-  it('prepares a durable job binding, checkpoints cancellation before abort work, and allocates no worktree or child', async () => {
+  it('persists start-commit manifest provenance when the evaluator file changes at registered-run creation', async () => {
+    const f = controllerFixture([{ stdout: '{"score":1}\n' }])
+    const originalCreate = DurableTracker.prototype.createRegisteredRun
+    let registered: { runId: string; tracker: string; worktree: string; evaluator: Buffer } | undefined
+    const createSpy = vi.spyOn(DurableTracker.prototype, 'createRegisteredRun').mockImplementation(function (record) {
+      const evaluator = join(record.worktree, 'evaluate.mjs')
+      registered = { runId: record.runId, tracker: this.path, worktree: record.worktree, evaluator: readFileSync(evaluator) }
+      writeFileSync(evaluator, 'concurrent evaluator replacement\n')
+      return originalCreate.call(this, record)
+    })
+    const controller = createCaseController(f, { max_experiments: 1, target: 1 })
+    try {
+      const [runOutcome, readyOutcome] = await Promise.allSettled([controller.run(), controller.ready])
+      for (const outcome of [runOutcome, readyOutcome]) {
+        expect(outcome.status).toBe('rejected')
+        if (outcome.status === 'fulfilled') throw new Error('dirty registered run unexpectedly continued')
+        expect(outcome.reason).toBeInstanceOf(GitBoundaryError)
+        expect(outcome.reason).toMatchObject({ code: 'accepted-reconcile-dirty' })
+      }
+      expect(f.subprocess.evaluatorSpawns).toBe(0)
+
+      if (!registered) throw new Error('registered run was not captured')
+      const tracker = DurableTracker.openReadOnly(registered.tracker)
+      const row = tracker.getRun(registered.runId)!
+      const registration = tracker.readRegistration(registered.runId)!
+      const policy = JSON.parse(String(row['policy_json'])) as { evaluation: { command: string; args: string[]; cwd?: string }; metricName: string; metricDirection: 'minimize' | 'maximize'; environment: Record<string, string> }
+      const expected = freezeEvaluatorProvenanceFromManifest({ evaluation: policy.evaluation, evaluatorFiles: registration.registration.evaluatorFiles, environment: policy.environment, metricName: policy.metricName, metricDirection: policy.metricDirection, policy: { normalizedPolicySha256: String(row['policy_sha256']), evaluationSha256: evaluatorEvaluationSha256(policy.evaluation), policy } }, registration.manifest)
+      expect(row).toMatchObject({ state: 'initializing', provenance_sha256: expected.sha256 })
+      expect(JSON.parse(String(row['provenance_json']))).toMatchObject({ evaluatorFileHashes: expected.evaluatorFileHashes })
+      tracker.close()
+    } finally {
+      createSpy.mockRestore()
+      if (registered && existsSync(registered.worktree)) writeFileSync(join(registered.worktree, 'evaluate.mjs'), registered.evaluator)
+      await controller.dispose()
+      rmSync(f.root, { recursive: true, force: true })
+    }
+  })
+
+  it('attempts every activation cleanup phase and removes the durable partial run when cleanup phases throw', async () => {
+    const f = controllerFixture([])
+    const acquire = vi.spyOn(DurableTracker.prototype, 'acquireActiveLock').mockImplementation(() => { throw new Error('injected local lock failure') })
+    const rollback = DurableTracker.prototype.rollbackRegisteredRunActivation
+    const rollbackFault = vi.spyOn(DurableTracker.prototype, 'rollbackRegisteredRunActivation').mockImplementation(function (runId) { rollback.call(this, runId); throw new Error('injected registered-run cleanup failure') })
+    const close = DurableTracker.prototype.close
+    const closeFault = vi.spyOn(DurableTracker.prototype, 'close').mockImplementation(function () { close.call(this); throw new Error('injected tracker-close failure') })
+    try {
+      const controller = createCaseController(f)
+      await expect(controller.run()).rejects.toThrow(/activation failed and 2 cleanup phase/)
+      closeFault.mockRestore()
+      const runsRoot = join(f.root, '.git', '.autoresearch-test', 'runs')
+      const runDirectories = existsSync(runsRoot) ? readdirSync(runsRoot) : []
+      expect(runDirectories).toHaveLength(1)
+      const inspection = DurableTracker.openReadOnly(join(runsRoot, runDirectories[0]!, 'tracker.sqlite'))
+      expect(inspection.database.prepare('SELECT COUNT(*) AS count FROM runs').get()).toEqual({ count: 0 })
+      inspection.close()
+      expect(execFileSync('git', ['-C', f.root, 'branch', '--list', 'autoresearch/*']).toString()).toBe('')
+      expect(execFileSync('git', ['-C', f.root, 'worktree', 'list', '--porcelain']).toString()).not.toContain('.autoresearch-test/worktrees')
+    } finally {
+      acquire.mockRestore(); rollbackFault.mockRestore(); closeFault.mockRestore(); rmSync(f.root, { recursive: true, force: true })
+    }
+  })
+
+  it('prepares a durable job binding, checkpoints cancellation before abort work, and starts no child or additional subprocess', async () => {
     const f = controllerFixture([])
     const close = vi.spyOn(DurableTracker.prototype, 'close')
     try {
-      const controller = new AutoresearchRunController(f.ctx, { config: resolveConfig({ stateRoot: '.autoresearch-test', cleanupWorktreesOnSuccess: false, retainWorktrees: true, exportTsv: false }), input: { ...input, repository: f.root, evaluation: { command: 'fake-evaluator', args: [] } }, parent: f.parent, signal: new AbortController().signal })
+      const controller = new AutoresearchRunController(f.ctx, { config: resolveConfig({ stateRoot: '.autoresearch-test', cleanupWorktreesOnSuccess: false, retainWorktrees: true, exportTsv: false, evaluatorRegistrations: [evaluatorRegistration] }), input: { ...input, repository: f.root }, parent: f.parent, signal: new AbortController().signal })
       const prepared = await controller.prepare('autoresearch-7')
       const tracker = DurableTracker.open(prepared.tracker)
       expect(tracker.database.prepare("SELECT outcome_json FROM transitions WHERE run_id = ? AND outcome_json IS NOT NULL ORDER BY sequence DESC LIMIT 1").get(prepared.runId)?.['outcome_json']).toContain('autoresearch-7')
+      const subprocessCount = f.subprocess.specs.length
       controller.cancel('held initialization stop')
       expect(tracker.database.prepare("SELECT intent_json FROM transitions WHERE run_id = ? AND intent_json IS NOT NULL ORDER BY sequence DESC LIMIT 1").get(prepared.runId)?.['intent_json']).toContain('held initialization stop')
       expect(f.creates).toHaveLength(0)
-      expect(f.subprocess.specs.some(spec => spec.argv.includes('worktree'))).toBe(false)
+      expect(f.subprocess.specs).toHaveLength(subprocessCount)
       tracker.close()
       await controller.dispose()
       expect(close).toHaveBeenCalled()
@@ -507,7 +1037,7 @@ describe('controller real Git/SQLite outcomes', () => {
       return transitionId
     })
     try {
-      controller = new AutoresearchRunController(f.ctx, { config: resolveConfig({ stateRoot: '.autoresearch-test', cleanupWorktreesOnSuccess: false, retainWorktrees: true, exportTsv: false }), input: { ...input, repository: f.root, evaluation: { command: 'fake-evaluator', args: [] }, mutable_globs: ['src/**'] }, parent: f.parent, signal: new AbortController().signal })
+      controller = new AutoresearchRunController(f.ctx, { config: resolveConfig({ stateRoot: '.autoresearch-test', cleanupWorktreesOnSuccess: false, retainWorktrees: true, exportTsv: false, evaluatorRegistrations: [evaluatorRegistration] }), input: { ...input, repository: f.root, mutable_globs: ['src/**'] }, parent: f.parent, signal: new AbortController().signal })
       const result = await controller.run()
       const ready = await controller.ready
       const tracker = DurableTracker.open(ready.tracker)

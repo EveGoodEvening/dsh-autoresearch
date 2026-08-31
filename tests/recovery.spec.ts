@@ -172,7 +172,7 @@ describe('recovery reconciler', () => {
     expect(tracker.listTransitions(request.runId)).toHaveLength(1)
     tracker.close()
   })
-  it('discriminates legacy and new registration evidence only through the inert helper', async () => {
+  it('classifies legacy and registered durable authority before recovery ownership', async () => {
     const legacy = fixture(); createRun(legacy.tracker, legacy.request)
     expect(classifyDurableRegistration(legacy.tracker, legacy.request.runId)).toMatchObject({ kind: 'legacy', evidence: { kind: 'legacy-run', code: 'legacy-contract' } })
     await expect(reconcileRecovery(unusedContext, legacy.request)).resolves.toEqual({ kind: 'initialize', runId: legacy.request.runId, startCommit: SHA, reuseLock: false })
@@ -190,6 +190,7 @@ describe('recovery reconciler', () => {
   it('typed-blocks directly seeded corrupt registration evidence without changing legacy recovery dispatch', async () => {
     const { tracker, request } = fixture()
     createRun(tracker, request)
+    tracker.database.prepare("UPDATE transitions SET intent_json = ? WHERE run_id = ? AND scope = 'run' AND from_state IS NULL AND to_state = 'initializing'").run('{"kind":"create-run","contractGeneration":"host-registration-v1"}', request.runId)
     tracker.database.prepare(`INSERT INTO run_registrations (run_id, contract_generation, evaluator_id, registration_json, manifest_json, registration_fingerprint, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`).run(
       request.runId, 'host-registration-v1', 'judge', '{malformed', '{}', '0'.repeat(64), new Date().toISOString(),
     )

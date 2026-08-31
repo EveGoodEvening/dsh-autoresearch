@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest'
 import { Config, createEvaluatorRegistry, DEFAULT_CONFIG, normalizeRunPolicy, resolveConfig } from '../src/config.ts'
 import { boundText, renderExperimentResult, renderRunResult, renderToolResult } from '../src/render.ts'
 import { ACTIVATION_AUTORESEARCH_TOOL_SCHEMA, decodeActivationToolInput, decodeExperimentResult, decodeRunResult, isTargetReached } from '../src/types.ts'
-import type { AutoresearchToolInput, MetricDirection } from '../src/types.ts'
+import type { ActivationAutoresearchToolInput, MetricDirection } from '../src/types.ts'
 
 const SHA_A = 'a'.repeat(40)
 const SHA_B = 'b'.repeat(40)
@@ -25,17 +25,17 @@ const runBase = { runId: 'run-1', tracker: 'state/run-1.sqlite', counts, artifac
 const experimentBase = { experimentId: 'experiment-1', attemptId: 'attempt-1', parentCommit: SHA_A, artifacts: [] }
 const exit = { exitCode: 1, signal: null, timedOut: false, stdout: artifact, stderr }
 
-function input(overrides: Partial<AutoresearchToolInput> = {}): AutoresearchToolInput {
+const registrationConfig = { id: 'judge', command: 'node', args: ['scripts/evaluate.mjs'], cwd: 'fixtures', environment: {}, metricName: 'score', metricDirection: 'minimize' as const, metricParserVersion: 'final-line-json-v1' as const, evaluatorFiles: ['scripts/evaluate.mjs'] }
+const registration = createEvaluatorRegistry([registrationConfig]).resolve('judge')
+function input(overrides: Partial<ActivationAutoresearchToolInput> = {}): ActivationAutoresearchToolInput {
   return {
     run_tag: 'contract-test',
+    evaluator_id: 'judge',
     objective: 'Improve the measured score.',
     constraints: ['Keep output stable.'],
     mutable_globs: ['src/**'],
-    evaluation: { command: 'node', args: ['scripts/evaluate.mjs'], cwd: 'fixtures' },
-    metric_name: 'score',
-    metric_direction: 'minimize',
     ...overrides,
-  }
+  } as ActivationAutoresearchToolInput
 }
 
 function decodeExperiment(value: Record<string, unknown>, direction: MetricDirection = 'minimize') {
@@ -217,7 +217,7 @@ describe('configuration and policy normalization', () => {
     const config = resolveConfig({ maxExperiments: 7, maxTimeoutMs: 8_000 })
     expect(config.defaultMaxExperiments).toBe(7)
     expect(config.defaultTimeoutMs).toBe(8_000)
-    expect(normalizeRunPolicy(input(), config, '/caller')).toMatchObject({ maxExperiments: 7, timeoutMs: 8_000, mode: 'background' })
+    expect(normalizeRunPolicy(input(), config, '/caller', registration)).toMatchObject({ maxExperiments: 7, timeoutMs: 8_000, mode: 'background' })
   })
 
   it('enforces cap and retention cross-field combinations', () => {
@@ -233,28 +233,30 @@ describe('configuration and policy normalization', () => {
     })
     expect(resolveConfig({ retainWorktrees: false, cleanupWorktreesOnSuccess: false })).toMatchObject({ retainWorktrees: false, cleanupWorktreesOnSuccess: false })
     const config = resolveConfig({ maxExperiments: 7, maxTimeoutMs: 8_000 })
-    expect(() => normalizeRunPolicy(input({ max_experiments: 8 }), config, '/caller')).toThrow(/deployment maximum/)
-    expect(() => normalizeRunPolicy(input({ timeout_ms: 8_001 }), config, '/caller')).toThrow(/deployment maximum/)
+    expect(() => normalizeRunPolicy(input({ max_experiments: 8 }), config, '/caller', registration)).toThrow(/deployment maximum/)
+    expect(() => normalizeRunPolicy(input({ timeout_ms: 8_001 }), config, '/caller', registration)).toThrow(/deployment maximum/)
   })
 
   it.each([
-    [{ evaluation: { command: ' node', args: [] } }, /evaluation.command/],
-    [{ evaluation: { command: 'node', args: 'script.mjs' } }, /evaluation.args must be an array/],
-    [{ evaluation: { command: 'node', args: ['ok\nno'] } }, /evaluation.args\[0\]/],
-    [{ evaluation: { command: 'node', args: [], cwd: '/absolute' } }, /relative path/],
-    [{ evaluation: { command: 'node', args: [], cwd: '../escape' } }, /relative path/],
-    [{ evaluation: { command: 'node', args: [], shell: true } }, /unknown key "shell"/],
-  ] as const)('rejects unsafe evaluator argv/path policy %#', (override, message) => {
-    expect(() => normalizeRunPolicy(input(override as Partial<AutoresearchToolInput>), resolveConfig(), '/caller')).toThrow(message)
+    [{ command: ' node' }, /command/],
+    [{ args: 'script.mjs' }, /args must be an array/],
+    [{ args: ['ok\nno'] }, /args\[0\]/],
+    [{ cwd: '/absolute' }, /repository-relative path/],
+    [{ cwd: '../escape' }, /parent components/],
+    [{ shell: true }, /unknown key "shell"/],
+    [{ environment: { DSH_TOKEN: 'host-owned' } }, /environment name DSH_TOKEN is reserved/],
+  ] as const)('rejects unsafe Host evaluator registration %#', (override, message) => {
+    expect(() => createEvaluatorRegistry([{ ...registrationConfig, ...override } as never])).toThrow(message)
   })
 
-  it('rejects reserved DSH_ evaluator environment keys during normalization', () => {
-    expect(() => normalizeRunPolicy(input({ environment: { DSH_TOKEN: 'secret' } }), resolveConfig(), '/caller')).toThrow(/reserved DSH_ prefix/)
-    expect(normalizeRunPolicy(input({ environment: { PATH_HINT: 'safe' } }), resolveConfig(), '/caller').environment).toEqual({ PATH_HINT: 'safe' })
+  it('preserves non-reserved Host-owned evaluator environment keys during registration normalization', () => {
+    const selected = createEvaluatorRegistry([{ ...registrationConfig, environment: { PATH_HINT: 'safe' } }]).resolve('judge')
+    expect(normalizeRunPolicy(input(), resolveConfig(), '/caller', selected).environment).toEqual({ PATH_HINT: 'safe' })
   })
 
-  it('returns a deeply immutable, deduplicated and key-stable snapshot', () => {
-    const policy = normalizeRunPolicy(input({ constraints: ['same', 'same'], mutable_globs: ['src/**', 'src/**'], environment: { ZED: 'last', ALPHA: 'first' } }), resolveConfig(), '/caller')
+  it('returns a deeply immutable, deduplicated and key-stable activated policy snapshot', () => {
+    const selected = createEvaluatorRegistry([{ ...registrationConfig, environment: { ZED: 'last', ALPHA: 'first' } }]).resolve('judge')
+    const policy = normalizeRunPolicy(input({ constraints: ['same', 'same'], mutable_globs: ['src/**', 'src/**'] }), resolveConfig(), '/caller', selected)
     expect(policy.constraints).toEqual(['same'])
     expect(policy.mutableGlobs).toEqual(['src/**'])
     expect(Object.keys(policy.environment)).toEqual(['ALPHA', 'ZED'])
@@ -278,7 +280,7 @@ describe('configuration and policy normalization', () => {
       expect(() => createEvaluatorRegistry([{ ...base, id: 'malformed', dataset } as never])).toThrow(/dataset/)
     }
     expect(() => registry.resolve('unknown')).toThrow('unknown evaluator registration id "unknown"')
-    expect(() => createEvaluatorRegistry([{ ...base, id: 'hostile', environment: { DSH_TOKEN: 'override' } }])).toThrow(/reserved DSH_ prefix/)
+    expect(() => createEvaluatorRegistry([{ ...base, id: 'host-owned', environment: { DSH_TOKEN: 'override' } }])).toThrow(/environment name DSH_TOKEN is reserved/)
     expect(() => createEvaluatorRegistry([{ ...base, id: 'extended', shell: true } as never])).toThrow(/unknown key "shell"/)
     expect(() => createEvaluatorRegistry([{ ...base, id: 'same' }, { ...base, id: 'same' }])).toThrow('duplicate evaluator registration id "same"')
   })
@@ -293,7 +295,7 @@ describe('configuration and policy normalization', () => {
     expect(fields?.['dataset']?.meta.default).toEqual({ kind: 'none' })
   })
 
-  it('exposes an inert discriminated activation contract without raw authority keys', () => {
+  it('exposes the activated discriminated contract without raw authority keys', () => {
     const common = { objective: 'improve', mutable_globs: ['src/**'] }
     expect(decodeActivationToolInput({ ...common, run_tag: 'new', evaluator_id: 'judge' })).toMatchObject({ evaluator_id: 'judge' })
     expect(() => decodeActivationToolInput({ ...common, run_tag: 'new' })).toThrow(/evaluator_id/)

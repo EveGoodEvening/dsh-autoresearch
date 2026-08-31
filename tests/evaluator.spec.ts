@@ -191,7 +191,7 @@ describe('strict evaluator metric protocol', () => {
   })
 })
 
-describe('inert frozen registration files', () => {
+describe('activated frozen registration files', () => {
   function registration(root: string) {
     mkdirSync(join(root, 'data'), { recursive: true })
     writeFileSync(join(root, 'data', 'train.json'), '{"rows":1}\n')
@@ -248,11 +248,22 @@ describe('inert frozen registration files', () => {
     expect(Object.keys(deriveRegistrationManifest(paths.root, normalized))).toEqual(['bench/evaluate.mjs'])
     expect(() => normalizeEvaluatorRegistration({ ...normalized, dataset: { kind: 'external', digest: 'a'.repeat(64) as never } })).toThrow(/algorithm-qualified/)
   })
-  it('remains unreachable from production index, controller, recovery, and retention routes', () => {
-    const inertSymbols = /EVALUATOR_CONTRACT_GENERATION|deriveRegistrationManifestAtStartCommit|deriveRegistrationManifest|captureFrozenFileAttempt|revalidateFrozenFileAttempt|recomputeRegistrationManifest|validateFrozenCandidatePaths/
-    for (const path of ['src/index.ts', 'src/controller.ts', 'src/recovery.ts', 'src/retention.ts']) {
+  it('is activated through the exact production controller, recovery, and retention routes', () => {
+    const productionUses = {
+      'src/index.ts': ['new AutoresearchRunController('],
+      'src/controller.ts': [
+        'deriveRegistrationManifestAtStartCommit(',
+        'captureFrozenFileAttempt(',
+        'revalidateFrozenFileAttempt(',
+        'recomputeRegistrationManifest(',
+        'validateFrozenCandidatePaths(',
+      ],
+      'src/recovery.ts': ['validateFrozenCandidatePaths('],
+      'src/retention.ts': ['classifyDurableRegistration('],
+    } as const
+    for (const [path, expectedUses] of Object.entries(productionUses)) {
       const source = readFileSync(new URL(`../${path}`, import.meta.url), 'utf8')
-      expect(source).not.toMatch(inertSymbols)
+      for (const expectedUse of expectedUses) expect(source, `${path} must activate ${expectedUse}`).toContain(expectedUse)
     }
   })
 })

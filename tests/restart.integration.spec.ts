@@ -26,13 +26,15 @@ async function fixture() {
 }
 
 interface RestartFixture { root: string; ctx: Context; parent: Agent; dispose(): Promise<void> }
-function controller(f: RestartFixture, tag: string, maxActiveRunsPerRepository = 2, resumeRunId?: string, hang = false, descendantMarker?: string) {
+function controller(f: RestartFixture, tag: string, maxActiveRunsPerRepository = 2, resumeRunId?: string, hang = false, descendantMarker?: string, hostRegistrationPresent = true) {
+  const args = descendantMarker ? ['evaluate-descendant.mjs'] : hang ? ['-e', 'setInterval(() => {}, 1000)'] : ['evaluate.mjs']
+  const evaluatorFiles = hang ? [] : [descendantMarker ? 'evaluate-descendant.mjs' : 'evaluate.mjs']
   const input = {
-    repository: f.root, ...(resumeRunId ? { resume_run_id: resumeRunId } : { run_tag: tag }), objective: 'exercise restart', mutable_globs: ['src/**'],
-    evaluation: descendantMarker ? { command: process.execPath, args: ['evaluate-descendant.mjs'] } : hang ? { command: process.execPath, args: ['-e', 'setInterval(() => {}, 1000)'] } : { command: process.execPath, args: ['evaluate.mjs'] },
-    ...(descendantMarker ? { environment: { AUTORESEARCH_MARKER: descendantMarker } } : {}), metric_name: 'score', metric_direction: 'minimize' as const, max_experiments: 1, mode: 'foreground' as const,
+    repository: f.root, ...(resumeRunId ? { resume_run_id: resumeRunId } : { run_tag: tag, evaluator_id: 'judge' }), objective: 'exercise restart', mutable_globs: ['src/**'],
+    max_experiments: 1, mode: 'foreground' as const,
   }
-  return new AutoresearchRunController(f.ctx, { config: resolveConfig({ stateRoot: '.restart-state', maxActiveRunsPerRepository, cleanupWorktreesOnSuccess: false, retainWorktrees: true, exportTsv: false }), input, parent: f.parent, signal: new AbortController().signal })
+  const evaluatorRegistrations = hostRegistrationPresent ? [{ id: 'judge', command: process.execPath, args, ...(descendantMarker ? { environment: { AUTORESEARCH_MARKER: descendantMarker } } : {}), metricName: 'score', metricDirection: 'minimize' as const, metricParserVersion: 'final-line-json-v1' as const, evaluatorFiles }] : []
+  return new AutoresearchRunController(f.ctx, { config: resolveConfig({ stateRoot: '.restart-state', maxActiveRunsPerRepository, cleanupWorktreesOnSuccess: false, retainWorktrees: true, exportTsv: false, evaluatorRegistrations }), input, parent: f.parent, signal: new AbortController().signal })
 }
 
 describe('controller restart and repository concurrency integration', () => {
@@ -71,12 +73,14 @@ describe('controller restart and repository concurrency integration', () => {
       const authorityPath = join(f.root, '.git', 'dsh-autoresearch-locks.sqlite')
       const authority = new DatabaseSync(authorityPath)
       expect(authority.prepare('SELECT repository_id, run_tag FROM active_locks WHERE run_id = ?').get(identity.runId)).toMatchObject({ run_tag: 'release-window' })
+      authority.prepare('INSERT OR REPLACE INTO controller_claims (run_id, owner_id, owner_pid, owner_start_token, acquired_at, heartbeat_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)').run(identity.runId, 'orphaned-controller', 2_147_483_647, 'defunct-process', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:01.000Z')
       authority.close()
 
       const resumed = controller(f, '', 1, identity.runId); const terminal = await resumed.run()
       expect(terminal.runId).toBe(identity.runId)
       const reconciled = new DatabaseSync(authorityPath)
       expect(reconciled.prepare('SELECT 1 FROM active_locks WHERE run_id = ?').get(identity.runId)).toBeUndefined()
+      expect(reconciled.prepare('SELECT 1 FROM controller_claims WHERE run_id = ?').get(identity.runId)).toBeUndefined()
       reconciled.close()
 
       const reused = controller(f, 'release-window', 1, undefined, true); const running = reused.run(); const reusedIdentity = await reused.ready
@@ -141,6 +145,12 @@ describe('controller restart and repository concurrency integration', () => {
       const cancelled = await running
       expect(cancelled).toMatchObject({ runId: ready.runId, status: 'cancelled', quiescent: true, counts: { attempts: 1 } })
       for (const pid of [pids.parent, pids.descendant]) expect(() => process.kill(pid, 0)).toThrow()
+      const durable = DurableTracker.open(ready.tracker)
+      expect(durable.getRun(ready.runId)?.['state']).toBe('cancelled')
+      expect(durable.listTransitions(ready.runId).at(-1)?.['to_state']).toBe('cancelled')
+      expect(durable.database.prepare('SELECT COUNT(*) AS count FROM run_registrations WHERE run_id = ?').get(ready.runId)?.['count']).toBe(1)
+      expect(durable.readRegistration(ready.runId)?.evaluatorId).toBe('judge')
+      durable.close()
       const resumed = controller(f, '', 1, ready.runId, false, marker); const terminal = await resumed.run()
       expect(terminal).toMatchObject({ runId: ready.runId, status: 'cancelled', counts: { attempts: 1 } })
       const tracker = DurableTracker.open(ready.tracker)

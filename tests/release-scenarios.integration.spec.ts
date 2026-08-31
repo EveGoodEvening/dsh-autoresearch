@@ -86,11 +86,9 @@ function request(cwd: string, objective: string, mode: 'foreground' | 'backgroun
   return {
     repository: cwd,
     run_tag: `release-${crypto.randomUUID().slice(0, 8)}`,
+    evaluator_id: 'judge',
     objective,
     mutable_globs: ['score.txt'],
-    evaluation: { command: process.execPath, args: [evaluator] },
-    metric_name: 'score',
-    metric_direction: 'minimize',
     max_experiments: 1,
     timeout_ms: 10_000,
     mode,
@@ -273,7 +271,7 @@ releaseDescribe('packed release scenarios', () => {
         await mkdir(resumeCwd); await writeFile(join(resumeCwd, 'caller.txt'), 'advance caller head\n')
         git(cwd, ['add', 'resume-cwd/caller.txt']); git(cwd, ['commit', '-qm', 'advance caller head'])
         const advancedHead = git(cwd, ['rev-parse', 'HEAD'])
-        const { run_tag: _tag, mode: _mode, repository: _repository, ...stable } = args
+        const { run_tag: _tag, evaluator_id: _evaluatorId, mode: _mode, repository: _repository, ...stable } = args
         const resumed = await execute(harness.ctx, owner.agent, { ...stable, repository: resumeCwd, resume_run_id: started.runId, mode: 'foreground' })
         expect(resumed).toMatchObject({ kind: 'foreground', run: { runId: started.runId, status: 'budget-limited', best: completed.best } })
         expect(resumed.run).toEqual(completed)
@@ -292,16 +290,17 @@ releaseDescribe('packed release scenarios', () => {
   }, 45_000)
 
   it('interrupts a real evaluator descendant tree and resumes without duplicate work', async () => {
-    const harness = await composeHarness()
+    const marker = join(process.cwd(), `.release-descendants-${crypto.randomUUID()}.json`)
+    const harness = await composeHarness({ autoresearchConfig: { evaluatorRegistrations: [{ id: 'judge', command: process.execPath, args: [descendantEvaluator, marker], metricName: 'score', metricDirection: 'minimize', metricParserVersion: 'final-line-json-v1', evaluatorFiles: [] }] } })
     try {
-      const cwd = await repository(harness.root, 'interruption'); const owner = await parent(harness.ctx, cwd); const marker = join(harness.root, 'descendants.json')
+      const cwd = await repository(harness.root, 'interruption'); const owner = await parent(harness.ctx, cwd)
       try {
-        const args = { ...request(cwd, 'release interruption resume', 'background'), evaluation: { command: process.execPath, args: [descendantEvaluator, marker] } }
+        const args = request(cwd, 'release interruption resume', 'background')
         const started = await execute(harness.ctx, owner.agent, args); await waitUntil(async () => { try { await readFile(marker); return true } catch { return false } }, 'descendant evaluator did not start')
         const pids = JSON.parse(await readFile(marker, 'utf8')) as { parent: number; child: number }
         const killed = await harness.ctx.tools.execute({ callId: 'interrupt-kill' as never, name: 'job_kill', arguments: { job_id: started.jobId }, agent: owner.agent, signal: new AbortController().signal }); expect(killed.isError).toBe(false)
         await harness.ctx.jobs.wait(started.jobId, 20_000, owner.agent); await waitUntil(async () => await processGone(pids.parent) && await processGone(pids.child), 'provider-owned evaluator tree survived cancellation')
-        const { run_tag: _tag, mode: _mode, ...stable } = args; const resumed = await execute(harness.ctx, owner.agent, { ...stable, resume_run_id: started.runId, mode: 'foreground' })
+        const { run_tag: _tag, evaluator_id: _evaluatorId, mode: _mode, ...stable } = args; const resumed = await execute(harness.ctx, owner.agent, { ...stable, resume_run_id: started.runId, mode: 'foreground' })
         expect(resumed).toMatchObject({ kind: 'foreground', run: { runId: started.runId, status: 'cancelled' } })
         const durable = inspect(started.tracker, started.runId); const db = new DatabaseSync(started.tracker, { readOnly: true }); const attempts = Number(db.prepare('SELECT COUNT(*) n FROM attempts').get()?.n); const uncertain = Number(db.prepare('SELECT COUNT(*) n FROM attempts WHERE process_tree_quiescent IS NOT 1').get()?.n); db.close(); expect(attempts).toBe(1); expect(uncertain).toBe(0)
         evidence.interruptionResume = { ok: true, runId: started.runId, parentPid: pids.parent, childPid: pids.child, processTreeQuiescent: true, resumedStatus: resumed.run.status, attempts, duplicateCandidate: durable.experiments.filter(row => row.kind === 'candidate').length > 1 }
@@ -318,7 +317,7 @@ releaseDescribe('packed release scenarios', () => {
         const attemptId = String(db.prepare('SELECT attempt_id FROM attempts ORDER BY ordinal DESC LIMIT 1').get()?.attempt_id); const beforeAttempts = Number(db.prepare('SELECT COUNT(*) n FROM attempts').get()?.n)
         db.prepare('UPDATE attempts SET process_tree_quiescent=NULL, exited_at=NULL, provider_attempt_id=?, provider_pid=? WHERE attempt_id=?').run(`pid:${process.pid}`, process.pid, attemptId)
         db.prepare('UPDATE runs SET terminal_quiescent=0 WHERE run_id=?').run(run.runId); db.prepare('UPDATE active_locks SET released_at=NULL WHERE run_id=?').run(run.runId); db.close()
-        const kill = vi.spyOn(process, 'kill'); const { run_tag: _tag, mode: _mode, ...stable } = args
+        const kill = vi.spyOn(process, 'kill'); const { run_tag: _tag, evaluator_id: _evaluatorId, mode: _mode, ...stable } = args
         try {
           const resumed = await execute(harness.ctx, owner.agent, { ...stable, resume_run_id: run.runId, mode: 'foreground' }); expect(resumed.run.status).toBe('blocked')
           const check = new DatabaseSync(run.tracker, { readOnly: true }); const afterAttempts = Number(check.prepare('SELECT COUNT(*) n FROM attempts').get()?.n); const lock = check.prepare('SELECT released_at FROM active_locks WHERE run_id=?').get(run.runId) as { released_at: string | null }; check.close(); expect(afterAttempts).toBe(beforeAttempts); expect(lock.released_at).toBeNull(); expect(kill.mock.calls.some(([pid, signal]) => Math.abs(Number(pid)) === process.pid && signal !== 0)).toBe(false)

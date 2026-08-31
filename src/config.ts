@@ -1,5 +1,5 @@
 import z from '@deepseek-ai/schemastery'
-import { normalizeEvaluatorRegistration, type AutoresearchToolInput, type EvaluatorRegistration, type ExceptionalPathPolicy, type NormalizedRunPolicy } from './types.js'
+import { normalizeEvaluatorRegistration, normalizeRegistrationEnvironment as normalizeSharedRegistrationEnvironment, type ActivationAutoresearchToolInput, type EvaluatorRegistration, type NormalizedRunPolicy } from './types.js'
 
 export interface EvaluatorRegistrationConfig {
   id: string
@@ -220,7 +220,7 @@ function normalizeEvaluatorConfig(value: EvaluatorRegistrationConfig, index: num
     command: value.command,
     args: value.args,
     ...(value.cwd === undefined ? {} : { cwd: value.cwd }),
-    environment: normalizeEnvironment(value.environment),
+    environment: normalizeHostRegistrationEnvironment(value.environment),
     metricName: value.metricName,
     metricDirection: value.metricDirection,
     evaluatorFiles: value.evaluatorFiles,
@@ -228,6 +228,12 @@ function normalizeEvaluatorConfig(value: EvaluatorRegistrationConfig, index: num
   })
   if (value.metricParserVersion !== 'final-line-json-v1') throw new TypeError(`evaluatorRegistrations[${index}].metricParserVersion is unsupported`)
   return { ...registration, metricParserVersion: value.metricParserVersion }
+}
+
+function normalizeHostRegistrationEnvironment(value: Readonly<Record<string, string>> | undefined): Readonly<Record<string, string>> {
+  const environment = normalizeSharedRegistrationEnvironment(value)
+  for (const name of Object.keys(environment)) if (name.startsWith('DSH_')) throw new TypeError(`environment name ${name} is reserved`)
+  return environment
 }
 
 function normalizeConfiguredDataset(value: NonNullable<EvaluatorRegistrationConfig['dataset']>, index: number): EvaluatorRegistration['dataset'] {
@@ -253,71 +259,39 @@ function normalizeConfiguredDataset(value: NonNullable<EvaluatorRegistrationConf
   }
   throw new TypeError(`${label} has unknown kind`)
 }
-
-export function normalizeRunPolicy(input: AutoresearchToolInput, config: ResolvedConfig, callerCwd: string): NormalizedRunPolicy {
-  rejectUnknown(input as unknown as Record<string, unknown>, new Set([
-    'repository', 'run_tag', 'resume_run_id', 'objective', 'constraints', 'mutable_globs',
-    'exceptional_allowlists', 'evaluation', 'metric_name', 'metric_direction', 'timeout_ms',
-    'max_experiments', 'target', 'provenance', 'environment', 'mode',
-  ]), 'autoresearch input')
-  if ((input.run_tag === undefined) === (input.resume_run_id === undefined)) throw new TypeError('exactly one of run_tag or resume_run_id is required')
+export function normalizeRunPolicy(input: ActivationAutoresearchToolInput, config: ResolvedConfig, callerCwd: string, registration: HostEvaluatorRegistration): NormalizedRunPolicy {
   const maxExperiments = positiveInteger(input.max_experiments ?? config.defaultMaxExperiments, 'max_experiments')
   if (maxExperiments > config.maxExperiments) throw new TypeError('max_experiments exceeds deployment maximum')
   const timeoutMs = positiveInteger(input.timeout_ms ?? config.defaultTimeoutMs, 'timeout_ms')
   if (timeoutMs > config.maxTimeoutMs) throw new TypeError('timeout_ms exceeds deployment maximum')
-  if (input.metric_direction !== 'minimize' && input.metric_direction !== 'maximize') throw new TypeError('metric_direction must be minimize or maximize')
   if (input.target !== undefined && !Number.isFinite(input.target)) throw new TypeError('target must be finite')
-  if (!Array.isArray(input.mutable_globs) || input.mutable_globs.length === 0) throw new TypeError('mutable_globs must not be empty')
-  const evaluation = exactEvaluation(input.evaluation)
+  const datasetIdentity = registration.dataset.kind === 'none' ? undefined : registration.dataset.identity ?? (registration.dataset.kind === 'external' ? registration.dataset.digest : registration.dataset.files.join(','))
   const policy: NormalizedRunPolicy = {
     repository: normalizedPath(input.repository ?? callerCwd, 'repository'),
-    ...(input.run_tag === undefined ? {} : { runTag: runTag(input.run_tag) }),
-    ...(input.resume_run_id === undefined ? {} : { resumeRunId: normalizedText(input.resume_run_id, 'resume_run_id') }),
+    ...('run_tag' in input ? { runTag: runTag(input.run_tag) } : { resumeRunId: normalizedText(input.resume_run_id, 'resume_run_id') }),
     objective: normalizedText(input.objective, 'objective'),
     constraints: normalizedList(input.constraints ?? [], 'constraints'),
     mutableGlobs: normalizedList(input.mutable_globs, 'mutable_globs', true),
-    exceptionalAllowlists: normalizeAllowlists(input.exceptional_allowlists),
-    evaluation,
-    metricName: metricName(input.metric_name),
-    metricDirection: input.metric_direction,
+    exceptionalAllowlists: { dependencies: [], evaluators: [], datasets: [], submodules: [], gitConfig: [] },
+    evaluation: { command: registration.command, args: [...registration.args], ...(registration.cwd === undefined ? {} : { cwd: registration.cwd }) },
+    metricName: registration.metricName,
+    metricDirection: registration.metricDirection,
     timeoutMs,
     maxExperiments,
     ...(input.target === undefined ? {} : { target: input.target }),
-    provenance: normalizeProvenance(input.provenance),
-    environment: normalizeEnvironment(input.environment),
+    provenance: { evaluator: registration.evaluatorId, ...(datasetIdentity === undefined ? {} : { dataset: datasetIdentity }) },
+    environment: registration.environment,
     mode: input.mode ?? 'background',
   }
-  if (policy.mode !== 'background' && policy.mode !== 'foreground') throw new TypeError('mode must be background or foreground')
   return deepFreeze(structuredClone(policy))
 }
 
-function exactEvaluation(value: AutoresearchToolInput['evaluation']): NormalizedRunPolicy['evaluation'] {
-  const record = value as unknown as Record<string, unknown>
-  rejectUnknown(record, new Set(['command', 'args', 'cwd']), 'evaluation')
-  if (!Array.isArray(value.args)) throw new TypeError('evaluation.args must be an array')
-  return { command: normalizedText(value.command, 'evaluation.command'), args: normalizedList(value.args, 'evaluation.args', false, true), ...(value.cwd === undefined ? {} : { cwd: safeRelativePath(value.cwd, 'evaluation.cwd') }) }
-}
-
-function normalizeAllowlists(value: AutoresearchToolInput['exceptional_allowlists']): ExceptionalPathPolicy {
-  const source = optionalPlainObject(value, 'exceptional_allowlists') as Partial<ExceptionalPathPolicy>
-  rejectUnknown(source as Record<string, unknown>, new Set(['dependencies', 'evaluators', 'datasets', 'submodules', 'gitConfig']), 'exceptional_allowlists')
-  return {
-    dependencies: normalizedList(source.dependencies ?? [], 'exceptional_allowlists.dependencies', true),
-    evaluators: normalizedList(source.evaluators ?? [], 'exceptional_allowlists.evaluators', true),
-    datasets: normalizedList(source.datasets ?? [], 'exceptional_allowlists.datasets', true),
-    submodules: normalizedList(source.submodules ?? [], 'exceptional_allowlists.submodules', true),
-    gitConfig: normalizedList(source.gitConfig ?? [], 'exceptional_allowlists.gitConfig', true),
-  }
-}
-function normalizeProvenance(value: AutoresearchToolInput['provenance']): NormalizedRunPolicy['provenance'] { const source = optionalPlainObject(value, 'provenance') as Record<string, unknown>; rejectUnknown(source, new Set(['evaluator', 'dataset']), 'provenance'); return { ...optionalText(source['evaluator'], 'evaluator', 'provenance.evaluator'), ...optionalText(source['dataset'], 'dataset', 'provenance.dataset') } }
-function normalizeEnvironment(value: AutoresearchToolInput['environment']): Readonly<Record<string, string>> { const source = optionalPlainObject(value, 'environment'); const output: Record<string, string> = {}; for (const [key, item] of Object.entries(source).sort(([a], [b]) => a.localeCompare(b))) { if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(key)) throw new TypeError(`invalid environment key ${key}`); if (key.startsWith('DSH_')) throw new TypeError(`environment key ${key} uses the reserved DSH_ prefix`); if (typeof item !== 'string' || /\0/u.test(item)) throw new TypeError(`environment.${key} must be a NUL-free string`); output[key] = item } return output }
 function optionalPlainObject(value: unknown, label: string): Record<string, unknown> { if (value === undefined) return {}; if (value === null || typeof value !== 'object' || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) throw new TypeError(`${label} must be a plain object`); return value as Record<string, unknown> }
 function normalizedList(values: readonly unknown[], label: string, paths = false, allowEmpty = false): string[] { const result = values.map((value, index) => paths ? safeRelativePath(value, `${label}[${index}]`) : normalizedText(value, `${label}[${index}]`, allowEmpty)); return [...new Set(result)] }
 function normalizedText(value: unknown, label: string, allowEmpty = false): string { if (typeof value !== 'string' || value !== value.trim() || (!allowEmpty && value.length === 0) || /[\0\r\n]/u.test(value)) throw new TypeError(`${label} must be normalized text`); return value }
 function normalizedPath(value: unknown, label: string): string { const result = normalizedText(value, label); if (/\0/u.test(result)) throw new TypeError(`${label} contains NUL`); return result }
 function safeRelativePath(value: unknown, label: string): string { const result = normalizedText(value, label); if (result.startsWith('/') || result.startsWith('\\') || /^[A-Za-z]:[\\/]/u.test(result) || result.split(/[\\/]/u).includes('..')) throw new TypeError(`${label} must be a relative path without parent traversal`); return result }
 function runTag(value: unknown): string { const result = normalizedText(value, 'run_tag'); if (!/^[a-z0-9][a-z0-9._-]*$/u.test(result) || result.endsWith('.') || result.includes('..')) throw new TypeError('run_tag must be lower-case Git-safe text'); return result }
-function metricName(value: unknown): string { const result = normalizedText(value, 'metric_name'); if (!/^[A-Za-z_][A-Za-z0-9_.-]*$/u.test(result)) throw new TypeError('metric_name must be a scalar JSON key'); return result }
 function branchPrefix(value: unknown): string { const result = normalizedText(value, 'branchPrefix'); if (!result.endsWith('/') || /[\s~^:?*[\\]/u.test(result) || result.includes('..')) throw new TypeError('branchPrefix must be a valid Git prefix ending in /'); return result }
 function positiveInteger(value: unknown, label: string): number { if (!Number.isSafeInteger(value) || (value as number) < 1) throw new TypeError(`${label} must be a positive safe integer`); return value as number }
 function boolean(value: unknown, label: string): boolean { if (typeof value !== 'boolean') throw new TypeError(`${label} must be boolean`); return value }

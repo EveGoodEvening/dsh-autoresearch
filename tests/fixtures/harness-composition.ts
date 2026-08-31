@@ -56,7 +56,9 @@ function configureBootEntry(entry: EntryOptions, autoresearchConfig?: Readonly<R
     return { ...entry, config: { root: [], ignored: [], debounce: 10 } }
   }
   if (entry.id === 'autoresearch') {
-    return { ...entry, config: { ...entry.config, terminationGraceMs: COMPOSITION_TERMINATION_GRACE_MS, ...autoresearchConfig } }
+    const evaluator = fileURLToPath(new URL('./loader/evaluator.mjs', import.meta.url))
+    const evaluatorRegistrations = [{ id: 'judge', command: process.execPath, args: [evaluator], metricName: 'score', metricDirection: 'minimize', metricParserVersion: 'final-line-json-v1', evaluatorFiles: [] }]
+    return { ...entry, config: { ...entry.config, terminationGraceMs: COMPOSITION_TERMINATION_GRACE_MS, evaluatorRegistrations, ...autoresearchConfig } }
   }
   return entry
 }
