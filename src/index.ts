@@ -83,7 +83,7 @@ function requireServices(ctx: Context): void {
   if (typeof jobs.start !== 'function') throw new Error('autoresearch requires a compatible ctx.jobs registry')
 }
 
-/** Register the sole production autoresearch controller, model tool, and direct-human guidance. */
+/** Register the legacy production controller and model tool. The resolved Host evaluator registry and activation schema remain inert until Chunk 04. */
 export function apply(ctx: Context, config: AutoresearchConfig = {}): void {
   requireServices(ctx)
   const resolved = resolveConfig(config)

@@ -51,18 +51,18 @@ function standardAgentPlaneOverlay(): PatchOptions[] {
     },
   ]
 }
-function configureBootEntry(entry: EntryOptions): EntryOptions {
+function configureBootEntry(entry: EntryOptions, autoresearchConfig?: Readonly<Record<string, unknown>>): EntryOptions {
   if (entry.id === 'hmr') {
     return { ...entry, config: { root: [], ignored: [], debounce: 10 } }
   }
   if (entry.id === 'autoresearch') {
-    return { ...entry, config: { ...entry.config, terminationGraceMs: COMPOSITION_TERMINATION_GRACE_MS } }
+    return { ...entry, config: { ...entry.config, terminationGraceMs: COMPOSITION_TERMINATION_GRACE_MS, ...autoresearchConfig } }
   }
   return entry
 }
 
 
-export async function composeHarness(options: { autoresearch?: boolean; omitEntry?: string; reverseEntries?: boolean; standardPreset?: boolean } = {}): Promise<RealHarness> {
+export async function composeHarness(options: { autoresearch?: boolean; autoresearchConfig?: Readonly<Record<string, unknown>>; omitEntry?: string; reverseEntries?: boolean; standardPreset?: boolean } = {}): Promise<RealHarness> {
   const root = await mkdtemp(join(tmpdir(), 'dsh-autoresearch-loader-'))
   const home = join(root, 'home')
   const profileDir = join(home, 'profiles', 'integration')
@@ -96,7 +96,7 @@ export async function composeHarness(options: { autoresearch?: boolean; omitEntr
     if (!options.reverseEntries) return 0
     return right.id.localeCompare(left.id)
   })
-  const bootEntries = selected.map(configureBootEntry)
+  const bootEntries = selected.map(entry => configureBootEntry(entry, options.autoresearchConfig))
   const configPath = join(profileDir, 'cordis.yml')
   await writeFile(configPath, '[]\n')
   const patches: PatchOptions[] = [{ insert: bootEntries }]

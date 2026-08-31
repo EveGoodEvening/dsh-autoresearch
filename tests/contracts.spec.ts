@@ -2,9 +2,9 @@ import { readFileSync } from 'node:fs'
 import { entryListSchema } from '@deepseek-ai/cordis-plugin-include'
 import { load } from 'js-yaml'
 import { describe, expect, it } from 'vitest'
-import { DEFAULT_CONFIG, normalizeRunPolicy, resolveConfig } from '../src/config.ts'
+import { Config, createEvaluatorRegistry, DEFAULT_CONFIG, normalizeRunPolicy, resolveConfig } from '../src/config.ts'
 import { boundText, renderExperimentResult, renderRunResult, renderToolResult } from '../src/render.ts'
-import { decodeExperimentResult, decodeRunResult, isTargetReached } from '../src/types.ts'
+import { ACTIVATION_AUTORESEARCH_TOOL_SCHEMA, decodeActivationToolInput, decodeExperimentResult, decodeRunResult, isTargetReached } from '../src/types.ts'
 import type { AutoresearchToolInput, MetricDirection } from '../src/types.ts'
 
 const SHA_A = 'a'.repeat(40)
@@ -181,8 +181,11 @@ describe('experiment result contracts', () => {
 
 describe('configuration and policy normalization', () => {
   it('resolves every omitted deployment default', () => {
-    expect(resolveConfig()).toEqual(DEFAULT_CONFIG)
-    expect(DEFAULT_CONFIG).toEqual({
+    const { evaluatorRegistry: resolvedRegistry, ...resolvedDefaults } = resolveConfig()
+    const { evaluatorRegistry: defaultRegistry, ...expectedDefaults } = DEFAULT_CONFIG
+    expect(resolvedDefaults).toEqual(expectedDefaults)
+    expect(resolvedRegistry.registrations).toEqual(defaultRegistry.registrations)
+    expect(DEFAULT_CONFIG).toMatchObject({
       gitExecutable: 'git',
       stateRoot: 'dsh-autoresearch',
       branchPrefix: 'autoresearch/',
@@ -203,6 +206,7 @@ describe('configuration and policy normalization', () => {
       exportTsv: true,
       tsvRetentionDays: 30,
     })
+    expect(DEFAULT_CONFIG.evaluatorRegistry.registrations).toEqual([])
   })
 
   it.each(['subagentProvider', 'resultsFile'] as const)('rejects removed deployment key %s', (key) => {
@@ -258,16 +262,100 @@ describe('configuration and policy normalization', () => {
     expect(Object.isFrozen(policy.evaluation)).toBe(true)
     expect(Object.isFrozen(policy.environment)).toBe(true)
   })
+
+  it('normalizes a deterministic Host-owned evaluator registry and resolves exact IDs', () => {
+    const base = { command: 'node', args: ['score.mjs'], environment: { ZED: '2', ALPHA: '1' }, metricName: 'score', metricDirection: 'minimize' as const, metricParserVersion: 'final-line-json-v1' as const, evaluatorFiles: ['scripts/score.mjs'] }
+    const registry = createEvaluatorRegistry([
+      { ...base, id: 'z-judge', dataset: { kind: 'external', digest: `sha256:${'a'.repeat(64)}`, identity: 'benchmark-v1' } },
+      { ...base, id: 'a-judge', dataset: { kind: 'local', files: ['data/train.json'], identity: 'train-v1' } },
+    ])
+    expect(registry.registrations.map(item => item.evaluatorId)).toEqual(['a-judge', 'z-judge'])
+    expect(Object.keys(registry.resolve('a-judge').environment)).toEqual(['ALPHA', 'ZED'])
+    expect(registry.resolve('a-judge')).toBe(registry.registrations[0])
+    const datasetless = createEvaluatorRegistry([{ ...base, id: 'datasetless' }]).resolve('datasetless')
+    expect(datasetless.dataset).toEqual({ kind: 'none' })
+    for (const dataset of [{}, { kind: 'none', files: [] }, { kind: 'local' }, { kind: 'external' }]) {
+      expect(() => createEvaluatorRegistry([{ ...base, id: 'malformed', dataset } as never])).toThrow(/dataset/)
+    }
+    expect(() => registry.resolve('unknown')).toThrow('unknown evaluator registration id "unknown"')
+    expect(() => createEvaluatorRegistry([{ ...base, id: 'hostile', environment: { DSH_TOKEN: 'override' } }])).toThrow(/reserved DSH_ prefix/)
+    expect(() => createEvaluatorRegistry([{ ...base, id: 'extended', shell: true } as never])).toThrow(/unknown key "shell"/)
+    expect(() => createEvaluatorRegistry([{ ...base, id: 'same' }, { ...base, id: 'same' }])).toThrow('duplicate evaluator registration id "same"')
+  })
+
+  it('keeps Loader evaluator registration requirements in parity with the runtime config contract', () => {
+    const registrations = Config.dict?.['evaluatorRegistrations']
+    const fields = registrations?.inner?.dict
+    expect(fields).toBeDefined()
+    for (const key of ['id', 'command', 'args', 'metricName', 'metricDirection', 'metricParserVersion', 'evaluatorFiles']) expect(fields?.[key]?.meta.required).toBe(true)
+    for (const key of ['cwd', 'environment']) expect(fields?.[key]?.meta.required).not.toBe(true)
+    expect(fields?.['dataset']?.meta.required).not.toBe(true)
+    expect(fields?.['dataset']?.meta.default).toEqual({ kind: 'none' })
+  })
+
+  it('exposes an inert discriminated activation contract without raw authority keys', () => {
+    const common = { objective: 'improve', mutable_globs: ['src/**'] }
+    expect(decodeActivationToolInput({ ...common, run_tag: 'new', evaluator_id: 'judge' })).toMatchObject({ evaluator_id: 'judge' })
+    expect(() => decodeActivationToolInput({ ...common, run_tag: 'new' })).toThrow(/evaluator_id/)
+    expect(decodeActivationToolInput({ ...common, resume_run_id: 'run-1' })).not.toHaveProperty('evaluator_id')
+    for (const evaluatorId of ['matching', 'mismatching', 'unknown']) expect(() => decodeActivationToolInput({ ...common, resume_run_id: 'run-1', evaluator_id: evaluatorId })).toThrow(/unknown key "evaluator_id"/)
+    for (const key of ['evaluation', 'metric_name', 'metric_direction', 'environment', 'provenance', 'exceptional_allowlists']) expect(() => decodeActivationToolInput({ ...common, run_tag: 'new', evaluator_id: 'judge', [key]: {} })).toThrow(new RegExp(`unknown key "${key}"`))
+    expect(JSON.stringify(ACTIVATION_AUTORESEARCH_TOOL_SCHEMA)).not.toMatch(/evaluation|metric_name|metric_direction|environment|provenance|exceptional_allowlists/)
+  })
+
+  it('validates every activation common field with policy semantics', () => {
+    const valid = { repository: '/repo', objective: 'improve', constraints: ['stable'], mutable_globs: ['src/**'], timeout_ms: 1, max_experiments: 1, target: 0, mode: 'background', run_tag: 'new', evaluator_id: 'judge' }
+    for (const [field, values] of Object.entries({
+      repository: [7, '', ' padded '],
+      objective: [7, '', ' padded '],
+      constraints: [7, {}, ['ok', 7], ['bad\nvalue']],
+      mutable_globs: [7, [], ['ok', 7], ['/absolute'], ['../escape']],
+      timeout_ms: ['1', 0, -1, 1.5, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1],
+      max_experiments: ['1', 0, -1, 1.5, Number.NaN, Number.MAX_SAFE_INTEGER + 1],
+      target: ['0', Number.NaN, Number.POSITIVE_INFINITY],
+      mode: [7, 'production', 'BACKGROUND'],
+    })) {
+      for (const value of values) expect(() => decodeActivationToolInput({ ...valid, [field]: value })).toThrow()
+    }
+    expect(decodeActivationToolInput(valid)).toEqual(valid)
+  })
+
+  it('keeps the activation schema numeric and collection bounds in parity with the decoder', () => {
+    const schema = ACTIVATION_AUTORESEARCH_TOOL_SCHEMA.oneOf[0].properties
+    expect(schema.mutable_globs).toMatchObject({ required: true, minItems: 1, items: { type: 'string' } })
+    expect(schema.timeout_ms).toMatchObject({ type: 'number', minimum: 1, maximum: Number.MAX_SAFE_INTEGER, multipleOf: 1 })
+    expect(schema.max_experiments).toMatchObject({ type: 'number', minimum: 1, maximum: Number.MAX_SAFE_INTEGER, multipleOf: 1 })
+    expect(schema.mode).toMatchObject({ enum: ['background', 'foreground'] })
+  })
+
+  it('returns a fresh canonical deeply frozen activation snapshot', () => {
+    const source = { objective: 'improve', constraints: ['stable', 'stable'], mutable_globs: ['src/**', 'src/**'], run_tag: 'new', evaluator_id: 'judge' }
+    const decoded = decodeActivationToolInput(source)
+    expect(decoded).not.toBe(source)
+    expect(decoded.constraints).not.toBe(source.constraints)
+    expect(decoded.mutable_globs).not.toBe(source.mutable_globs)
+    expect(decoded.constraints).toEqual(['stable'])
+    expect(decoded.mutable_globs).toEqual(['src/**'])
+    expect(Object.isFrozen(decoded)).toBe(true)
+    expect(Object.isFrozen(decoded.constraints)).toBe(true)
+    expect(Object.isFrozen(decoded.mutable_globs)).toBe(true)
+    source.constraints[0] = 'mutated'
+    source.mutable_globs[0] = 'other/**'
+    source.objective = 'mutated'
+    expect(decoded).toMatchObject({ objective: 'improve', constraints: ['stable'], mutable_globs: ['src/**'] })
+    expect(() => (decoded.mutable_globs as unknown as string[]).push('other/**')).toThrow()
+  })
 })
 
 describe('Cordis patch contract', () => {
   it('parses the complete patch row with the Harness loader schema', () => {
     const parsed = load(readFileSync(new URL('../cordis.patch.yml', import.meta.url), 'utf8'), { schema: entryListSchema })
+    const patchDefaults = Object.fromEntries(Object.entries(DEFAULT_CONFIG).filter(([key]) => key !== 'evaluatorRegistry'))
     expect(parsed).toEqual([{
       insert: [{
         id: 'autoresearch',
         name: 'dsh-autoresearch',
-        config: { ...DEFAULT_CONFIG },
+        config: { ...patchDefaults, evaluatorRegistrations: [] },
       }],
     }])
   })

@@ -370,6 +370,11 @@ describe('Loader activation failures', () => {
     await expect(composeHarness({ omitEntry: entry })).rejects.toThrow(new RegExp(service, 'i'))
   }, 30_000)
 
+  it('rejects duplicate Host evaluator registrations during real Loader activation', async () => {
+    const registration = { id: 'judge', command: 'node', args: ['score.mjs'], metricName: 'score', metricDirection: 'minimize', metricParserVersion: 'final-line-json-v1', evaluatorFiles: [] }
+    await expect(composeHarness({ autoresearchConfig: { evaluatorRegistrations: [registration, registration] } })).rejects.toThrow(/duplicate evaluator registration id "judge"/)
+  }, 30_000)
+
   it('defers missing Job control validation to owner-relative background registration', async () => {
     const harness = await composeHarness({ omitEntry: 'tool-jobs' })
     active.push(harness)

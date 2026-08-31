@@ -1,6 +1,30 @@
 import z from '@deepseek-ai/schemastery'
-import type { AutoresearchToolInput, ExceptionalPathPolicy, NormalizedRunPolicy } from './types.js'
+import { normalizeEvaluatorRegistration, type AutoresearchToolInput, type EvaluatorRegistration, type ExceptionalPathPolicy, type NormalizedRunPolicy } from './types.js'
 
+export interface EvaluatorRegistrationConfig {
+  id: string
+  command: string
+  args: string[]
+  cwd?: string
+  environment?: Record<string, string>
+  metricName: string
+  metricDirection: 'minimize' | 'maximize'
+  metricParserVersion: 'final-line-json-v1'
+  evaluatorFiles: string[]
+  dataset?:
+    | { kind: 'none' }
+    | { kind: 'local'; files: string[]; identity?: string }
+    | { kind: 'external'; digest: string; identity?: string }
+}
+
+export interface HostEvaluatorRegistration extends EvaluatorRegistration {
+  readonly metricParserVersion: 'final-line-json-v1'
+}
+
+export interface EvaluatorRegistry {
+  readonly registrations: readonly HostEvaluatorRegistration[]
+  resolve(evaluatorId: string): HostEvaluatorRegistration
+}
 export interface Config {
   provider?: string
   model?: string
@@ -24,6 +48,7 @@ export interface Config {
   cleanupWorktreesOnSuccess?: boolean
   exportTsv?: boolean
   tsvRetentionDays?: number
+  evaluatorRegistrations?: EvaluatorRegistrationConfig[]
 }
 
 export interface ResolvedConfig {
@@ -49,6 +74,7 @@ export interface ResolvedConfig {
   readonly cleanupWorktreesOnSuccess: boolean
   readonly exportTsv: boolean
   readonly tsvRetentionDays: number
+  readonly evaluatorRegistry: EvaluatorRegistry
 }
 
 export const DEFAULT_CONFIG: ResolvedConfig = deepFreeze({
@@ -71,6 +97,7 @@ export const DEFAULT_CONFIG: ResolvedConfig = deepFreeze({
   cleanupWorktreesOnSuccess: false,
   exportTsv: true,
   tsvRetentionDays: 30,
+  evaluatorRegistry: createEvaluatorRegistry([]),
 })
 
 const positive = () => z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER)
@@ -99,6 +126,22 @@ export const Config: z<Config> = z.object({
   cleanupWorktreesOnSuccess: z.boolean().default(DEFAULT_CONFIG.cleanupWorktreesOnSuccess),
   exportTsv: z.boolean().default(DEFAULT_CONFIG.exportTsv),
   tsvRetentionDays: positive().default(DEFAULT_CONFIG.tsvRetentionDays),
+  evaluatorRegistrations: z.array(z.object({
+    id: z.string().required(),
+    command: z.string().required(),
+    args: z.array(z.string()).required(),
+    cwd: z.string(),
+    environment: z.dict(z.string()),
+    metricName: z.string().required(),
+    metricDirection: z.union(['minimize', 'maximize']).required(),
+    metricParserVersion: z.const('final-line-json-v1').required(),
+    evaluatorFiles: z.array(z.string()).required(),
+    dataset: z.union([
+      z.object({ kind: z.const('none').required() }),
+      z.object({ kind: z.const('local').required(), files: z.array(z.string()).required(), identity: z.string() }),
+      z.object({ kind: z.const('external').required(), digest: z.string().required(), identity: z.string() }),
+    ]).default({ kind: 'none' }),
+  })).default([]),
 })
 
 const CONFIG_KEYS = new Set([
@@ -107,7 +150,7 @@ const CONFIG_KEYS = new Set([
   'maxStdoutBytes', 'maxStderrBytes', 'defaultTimeoutMs', 'maxTimeoutMs',
   'terminationGraceMs', 'maxActiveRunsPerRepository', 'artifactRetentionDays',
   'retainFailedArtifacts', 'retainWorktrees', 'cleanupWorktreesOnSuccess',
-  'exportTsv', 'tsvRetentionDays',
+  'exportTsv', 'tsvRetentionDays', 'evaluatorRegistrations',
 ])
 
 export function resolveConfig(config: Config = {}): ResolvedConfig {
@@ -138,11 +181,77 @@ export function resolveConfig(config: Config = {}): ResolvedConfig {
     cleanupWorktreesOnSuccess: boolean(config.cleanupWorktreesOnSuccess ?? DEFAULT_CONFIG.cleanupWorktreesOnSuccess, 'cleanupWorktreesOnSuccess'),
     exportTsv: boolean(config.exportTsv ?? DEFAULT_CONFIG.exportTsv, 'exportTsv'),
     tsvRetentionDays: positiveInteger(config.tsvRetentionDays ?? DEFAULT_CONFIG.tsvRetentionDays, 'tsvRetentionDays'),
+    evaluatorRegistry: createEvaluatorRegistry(config.evaluatorRegistrations ?? []),
   }
   if (resolved.defaultMaxExperiments > resolved.maxExperiments) throw new TypeError('defaultMaxExperiments must not exceed maxExperiments')
   if (resolved.defaultTimeoutMs > resolved.maxTimeoutMs) throw new TypeError('defaultTimeoutMs must not exceed maxTimeoutMs')
   if (resolved.cleanupWorktreesOnSuccess && resolved.retainWorktrees) throw new TypeError('cleanupWorktreesOnSuccess and retainWorktrees cannot both be true')
-  return deepFreeze(structuredClone(resolved))
+  return deepFreeze(resolved)
+}
+
+export function createEvaluatorRegistry(values: readonly EvaluatorRegistrationConfig[]): EvaluatorRegistry {
+  if (!Array.isArray(values)) throw new TypeError('evaluatorRegistrations must be an array')
+  const registrations = values.map((value, index) => normalizeEvaluatorConfig(value, index))
+    .sort((left, right) => left.evaluatorId < right.evaluatorId ? -1 : left.evaluatorId > right.evaluatorId ? 1 : 0)
+  for (let index = 1; index < registrations.length; index += 1) {
+    if (registrations[index - 1]!.evaluatorId === registrations[index]!.evaluatorId) throw new TypeError(`duplicate evaluator registration id "${registrations[index]!.evaluatorId}"`)
+  }
+  const byId: Record<string, HostEvaluatorRegistration> = Object.create(null) as Record<string, HostEvaluatorRegistration>
+  for (const registration of registrations) byId[registration.evaluatorId] = registration
+  return deepFreeze({
+    registrations,
+    resolve(evaluatorId: string): HostEvaluatorRegistration {
+      const normalizedId = normalizedText(evaluatorId, 'evaluator_id')
+      const registration = byId[normalizedId]
+      if (!registration) throw new TypeError(`unknown evaluator registration id "${normalizedId}"`)
+      return registration
+    },
+  })
+}
+
+function normalizeEvaluatorConfig(value: EvaluatorRegistrationConfig, index: number): HostEvaluatorRegistration {
+  const source = optionalPlainObject(value, `evaluatorRegistrations[${index}]`)
+  rejectUnknown(source, new Set(['id', 'command', 'args', 'cwd', 'environment', 'metricName', 'metricDirection', 'metricParserVersion', 'evaluatorFiles', 'dataset']), `evaluatorRegistrations[${index}]`)
+  if (!Array.isArray(value.args)) throw new TypeError(`evaluatorRegistrations[${index}].args must be an array`)
+  if (!Array.isArray(value.evaluatorFiles)) throw new TypeError(`evaluatorRegistrations[${index}].evaluatorFiles must be an array`)
+  const dataset = value.dataset === undefined ? { kind: 'none' as const } : normalizeConfiguredDataset(value.dataset, index)
+  const registration = normalizeEvaluatorRegistration({
+    evaluatorId: value.id,
+    command: value.command,
+    args: value.args,
+    ...(value.cwd === undefined ? {} : { cwd: value.cwd }),
+    environment: normalizeEnvironment(value.environment),
+    metricName: value.metricName,
+    metricDirection: value.metricDirection,
+    evaluatorFiles: value.evaluatorFiles,
+    dataset,
+  })
+  if (value.metricParserVersion !== 'final-line-json-v1') throw new TypeError(`evaluatorRegistrations[${index}].metricParserVersion is unsupported`)
+  return { ...registration, metricParserVersion: value.metricParserVersion }
+}
+
+function normalizeConfiguredDataset(value: NonNullable<EvaluatorRegistrationConfig['dataset']>, index: number): EvaluatorRegistration['dataset'] {
+  const label = `evaluatorRegistrations[${index}].dataset`
+  const source = optionalPlainObject(value, label)
+  if (typeof source['kind'] !== 'string') throw new TypeError(`${label}.kind must be a string`)
+  if (source['kind'] === 'none') {
+    rejectUnknown(source, new Set(['kind']), label)
+    return { kind: 'none' }
+  }
+  if (source['kind'] === 'local') {
+    rejectUnknown(source, new Set(['kind', 'files', 'identity']), label)
+    if (!Array.isArray(source['files'])) throw new TypeError(`${label}.files must be an array`)
+    for (const [fileIndex, file] of source['files'].entries()) if (typeof file !== 'string') throw new TypeError(`${label}.files[${fileIndex}] must be a string`)
+    if (source['identity'] !== undefined && typeof source['identity'] !== 'string') throw new TypeError(`${label}.identity must be a string`)
+    return { kind: 'local', files: source['files'], ...(source['identity'] === undefined ? {} : { identity: source['identity'] }) }
+  }
+  if (source['kind'] === 'external') {
+    rejectUnknown(source, new Set(['kind', 'digest', 'identity']), label)
+    if (typeof source['digest'] !== 'string') throw new TypeError(`${label}.digest must be a string`)
+    if (source['identity'] !== undefined && typeof source['identity'] !== 'string') throw new TypeError(`${label}.identity must be a string`)
+    return { kind: 'external', digest: source['digest'] as `sha256:${string}`, ...(source['identity'] === undefined ? {} : { identity: source['identity'] }) }
+  }
+  throw new TypeError(`${label} has unknown kind`)
 }
 
 export function normalizeRunPolicy(input: AutoresearchToolInput, config: ResolvedConfig, callerCwd: string): NormalizedRunPolicy {

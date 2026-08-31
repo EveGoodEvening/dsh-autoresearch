@@ -172,6 +172,87 @@ export interface AutoresearchToolInput {
   readonly mode?: RunMode
 }
 
+export interface ActivationToolInputBase {
+  readonly repository?: string
+  readonly objective: string
+  readonly constraints?: readonly string[]
+  readonly mutable_globs: readonly string[]
+  readonly timeout_ms?: number
+  readonly max_experiments?: number
+  readonly target?: number
+  readonly mode?: RunMode
+}
+
+export interface ActivationNewStartToolInput extends ActivationToolInputBase {
+  readonly run_tag: string
+  readonly evaluator_id: string
+  readonly resume_run_id?: never
+}
+
+export interface ActivationResumeToolInput extends ActivationToolInputBase {
+  readonly resume_run_id: RunId
+  readonly run_tag?: never
+  readonly evaluator_id?: never
+}
+
+export type ActivationAutoresearchToolInput = ActivationNewStartToolInput | ActivationResumeToolInput
+
+const ACTIVATION_COMMON_PARAMETERS = {
+  repository: { type: 'string', description: 'Repository or cwd; defaults to the initiating agent cwd.' },
+  objective: { type: 'string', required: true, description: 'Immutable optimization objective.' },
+  constraints: { type: 'array', items: { type: 'string' }, description: 'Immutable advisory proposal constraints.' },
+  mutable_globs: { type: 'array', required: true, minItems: 1, items: { type: 'string' }, description: 'Narrow relative mutable paths or globs.' },
+  timeout_ms: { type: 'number', minimum: 1, maximum: Number.MAX_SAFE_INTEGER, multipleOf: 1, description: 'Per-attempt timeout bounded by deployment policy.' },
+  max_experiments: { type: 'number', minimum: 1, maximum: Number.MAX_SAFE_INTEGER, multipleOf: 1, description: 'Candidate experiment cap; baseline is separate.' },
+  target: { type: 'number', description: 'Optional finite stopping threshold.' },
+  mode: { type: 'string', enum: ['background', 'foreground'], description: 'Defaults to background.' },
+} as const
+
+/** Inert activation-ready schema. Chunk 04 is responsible for production registration. */
+export const ACTIVATION_AUTORESEARCH_TOOL_SCHEMA = {
+  oneOf: [
+    { type: 'object', additionalProperties: false, properties: { ...ACTIVATION_COMMON_PARAMETERS, run_tag: { type: 'string', required: true }, evaluator_id: { type: 'string', required: true } } },
+    { type: 'object', additionalProperties: false, properties: { ...ACTIVATION_COMMON_PARAMETERS, resume_run_id: { type: 'string', required: true } } },
+  ],
+} as const
+
+const ACTIVATION_COMMON_KEYS = new Set(['repository', 'objective', 'constraints', 'mutable_globs', 'timeout_ms', 'max_experiments', 'target', 'mode'])
+
+/** Strict testable decoder for the inert activation contract; it performs no registry or repository lookup. */
+export function decodeActivationToolInput(value: unknown): ActivationAutoresearchToolInput {
+  const source = exactRecord(value, 'autoresearch input')
+  const hasResume = Object.hasOwn(source, 'resume_run_id')
+  const allowed = new Set(ACTIVATION_COMMON_KEYS)
+  if (hasResume) allowed.add('resume_run_id')
+  else { allowed.add('run_tag'); allowed.add('evaluator_id') }
+  for (const key of Object.keys(source)) if (!allowed.has(key)) throw new TypeError(`autoresearch input: unknown key "${key}"`)
+  const common = {
+    ...(source['repository'] === undefined ? {} : { repository: text(source['repository'], 'repository') }),
+    objective: text(source['objective'], 'objective'),
+    ...(source['constraints'] === undefined ? {} : { constraints: activationStringArray(source['constraints'], 'constraints') }),
+    mutable_globs: activationStringArray(source['mutable_globs'], 'mutable_globs', true),
+    ...(source['timeout_ms'] === undefined ? {} : { timeout_ms: activationPositiveInteger(source['timeout_ms'], 'timeout_ms') }),
+    ...(source['max_experiments'] === undefined ? {} : { max_experiments: activationPositiveInteger(source['max_experiments'], 'max_experiments') }),
+    ...(source['target'] === undefined ? {} : { target: finite(source['target'], 'target') }),
+    ...(source['mode'] === undefined ? {} : { mode: activationMode(source['mode']) }),
+  }
+  const decoded: ActivationAutoresearchToolInput = hasResume
+    ? { ...common, resume_run_id: text(source['resume_run_id'], 'resume_run_id') }
+    : { ...common, run_tag: activationRunTag(source['run_tag']), evaluator_id: text(source['evaluator_id'], 'evaluator_id') }
+  return deepFreezeActivation(decoded)
+}
+
+function activationStringArray(value: unknown, label: string, requireNonEmpty = false): string[] {
+  if (!Array.isArray(value) || requireNonEmpty && value.length === 0) throw new TypeError(`${label} must be${requireNonEmpty ? ' a non-empty' : ' an'} array`)
+  const normalized = value.map((item, index) => requireNonEmpty ? activationRelativePath(item, `${label}[${index}]`) : text(item, `${label}[${index}]`))
+  return [...new Set(normalized)]
+}
+function activationRelativePath(value: unknown, label: string): string { const result = text(value, label); if (result.startsWith('/') || result.startsWith('\\') || /^[A-Za-z]:[\\/]/u.test(result) || result.split(/[\\/]/u).includes('..')) throw new TypeError(`${label} must be a relative path without parent traversal`); return result }
+function activationPositiveInteger(value: unknown, label: string): number { if (!Number.isSafeInteger(value) || (value as number) < 1) throw new TypeError(`${label} must be a positive safe integer`); return value as number }
+function activationMode(value: unknown): RunMode { if (value !== 'background' && value !== 'foreground') throw new TypeError('mode must be background or foreground'); return value }
+function activationRunTag(value: unknown): string { const result = text(value, 'run_tag'); if (!/^[a-z0-9][a-z0-9._-]*$/u.test(result) || result.endsWith('.') || result.includes('..')) throw new TypeError('run_tag must be lower-case Git-safe text'); return result }
+function deepFreezeActivation<T>(value: T): T { if (value !== null && typeof value === 'object' && !Object.isFrozen(value)) { for (const item of Object.values(value as Record<string, unknown>)) deepFreezeActivation(item); Object.freeze(value) } return value }
+
 
 /** Canonical model-tool input schema; nested objects reject unknown keys at the runtime decoder. */
 export const AUTORESEARCH_TOOL_PARAMETERS = {

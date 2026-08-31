@@ -20,4 +20,5 @@
         retainWorktrees: true
         cleanupWorktreesOnSuccess: false
         exportTsv: true
+        evaluatorRegistrations: []
         tsvRetentionDays: 30

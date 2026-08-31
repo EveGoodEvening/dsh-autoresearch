@@ -39,8 +39,9 @@ vi.mock('../src/controller.js', () => ({
   },
 }))
 
-import { normalizeRunPolicy, resolveConfig } from '../src/config.ts'
+import { createEvaluatorRegistry, normalizeRunPolicy, resolveConfig } from '../src/config.ts'
 import { apply, inject } from '../src/index.ts'
+import { ACTIVATION_AUTORESEARCH_TOOL_SCHEMA } from '../src/types.ts'
 
 interface Harness {
   tool: ToolDefinition
@@ -106,6 +107,15 @@ describe('autoresearch production wiring', () => {
     expect(test.tool.name).toBe('autoresearch')
     expect(test.prompt?.text).toContain('direct human')
     expect(JSON.stringify(test.tool.parameters)).not.toContain('evaluation_command')
+  })
+
+  it('keeps the Host registry and activation schema unreachable from the registered production tool', () => {
+    const registry = createEvaluatorRegistry([{ id: 'judge', command: 'node', args: ['score.mjs'], metricName: 'score', metricDirection: 'minimize', metricParserVersion: 'final-line-json-v1', evaluatorFiles: [] }])
+    expect(registry.resolve('judge').evaluatorId).toBe('judge')
+    const test = harness()
+    expect(test.tool.parameters).not.toBe(ACTIVATION_AUTORESEARCH_TOOL_SCHEMA)
+    expect(JSON.stringify(test.tool.parameters)).not.toContain('evaluator_id')
+    expect(JSON.stringify(test.tool.parameters)).toContain('evaluation')
   })
 
   it('returns the canonical foreground controller result', async () => {
