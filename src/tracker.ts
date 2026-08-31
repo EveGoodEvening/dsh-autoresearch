@@ -124,7 +124,7 @@ export class DurableTracker {
     }
   }
 
-  /** Inspect a transactionally consistent private snapshot without modifying the source tracker or its sidecars. */
+  /** Inspect a transactionally consistent private snapshot. Source main/WAL bytes and sidecar existence remain unchanged; existing SHM coordination bytes may change. */
   static openReadOnly(path: string): DurableTracker {
     const layout = StateLayout.inspect(dirname(path))
     const safePath = layout.inspectContained(path)
@@ -134,9 +134,10 @@ export class DurableTracker {
     try {
       snapshotSqliteDatabase(safePath, snapshotPath)
       const snapshotUrl = pathToFileURL(snapshotPath); snapshotUrl.searchParams.set('mode', 'ro'); snapshotUrl.searchParams.set('immutable', '1')
-      database = new DatabaseSync(snapshotUrl.href, { readOnly: true, enableDoubleQuotedStringLiterals: false })
+      database = new DatabaseSync(snapshotUrl.href, { readOnly: true, enableForeignKeyConstraints: true, enableDoubleQuotedStringLiterals: false })
       const tracker = new DurableTracker(safePath, database, layout, () => rmSync(snapshotRoot, { recursive: true, force: true }))
-      tracker.database.prepare('PRAGMA schema_version').get()
+      tracker.database.exec('PRAGMA foreign_keys = ON')
+      tracker.validateSchema()
       return tracker
     } catch (error) {
       try { database?.close() } catch { /* preserve original failure */ }
@@ -457,7 +458,12 @@ export class DurableTracker {
   private validateSchema(): void {
     const integrity = String(this.database.prepare('PRAGMA integrity_check').get()?.['integrity_check'])
     if (integrity !== 'ok') throw new TrackerBlockedError('tracker-schema-invalid', `tracker integrity check failed: ${integrity}`)
-    if (schemaFingerprint(this.database) !== canonicalSchemaFingerprint()) throw new TrackerBlockedError('tracker-schema-invalid', 'tracker schema does not match the canonical schema definition')
+    const rows = this.database.prepare('SELECT singleton, version FROM schema_metadata').all()
+    if (rows.length !== 1 || rows[0]?.['singleton'] !== 1) throw new TrackerBlockedError('tracker-schema-invalid', 'tracker schema metadata must contain exactly singleton row 1')
+    const version = Number(rows[0]['version'])
+    if (!Number.isSafeInteger(version) || version < 1) throw new TrackerBlockedError('tracker-schema-invalid', 'tracker schema version is invalid')
+    if (version > TRACKER_SCHEMA_VERSION) throw new TrackerBlockedError('tracker-schema-newer', `tracker schema ${version} is newer than supported ${TRACKER_SCHEMA_VERSION}`)
+    if (schemaFingerprint(this.database) !== canonicalSchemaFingerprint(version)) throw new TrackerBlockedError('tracker-schema-invalid', 'tracker schema does not match the canonical schema definition')
     if (!this.foreignKeysEnabled()) throw new TrackerBlockedError('tracker-schema-invalid', 'tracker foreign keys are disabled')
   }
   private secureSidecars(): void { for (const suffix of ['', '-wal', '-shm']) { try { this.layout.secureFile(`${this.path}${suffix}`) } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error } } }
@@ -531,17 +537,19 @@ const MIGRATIONS: Record<number, (database: DatabaseSync) => void> = {
   8(database) { database.exec(`CREATE TRIGGER run_registrations_presence_monotonic BEFORE DELETE ON run_registrations BEGIN SELECT RAISE(ABORT, 'evaluator registration presence is monotonic'); END;`) },
 }
 
-let expectedSchemaFingerprint: string | undefined
-function canonicalSchemaFingerprint(): string {
-  if (expectedSchemaFingerprint !== undefined) return expectedSchemaFingerprint
+const expectedSchemaFingerprints = new Map<number, string>()
+function canonicalSchemaFingerprint(version: number): string {
+  const cached = expectedSchemaFingerprints.get(version)
+  if (cached !== undefined) return cached
   const database = new DatabaseSync(':memory:', { enableForeignKeyConstraints: true, enableDoubleQuotedStringLiterals: false })
   try {
-    for (let version = 1; version <= TRACKER_SCHEMA_VERSION; version += 1) {
-      MIGRATIONS[version]!(database)
-      database.prepare('UPDATE schema_metadata SET version = ? WHERE singleton = 1').run(version)
+    for (let current = 1; current <= version; current += 1) {
+      MIGRATIONS[current]!(database)
+      database.prepare('UPDATE schema_metadata SET version = ? WHERE singleton = 1').run(current)
     }
-    expectedSchemaFingerprint = schemaFingerprint(database)
-    return expectedSchemaFingerprint
+    const fingerprint = schemaFingerprint(database)
+    expectedSchemaFingerprints.set(version, fingerprint)
+    return fingerprint
   } finally { database.close() }
 }
 

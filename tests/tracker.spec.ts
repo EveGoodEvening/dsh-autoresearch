@@ -94,7 +94,7 @@ describe('durable SQLite tracker', () => {
     reopened.close()
   })
 
-  it('reads a quiescent main database without creating or changing source sidecars', () => {
+  it('reads a transactionally consistent private snapshot without changing source main bytes or sidecar existence', () => {
     const path = fixturePath('quiescent-snapshot.sqlite')
     const seed = DurableTracker.open(path); seed.createRun(initial()); seed.database.exec('PRAGMA wal_checkpoint(TRUNCATE)'); seed.close()
     rmSync(`${path}-wal`, { force: true }); rmSync(`${path}-shm`, { force: true })
@@ -107,10 +107,10 @@ describe('durable SQLite tracker', () => {
     expect([`${path}-wal`, `${path}-shm`].map(existsSync)).toEqual(sidecarExistenceBefore)
   })
 
-  it('takes untorn committed WAL snapshots during writer/checkpoint churn without changing database or WAL bytes', async () => {
+  it('takes transactionally consistent private snapshots during WAL churn without changing source main/WAL bytes or sidecar existence', async () => {
     const path = fixturePath('snapshot.sqlite')
     const seed = DurableTracker.open(path)
-    seed.database.exec('CREATE TABLE snapshot_pair (id INTEGER PRIMARY KEY, generation INTEGER NOT NULL) STRICT; INSERT INTO snapshot_pair VALUES (1, 0), (2, 0)')
+    seed.createRun(initial('run-1')); seed.createRun(initial('run-2'))
     const stop = new SharedArrayBuffer(4)
     const writer = new Worker(`
       const { parentPort, workerData } = require('node:worker_threads');
@@ -123,7 +123,7 @@ describe('durable SQLite tracker', () => {
       while (Atomics.load(gate, 0) === 0) {
         generation += 1;
         db.exec('BEGIN IMMEDIATE');
-        db.prepare('UPDATE snapshot_pair SET generation = ?').run(generation);
+        db.prepare('UPDATE runs SET updated_at = ?').run(String(generation));
         db.exec('COMMIT');
         if (generation % 7 === 0) db.exec('PRAGMA wal_checkpoint(PASSIVE)');
       }
@@ -133,9 +133,9 @@ describe('durable SQLite tracker', () => {
     try {
       for (let index = 0; index < 20; index += 1) {
         const snapshot = DurableTracker.openReadOnly(path)
-        const rows = snapshot.database.prepare('SELECT generation FROM snapshot_pair ORDER BY id').all() as { generation: number }[]
+        const rows = snapshot.database.prepare('SELECT updated_at FROM runs ORDER BY run_id').all() as { updated_at: string }[]
         expect(rows).toHaveLength(2)
-        expect(rows[0]!.generation).toBe(rows[1]!.generation)
+        expect(rows[0]!.updated_at).toBe(rows[1]!.updated_at)
         snapshot.close()
       }
     } finally {
@@ -176,6 +176,35 @@ describe('durable SQLite tracker', () => {
     const invalid = fixturePath('invalid-snapshot.sqlite'); writeFileSync(invalid, 'not sqlite', { mode: 0o600 })
     expect(() => DurableTracker.openReadOnly(invalid)).toThrowError(expect.objectContaining({ status: 'blocked', code: 'tracker-schema-invalid' }))
   }, 10_000)
+
+  it('rejects malformed, newer, and noncanonical private snapshots before exposing a tracker', () => {
+    const malformedPath = fixturePath('malformed-readonly.sqlite')
+    const malformed = new DatabaseSync(malformedPath)
+    malformed.exec('CREATE TABLE schema_metadata (singleton INTEGER PRIMARY KEY, version TEXT NOT NULL, created_at TEXT NOT NULL) STRICT; INSERT INTO schema_metadata VALUES (1, \'invalid\', \'now\')')
+    malformed.close(); chmodSync(malformedPath, 0o600)
+    expect(() => DurableTracker.openReadOnly(malformedPath)).toThrowError(expect.objectContaining({ status: 'blocked', code: 'tracker-schema-invalid' }))
+
+    const newerPath = fixturePath('newer-readonly.sqlite')
+    const newerSeed = DurableTracker.open(newerPath); newerSeed.close()
+    const newer = new DatabaseSync(newerPath); newer.prepare('UPDATE schema_metadata SET version = ?').run(TRACKER_SCHEMA_VERSION + 1); newer.close()
+    expect(() => DurableTracker.openReadOnly(newerPath)).toThrowError(expect.objectContaining({ status: 'blocked', code: 'tracker-schema-newer' }))
+
+    const noncanonicalPath = fixturePath('noncanonical-readonly.sqlite')
+    const noncanonicalSeed = DurableTracker.open(noncanonicalPath); noncanonicalSeed.close()
+    const noncanonical = new DatabaseSync(noncanonicalPath); noncanonical.exec('DROP INDEX runs_recovery; CREATE INDEX runs_recovery ON runs(run_id)'); noncanonical.close()
+    expect(() => DurableTracker.openReadOnly(noncanonicalPath)).toThrowError(expect.objectContaining({ status: 'blocked', code: 'tracker-schema-invalid' }))
+  })
+
+  it('accepts a canonical private snapshot for its recorded older schema version', () => {
+    const path = fixturePath('version-seven-readonly.sqlite')
+    const seed = DurableTracker.open(path); seed.close()
+    const versionSeven = new DatabaseSync(path)
+    versionSeven.exec('DROP TRIGGER run_registrations_presence_monotonic; UPDATE schema_metadata SET version = 7 WHERE singleton = 1')
+    versionSeven.close()
+    const snapshot = DurableTracker.openReadOnly(path)
+    expect(snapshot.schemaVersion()).toBe(7)
+    snapshot.close()
+  })
 
   it('migrates under a write transaction and classifies newer, malformed, and corrupt schemas', () => {
     const path = fixturePath(); const seed = new DatabaseSync(path)
