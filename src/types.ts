@@ -13,6 +13,28 @@ export const EVALUATOR_CONTRACT_GENERATION = 'host-registration-v1' as const
 export type EvaluatorContractGeneration = typeof EVALUATOR_CONTRACT_GENERATION
 export type AlgorithmQualifiedDigest = `sha256:${string}`
 export type RegistrationManifest = Readonly<Record<string, string>>
+export interface FrozenFileDeclarations {
+  readonly evaluatorFiles: readonly string[]
+  readonly datasetFiles: readonly string[]
+}
+
+export function normalizeRepositoryRelativePath(value: string, label = 'repository path'): string {
+  return normalizedRepositoryRelativePath(value, label)
+}
+
+export function normalizeFrozenFileDeclarations(value: FrozenFileDeclarations): FrozenFileDeclarations {
+  const evaluatorFiles = normalizedRegistrationPathList(value.evaluatorFiles, 'evaluatorFiles')
+  const datasetFiles = normalizedRegistrationPathList(value.datasetFiles, 'datasetFiles')
+  const evaluatorPaths = new Set(evaluatorFiles)
+  const overlap = datasetFiles.filter(path => evaluatorPaths.has(path))
+  if (overlap.length > 0) throw new RegistrationPathOverlapError(overlap)
+  return { evaluatorFiles, datasetFiles }
+}
+
+export function normalizeAlgorithmQualifiedDigest(value: string, label = 'digest'): AlgorithmQualifiedDigest {
+  if (!value.startsWith('sha256:')) throw new TypeError(`${label} must be algorithm-qualified`)
+  return `sha256:${lowercaseSha256(value.slice('sha256:'.length), label)}`
+}
 
 export type DatasetRegistration =
   | { readonly kind: 'none' }
@@ -60,13 +82,12 @@ export function normalizeEvaluatorRegistration(value: EvaluatorRegistration): Ev
   const metricName = normalizedRegistrationText(value.metricName, 'metricName')
   if (value.metricDirection !== 'minimize' && value.metricDirection !== 'maximize') throw new TypeError('metricDirection must be minimize or maximize')
   const environment = Object.fromEntries(Object.entries(value.environment).sort(([a], [b]) => compareRegistrationText(a, b)).map(([name, item]) => [normalizedEnvironmentName(name), normalizedRegistrationText(item, `environment.${name}`, true)]))
-  const evaluatorFiles = normalizedRegistrationPathList(value.evaluatorFiles, 'evaluatorFiles')
+  const declarations = normalizeFrozenFileDeclarations({
+    evaluatorFiles: value.evaluatorFiles,
+    datasetFiles: value.dataset.kind === 'local' ? value.dataset.files : [],
+  })
+  const evaluatorFiles = declarations.evaluatorFiles
   const dataset = normalizeDatasetRegistration(value.dataset)
-  if (dataset.kind === 'local') {
-    const evaluatorPaths = new Set(evaluatorFiles)
-    const overlap = dataset.files.filter(path => evaluatorPaths.has(path))
-    if (overlap.length > 0) throw new RegistrationPathOverlapError(overlap)
-  }
   return { evaluatorId, command, args, ...(cwd === undefined ? {} : { cwd }), environment, metricName, metricDirection: value.metricDirection, evaluatorFiles, dataset }
 }
 
@@ -92,7 +113,7 @@ function normalizeDatasetRegistration(value: DatasetRegistration): DatasetRegist
   if (value.kind === 'none') return { kind: 'none' }
   const identity = value.identity === undefined ? undefined : normalizedRegistrationText(value.identity, 'dataset.identity')
   if (value.kind === 'local') return { kind: 'local', files: normalizedRegistrationPathList(value.files, 'dataset.files'), ...(identity === undefined ? {} : { identity }) }
-  if (value.kind === 'external') { if (!value.digest.startsWith('sha256:')) throw new TypeError('dataset.digest must be algorithm-qualified'); return { kind: 'external', digest: `sha256:${lowercaseSha256(value.digest.slice('sha256:'.length), 'dataset.digest')}`, ...(identity === undefined ? {} : { identity }) } }
+  if (value.kind === 'external') return { kind: 'external', digest: normalizeAlgorithmQualifiedDigest(value.digest, 'dataset.digest'), ...(identity === undefined ? {} : { identity }) }
   throw new TypeError('unknown dataset registration kind')
 }
 

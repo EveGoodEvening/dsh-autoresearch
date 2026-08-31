@@ -1,12 +1,13 @@
+import { createHash } from 'node:crypto'
 import { execFileSync, spawn } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { DatabaseSync } from 'node:sqlite'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { SubprocessHandle, SubprocessOutputReader, SubprocessOutcome, SubprocessSpawnSpec } from '@deepseek-ai/dsh-subprocess'
 import { DurableTracker } from '../src/tracker.ts'
-import { acquireControllerClaim, acquireRunLock, allocateRunWorktree, captureGitConfigBaseline, commitCandidate, discoverRepository, durableGitIdentity, GitBoundaryError, heartbeatControllerClaim, inspectRunGitState, makeRunGitIdentity, prepareCandidateTree, reconcileAcceptedHead, reconcileRejectedHead, recoverTerminalRunLock, releaseControllerClaim, releaseTerminalRunLock, removeRunWorktree, resolveGitExecutable, runGit, snapshotCandidate, validateCandidate, verifyCandidateTree, verifyExactWorktree, type GitContext } from '../src/git.ts'
+import { acquireControllerClaim, acquireRunLock, allocateRunWorktree, captureGitConfigBaseline, commitCandidate, deriveRegistrationManifestAtStartCommit, discoverRepository, durableGitIdentity, GitBoundaryError, heartbeatControllerClaim, inspectRunGitState, makeRunGitIdentity, prepareCandidateTree, reconcileAcceptedHead, reconcileRejectedHead, recoverTerminalRunLock, releaseControllerClaim, releaseTerminalRunLock, removeRunWorktree, resolveGitExecutable, runGit, snapshotCandidate, validateCandidate, validateFrozenCandidatePaths, verifyCandidateTree, verifyExactWorktree, type GitContext } from '../src/git.ts'
 
 const roots: string[] = []
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
@@ -43,7 +44,8 @@ function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'autoresearch-git-')); roots.push(root)
   execFileSync('git', ['init', '-b', 'main', root]); execFileSync('git', ['-C', root, 'config', 'user.name', 'Test']); execFileSync('git', ['-C', root, 'config', 'user.email', 'test@example.invalid'])
   writeFileSync(join(root, 'src.txt'), 'base\n'); mkdirSync(join(root, 'src')); writeFileSync(join(root, 'src', 'code.ts'), 'export const n = 1\n')
-  execFileSync('git', ['-C', root, 'add', 'src.txt', 'src/code.ts']); execFileSync('git', ['-C', root, 'commit', '-m', 'base'])
+  mkdirSync(join(root, 'scripts')); writeFileSync(join(root, 'scripts', 'score.mjs'), 'console.log(1)\n'); mkdirSync(join(root, 'data')); writeFileSync(join(root, 'data', 'train.json'), '{"rows":1}\n')
+  execFileSync('git', ['-C', root, 'add', 'src.txt', 'src/code.ts', 'scripts/score.mjs', 'data/train.json']); execFileSync('git', ['-C', root, 'commit', '-m', 'base'])
   const subprocess = new LocalSubprocess(); return { root, subprocess, ctx: { subprocess } as unknown as GitContext }
 }
 function policy(mutableGlobs = ['src/**'], gitConfig: string[] = []) { return { mutableGlobs, exceptionalAllowlists: { dependencies: [], evaluators: [], datasets: [], submodules: [], gitConfig }, evaluation: { command: 'evaluate.mjs', args: [] }, provenance: {} } }
@@ -179,6 +181,50 @@ describe('host-owned Git boundary', () => {
     expect(() => recoverTerminalRunLock(f.tracker, f.identity.runId)).toThrowError(expect.objectContaining({ code: 'run-lock-identity' }))
     expect(authority.prepare('SELECT repository_id FROM active_locks WHERE run_id = ?').get(f.identity.runId)?.['repository_id']).toBe('wrong-repository')
     authority.close()
+  })
+
+  it('derives frozen bytes only from the isolated start-commit worktree despite dirty caller files', async () => {
+    const base = fixture(); writeFileSync(join(base.root, 'scripts', 'score.mjs'), 'dirty caller evaluator\n'); writeFileSync(join(base.root, 'data', 'train.json'), 'dirty caller dataset\n')
+    const f = await createRun(base)
+    const registration = { evaluatorId: 'fixture', command: 'node', args: ['scripts/score.mjs'], environment: {}, metricName: 'score', metricDirection: 'minimize' as const, evaluatorFiles: ['scripts/score.mjs'], dataset: { kind: 'local' as const, files: ['data/train.json'] } }
+    const manifest = await deriveRegistrationManifestAtStartCommit(f.ctx, 'git', f.discovery, f.identity, registration, commandOptions)
+    expect(Object.keys(manifest)).toEqual(['data/train.json', 'scripts/score.mjs'])
+    expect(manifest['scripts/score.mjs']).not.toBe(createHash('sha256').update('dirty caller evaluator\n').digest('hex'))
+    await expect(deriveRegistrationManifestAtStartCommit(f.ctx, 'git', f.discovery, { ...f.identity, worktree: f.root }, registration, commandOptions)).rejects.toMatchObject({ code: 'git-manifest-worktree-not-isolated' })
+  })
+
+  it('rejects symlink aliases to the caller checkout as allocated manifest worktrees', async () => {
+    const f = await createRun(); const alias = join(tmpdir(), `autoresearch-alias-${Math.random().toString(16).slice(2)}`); roots.push(alias); symlinkSync(f.root, alias, 'dir')
+    const registration = { evaluatorId: 'fixture', command: 'node', args: [], environment: {}, metricName: 'score', metricDirection: 'minimize' as const, evaluatorFiles: ['scripts/score.mjs'], dataset: { kind: 'none' as const } }
+    await expect(deriveRegistrationManifestAtStartCommit(f.ctx, 'git', f.discovery, { ...f.identity, worktree: alias }, registration, commandOptions)).rejects.toMatchObject({ code: 'git-manifest-worktree-not-isolated' })
+  })
+
+  it('reads immutable start-commit blobs and rejects non-regular declared Git entries', async () => {
+    const base = fixture(); rmSync(join(base.root, 'scripts', 'score.mjs')); symlinkSync('../src.txt', join(base.root, 'scripts', 'score.mjs')); execFileSync('git', ['-C', base.root, 'add', 'scripts/score.mjs']); execFileSync('git', ['-C', base.root, 'commit', '-m', 'symlink evaluator'])
+    const f = await createRun(base); const registration = { evaluatorId: 'fixture', command: 'node', args: [], environment: {}, metricName: 'score', metricDirection: 'minimize' as const, evaluatorFiles: ['scripts/score.mjs'], dataset: { kind: 'none' as const } }
+    await expect(deriveRegistrationManifestAtStartCommit(f.ctx, 'git', f.discovery, f.identity, registration, commandOptions)).rejects.toMatchObject({ code: 'git-manifest-path-type' })
+  })
+
+  it('does not derive manifest bytes from a concurrently mutated worktree file', async () => {
+    const f = await createRun(); const registration = { evaluatorId: 'fixture', command: 'node', args: [], environment: {}, metricName: 'score', metricDirection: 'minimize' as const, evaluatorFiles: ['scripts/score.mjs'], dataset: { kind: 'none' as const } }
+    const originalSpawn = f.subprocess.spawn.bind(f.subprocess); let mutated = false
+    f.subprocess.spawn = ((spec: SubprocessSpawnSpec) => {
+      if (!mutated && spec.argv.includes('ls-tree')) { mutated = true; writeFileSync(join(f.identity.worktree, 'scripts', 'score.mjs'), 'concurrent replacement\n') }
+      return originalSpawn(spec)
+    }) as typeof f.subprocess.spawn
+    await expect(deriveRegistrationManifestAtStartCommit(f.ctx, 'git', f.discovery, f.identity, registration, commandOptions)).rejects.toMatchObject({ code: 'accepted-reconcile-dirty', message: 'Worktree does not exactly match the recorded candidate' })
+  })
+
+  it('protects exact evaluator and local-dataset declarations even under a universal mutable glob', async () => {
+    const f = await createRun()
+    writeFileSync(join(f.identity.worktree, 'scripts', 'score.mjs'), 'changed scorer\n'); writeFileSync(join(f.identity.worktree, 'data', 'train.json'), '{"rows":2}\n')
+    const snapshot = await snapshotCandidate(f.ctx, 'git', f.identity.worktree, f.gitConfig, commandOptions)
+    expect(validateCandidate(snapshot, policy(['**']))).toEqual(['data/train.json', 'scripts/score.mjs'])
+    expect(() => validateFrozenCandidatePaths(snapshot, { evaluatorFiles: ['scripts/score.mjs'], datasetFiles: ['data/train.json'] })).toThrowError(expect.objectContaining({ code: 'candidate-policy-violation', evidence: ['data/train.json: frozen evaluator/dataset file', 'scripts/score.mjs: frozen evaluator/dataset file'] }))
+
+    execFileSync('git', ['-C', f.identity.worktree, 'reset', '--hard']); execFileSync('git', ['-C', f.identity.worktree, 'mv', 'scripts/score.mjs', 'scripts/renamed.mjs'])
+    const renamed = await snapshotCandidate(f.ctx, 'git', f.identity.worktree, f.gitConfig, commandOptions)
+    expect(() => validateFrozenCandidatePaths(renamed, { evaluatorFiles: ['scripts/score.mjs'], datasetFiles: [] })).toThrowError(expect.objectContaining({ evidence: ['scripts/score.mjs: frozen evaluator/dataset file'] }))
   })
 
   it('enforces staged, unstaged, untracked, rename, dependency, and protected policy', async () => {

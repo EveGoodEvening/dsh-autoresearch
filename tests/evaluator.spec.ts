@@ -5,10 +5,11 @@ import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { SubprocessHandle, SubprocessOutcome, SubprocessOutputRead, SubprocessOutputReader, SubprocessSpawnSpec } from '@deepseek-ai/dsh-subprocess'
-import { createEvaluatorBoundary, freezeEvaluatorProvenance, parseFinalLineMetric, runEvaluator } from '../src/evaluator.ts'
+import { captureFrozenFileAttempt, createEvaluatorBoundary, deriveRegistrationManifest, freezeEvaluatorProvenance, parseFinalLineMetric, recomputeRegistrationManifest, revalidateFrozenFileAttempt, runEvaluator } from '../src/evaluator.ts'
 import type { EvaluatorPersistence } from '../src/evaluator.ts'
 import { EvaluatorArtifactWriter } from '../src/evaluator-artifacts.ts'
 import { StateLayout } from '../src/state-layout.ts'
+import { normalizeEvaluatorRegistration } from '../src/types.ts'
 
 interface FakeOptions {
   stdout?: SubprocessOutputRead
@@ -187,6 +188,62 @@ describe('strict evaluator metric protocol', () => {
     ['[1]\n', /JSON object/],
   ])('rejects malformed, missing, duplicate, or non-finite protocol %#', (text, message) => {
     expect(() => parseFinalLineMetric(text, 'score')).toThrow(message)
+  })
+})
+
+describe('inert frozen registration files', () => {
+  function registration(root: string) {
+    mkdirSync(join(root, 'data'), { recursive: true })
+    writeFileSync(join(root, 'data', 'train.json'), '{"rows":1}\n')
+    return normalizeEvaluatorRegistration({
+      evaluatorId: 'fixture', command: 'node', args: ['evaluate.mjs'], cwd: 'bench', environment: {}, metricName: 'score', metricDirection: 'minimize',
+      evaluatorFiles: ['bench/evaluate.mjs'], dataset: { kind: 'local', files: ['data/train.json'] },
+    })
+  }
+
+  it('derives and independently recomputes the exact evaluator/local-dataset manifest', () => {
+    const paths = fixture(); const manifest = deriveRegistrationManifest(paths.root, registration(paths.root))
+    expect(Object.keys(manifest)).toEqual(['bench/evaluate.mjs', 'data/train.json'])
+    expect(Object.values(manifest).every(value => /^[0-9a-f]{64}$/u.test(value))).toBe(true)
+    expect(recomputeRegistrationManifest(paths.root, manifest)).toEqual(manifest)
+    writeFileSync(join(paths.root, 'data', 'train.json'), '{"rows":2}\n')
+    expect(() => recomputeRegistrationManifest(paths.root, manifest)).toThrow(/run-creation manifest/)
+    rmSync(join(paths.root, 'data', 'train.json'))
+    expect(() => recomputeRegistrationManifest(paths.root, manifest)).toThrow()
+  })
+
+  it('rejects symlinks and detects attempt-local inode swaps even when bytes are unchanged', () => {
+    const paths = fixture(); const normalized = registration(paths.root); const manifest = deriveRegistrationManifest(paths.root, normalized)
+    const attempt = captureFrozenFileAttempt(paths.root, manifest)
+    const dataset = join(paths.root, 'data', 'train.json'); renameSync(dataset, `${dataset}.old`); writeFileSync(dataset, '{"rows":1}\n')
+    expect(() => revalidateFrozenFileAttempt(paths.root, attempt)).toThrow(/device\/inode/)
+
+    rmSync(dataset); symlinkSync(`${dataset}.old`, dataset)
+    expect(() => captureFrozenFileAttempt(paths.root, manifest)).toThrow(/symbolic link/)
+  })
+
+  it('never combines digest and inode from different descriptors during replacement', () => {
+    const paths = fixture(); const normalized = registration(paths.root); const manifest = deriveRegistrationManifest(paths.root, normalized)
+    const dataset = join(paths.root, 'data', 'train.json'); let replaced = false
+    expect(() => captureFrozenFileAttempt(paths.root, manifest, { afterOpen(path) {
+      if (replaced || path !== dataset) return
+      replaced = true; renameSync(dataset, `${dataset}.old`); writeFileSync(dataset, '{"rows":1}\n')
+    } })).toThrowError(expect.objectContaining({ name: 'TypeError', message: 'frozen registration file changed while it was read' }))
+  })
+
+  it('normalizes only algorithm-qualified external dataset identity without creating local manifest paths', () => {
+    const paths = fixture()
+    const normalized = normalizeEvaluatorRegistration({ evaluatorId: 'external', command: 'node', args: [], environment: {}, metricName: 'score', metricDirection: 'maximize', evaluatorFiles: ['bench/evaluate.mjs'], dataset: { kind: 'external', digest: `sha256:${'a'.repeat(64)}` } })
+    expect(normalized.dataset).toEqual({ kind: 'external', digest: `sha256:${'a'.repeat(64)}` })
+    expect(Object.keys(deriveRegistrationManifest(paths.root, normalized))).toEqual(['bench/evaluate.mjs'])
+    expect(() => normalizeEvaluatorRegistration({ ...normalized, dataset: { kind: 'external', digest: 'a'.repeat(64) as never } })).toThrow(/algorithm-qualified/)
+  })
+  it('remains unreachable from production start, resume, controller, and recovery routes', () => {
+    const inertSymbols = /EVALUATOR_CONTRACT_GENERATION|deriveRegistrationManifestAtStartCommit|deriveRegistrationManifest|captureFrozenFileAttempt|revalidateFrozenFileAttempt|recomputeRegistrationManifest|validateFrozenCandidatePaths/
+    for (const path of ['src/index.ts', 'src/controller.ts', 'src/recovery.ts']) {
+      const source = readFileSync(new URL(`../${path}`, import.meta.url), 'utf8')
+      expect(source).not.toMatch(inertSymbols)
+    }
   })
 })
 

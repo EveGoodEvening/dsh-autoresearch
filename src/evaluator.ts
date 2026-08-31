@@ -3,7 +3,7 @@ import { closeSync, fstatSync, lstatSync, openSync, readFileSync, realpathSync, 
 import { constants } from 'node:fs'
 import { isAbsolute, relative, resolve, sep } from 'node:path'
 import type { SubprocessHandle, SubprocessOutcome, SubprocessOutputRead, SubprocessSpawnSpec } from '@deepseek-ai/dsh-subprocess'
-import type { EvaluatorArgv } from './types.js'
+import { normalizeEvaluatorRegistration, normalizeFrozenFileDeclarations, normalizeRegistrationManifest, type EvaluatorArgv, type EvaluatorRegistration, type RegistrationManifest } from './types.js'
 import { EvaluatorArtifactWriter, normalizeRedactionSecrets, type EvaluatorArtifactRecord } from './evaluator-artifacts.js'
 
 export const EVALUATOR_PARSER_VERSION = 'final-line-json-v1' as const
@@ -46,6 +46,52 @@ export interface FrozenEvaluatorProvenance {
   readonly evaluatorFileHashes: Readonly<Record<string, string>>
   readonly canonical: string
   readonly sha256: string
+}
+export interface FrozenFileAttemptIdentity {
+  readonly manifest: RegistrationManifest
+  readonly files: readonly EvaluatorDeclaredFile[]
+}
+export interface FrozenFileCaptureHooks { readonly afterOpen?: (path: string) => void }
+
+export function deriveRegistrationManifest(worktree: string, registration: EvaluatorRegistration): RegistrationManifest {
+  const normalized = normalizeEvaluatorRegistration(registration)
+  const declarations = normalizeFrozenFileDeclarations({
+    evaluatorFiles: normalized.evaluatorFiles,
+    datasetFiles: normalized.dataset.kind === 'local' ? normalized.dataset.files : [],
+  })
+  const root = canonicalWorktree(worktree)
+  const manifest: Record<string, string> = Object.create(null) as Record<string, string>
+  for (const path of [...declarations.evaluatorFiles, ...declarations.datasetFiles]) {
+    manifest[path] = sha256(readContainedFile(root, path, 'frozen registration file'))
+  }
+  return Object.freeze(normalizeRegistrationManifest(manifest))
+}
+
+export function captureFrozenFileAttempt(worktree: string, manifest: RegistrationManifest, hooks?: FrozenFileCaptureHooks): FrozenFileAttemptIdentity {
+  const root = canonicalWorktree(worktree)
+  const normalized = normalizeRegistrationManifest(manifest)
+  const files = Object.freeze(Object.keys(normalized).map(path => captureFrozenFile(root, path, normalized[path]!, hooks)))
+  return Object.freeze({ manifest: Object.freeze(normalized), files })
+}
+
+export function revalidateFrozenFileAttempt(worktree: string, boundary: FrozenFileAttemptIdentity, hooks?: FrozenFileCaptureHooks): void {
+  const root = canonicalWorktree(worktree)
+  const expectedManifest = normalizeRegistrationManifest(boundary.manifest)
+  const expectedPaths = Object.keys(expectedManifest)
+  const boundaryPaths = boundary.files.map(file => file.path)
+  if (boundaryPaths.length !== expectedPaths.length || boundaryPaths.some((path, index) => path !== expectedPaths[index])) throw new TypeError('frozen file boundary must contain exactly every manifest path in canonical order')
+  for (const expected of boundary.files) {
+    if (expectedManifest[expected.path] !== expected.sha256) throw new TypeError(`frozen file boundary manifest changed: ${expected.path}`)
+    const current = captureFrozenFile(root, expected.path, expected.sha256, hooks)
+    if (current.dev !== expected.dev || current.ino !== expected.ino) throw new TypeError(`frozen file device/inode changed during attempt: ${expected.path}`)
+  }
+}
+
+export function recomputeRegistrationManifest(worktree: string, manifest: RegistrationManifest): RegistrationManifest {
+  const expected = normalizeRegistrationManifest(manifest)
+  const recomputed = deriveManifestFromPaths(canonicalWorktree(worktree), Object.keys(expected))
+  if (canonicalJson(recomputed) !== canonicalJson(expected)) throw new TypeError('frozen file content differs from run-creation manifest')
+  return Object.freeze(recomputed)
 }
 
 export type EvaluatorArtifactInput = EvaluatorArtifactRecord
@@ -325,6 +371,7 @@ function persistSafely(action: () => void, secrets: readonly string[]): void {
 }
 
 interface PathIdentity { readonly canonical: string; readonly dev: number; readonly ino: number }
+interface CapturedFile extends PathIdentity { readonly bytes: Buffer }
 
 function canonicalWorktree(worktree: string): string {
   return realpathSync(resolve(worktree))
@@ -347,16 +394,27 @@ function assertPathIdentity(root: string, expected: PathIdentity, label: string)
   if (canonical !== expected.canonical || stat.dev !== expected.dev || stat.ino !== expected.ino) throw new TypeError(`${label} changed during evaluator startup`)
 }
 
-function readContainedFile(root: string, path: string, label: string): Buffer {
-  const identity = capturePathIdentity(root, path, label, false)
-  const fd = openSync(identity.canonical, constants.O_RDONLY | constants.O_NOFOLLOW)
+function captureContainedFile(root: string, path: string, label: string, hooks?: FrozenFileCaptureHooks): CapturedFile {
+  const lexical = lexicalContainedPath(root, path, label)
+  rejectSymlinkComponents(root, lexical, label)
+  const canonical = realpathSync(lexical)
+  requireContained(root, canonical, label)
+  const fd = openSync(canonical, constants.O_RDONLY | constants.O_NOFOLLOW)
   try {
     const opened = fstatSync(fd)
-    if (!opened.isFile() || opened.dev !== identity.dev || opened.ino !== identity.ino) throw new TypeError(`${label} changed before it could be read`)
+    if (!opened.isFile()) throw new TypeError(`${label} must be a regular file`)
+    hooks?.afterOpen?.(canonical)
     const bytes = readFileSync(fd)
+    const closedOver = fstatSync(fd)
+    if (!closedOver.isFile() || closedOver.dev !== opened.dev || closedOver.ino !== opened.ino || closedOver.size !== opened.size || closedOver.mtimeMs !== opened.mtimeMs || closedOver.ctimeMs !== opened.ctimeMs) throw new TypeError(`${label} changed while it was read`)
+    const identity = { canonical, dev: opened.dev, ino: opened.ino }
     assertPathIdentity(root, identity, label)
-    return bytes
+    return { ...identity, bytes }
   } finally { closeSync(fd) }
+}
+
+function readContainedFile(root: string, path: string, label: string): Buffer {
+  return captureContainedFile(root, path, label).bytes
 }
 
 function lexicalContainedPath(root: string, path: string, label: string): string {
@@ -429,9 +487,21 @@ function evaluationDigest(evaluation: EvaluatorArgv): string {
 }
 
 function captureDeclaredFile(root: string, path: string): EvaluatorDeclaredFile {
-  const identity = capturePathIdentity(root, path, 'declared evaluator file', false)
-  const bytes = readContainedFile(root, path, 'declared evaluator file')
-  return Object.freeze({ path: normalizedRelativePath(root, identity.canonical), sha256: sha256(bytes), dev: identity.dev, ino: identity.ino })
+  const captured = captureContainedFile(root, path, 'declared evaluator file')
+  return Object.freeze({ path: normalizedRelativePath(root, captured.canonical), sha256: sha256(captured.bytes), dev: captured.dev, ino: captured.ino })
+}
+
+function captureFrozenFile(root: string, path: string, expectedSha256: string, hooks?: FrozenFileCaptureHooks): EvaluatorDeclaredFile {
+  const captured = captureContainedFile(root, path, 'frozen registration file', hooks)
+  const digest = sha256(captured.bytes)
+  if (digest !== expectedSha256) throw new TypeError(`frozen file content differs from run-creation manifest: ${path}`)
+  return Object.freeze({ path: normalizedRelativePath(root, captured.canonical), sha256: digest, dev: captured.dev, ino: captured.ino })
+}
+
+function deriveManifestFromPaths(root: string, paths: readonly string[]): RegistrationManifest {
+  const manifest: Record<string, string> = Object.create(null) as Record<string, string>
+  for (const path of paths) manifest[path] = sha256(readContainedFile(root, path, 'frozen registration file'))
+  return normalizeRegistrationManifest(manifest)
 }
 
 function normalizedRelativePath(root: string, canonical: string): string {

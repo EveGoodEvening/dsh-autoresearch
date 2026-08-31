@@ -1,13 +1,14 @@
 import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
-import { mkdtemp, readFile, realpath, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, realpath, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { scrubbedParentEnv, type SubprocessHandle, type SubprocessOutcome, type SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
 import type { ResolvedConfig } from './config.js'
-import type { NormalizedRunPolicy } from './types.js'
+import { normalizeEvaluatorRegistration, normalizeFrozenFileDeclarations, normalizeRegistrationManifest, type EvaluatorRegistration, type FrozenFileDeclarations, type NormalizedRunPolicy, type RegistrationManifest } from './types.js'
 import { DurableTracker } from './tracker.js'
+import { deriveRegistrationManifest } from './evaluator.js'
 
 const FULL_SHA = /^[0-9a-f]{40}$/u
 const ZERO_SHA = '0'.repeat(40)
@@ -185,6 +186,52 @@ export async function captureGitConfigBaseline(ctx: GitContext, executable: stri
   const allowedPaths = [...new Set(policy.exceptionalAllowlists.gitConfig.map(normalizeGitConfigAllowlist))].sort(); const files = await snapshotGitConfig(ctx, executable, worktree, options)
   await rejectExecutableGitConfig(ctx, executable, worktree, options)
   return { files, allowedPaths }
+}
+
+export async function deriveRegistrationManifestAtStartCommit(ctx: GitContext, executable: string, discovery: RepositoryDiscovery, identity: RunGitIdentity, registration: EvaluatorRegistration, options: Omit<GitCommandOptions, 'cwd'>): Promise<RegistrationManifest> {
+  const [canonicalWorktree, canonicalCaller, canonicalRepository] = await Promise.all([realpath(resolve(identity.worktree)), realpath(resolve(discovery.callerCwd)), realpath(resolve(discovery.repository))])
+  if (canonicalWorktree === canonicalCaller || canonicalWorktree === canonicalRepository) throw new GitBoundaryError('git-manifest-worktree-not-isolated', 'Registration manifest must be derived from the allocated run worktree')
+  const before = await stat(canonicalWorktree)
+  if (!before.isDirectory()) throw new GitBoundaryError('git-manifest-worktree-identity', 'Allocated run worktree is not a directory')
+  const worktrees = parseWorktreeList((await runGit(ctx, executable, ['worktree', 'list', '--porcelain'], { ...options, cwd: canonicalRepository })).stdout)
+  const branchRef = `refs/heads/${identity.branch}`
+  const registered = worktrees.find(item => item.branch === branchRef)
+  if (!registered || await realpath(resolve(registered.path)) !== canonicalWorktree) throw new GitBoundaryError('git-manifest-worktree-identity', 'Registration manifest worktree is not the allocated run worktree')
+  await verifyExactWorktree(ctx, executable, canonicalWorktree, discovery.startCommit, options)
+
+  const normalized = normalizeEvaluatorRegistration(registration)
+  const declarations = normalizeFrozenFileDeclarations({ evaluatorFiles: normalized.evaluatorFiles, datasetFiles: normalized.dataset.kind === 'local' ? normalized.dataset.files : [] })
+  const paths = [...declarations.evaluatorFiles, ...declarations.datasetFiles].sort()
+  const literalPaths = paths.map(path => `:(literal)${path}`)
+  const treeEntries = parseDeclaredTreeEntries((await runGit(ctx, executable, ['ls-tree', '-z', discovery.startCommit, '--', ...literalPaths], { ...options, cwd: canonicalRepository })).stdout)
+  if (treeEntries.length !== paths.length || treeEntries.some((entry, index) => entry.path !== paths[index])) throw new GitBoundaryError('git-manifest-path-missing', 'Every declared registration path must exist at the immutable start commit')
+  for (const entry of treeEntries) {
+    if ((entry.mode !== '100644' && entry.mode !== '100755') || entry.type !== 'blob') throw new GitBoundaryError('git-manifest-path-type', `Declared registration path is not a regular blob: ${entry.path}`)
+    const actualType = (await runGit(ctx, executable, ['cat-file', '-t', entry.object], { ...options, cwd: canonicalRepository })).stdout.trim()
+    if (actualType !== 'blob') throw new GitBoundaryError('git-manifest-path-type', `Declared registration path is not a blob object: ${entry.path}`)
+  }
+
+  const directory = await mkdtemp(join(tmpdir(), 'autoresearch-manifest-'))
+  const indexEnv = { GIT_INDEX_FILE: join(directory, 'index') }
+  try {
+    await runGit(ctx, executable, ['read-tree', discovery.startCommit], { ...options, cwd: canonicalRepository, env: indexEnv })
+    await runGit(ctx, executable, ['checkout-index', '--all', `--prefix=${directory}/`], { ...options, cwd: canonicalRepository, env: indexEnv })
+    const manifest = deriveRegistrationManifest(directory, normalized)
+    const after = await stat(canonicalWorktree)
+    if (after.dev !== before.dev || after.ino !== before.ino || await realpath(resolve(identity.worktree)) !== canonicalWorktree) throw new GitBoundaryError('git-manifest-worktree-identity', 'Allocated run worktree identity changed during manifest derivation')
+    await verifyExactWorktree(ctx, executable, canonicalWorktree, discovery.startCommit, options)
+    return normalizeRegistrationManifest(manifest)
+  } finally { await rm(directory, { recursive: true, force: true }) }
+}
+
+export function validateFrozenCandidatePaths(snapshot: CandidateSnapshot, declarations: FrozenFileDeclarations): void {
+  const normalized = normalizeFrozenFileDeclarations(declarations)
+  const frozen = new Set([...normalized.evaluatorFiles, ...normalized.datasetFiles])
+  const violations = [...snapshot.changed.map(change => change.path), ...snapshot.ignoredUntracked]
+    .map(normalizeRepoPath)
+    .filter(path => frozen.has(path))
+    .map(path => `${path}: frozen evaluator/dataset file`)
+  if (violations.length > 0) throw new GitBoundaryError('candidate-policy-violation', 'Candidate changed frozen evaluator or dataset files', [...new Set(violations)].sort())
 }
 
 export async function snapshotCandidate(ctx: GitContext, executable: string, worktree: string, gitConfig: GitConfigBaseline, options: Omit<GitCommandOptions, 'cwd'>): Promise<CandidateSnapshot> {
@@ -401,6 +448,14 @@ function exceptionalCategory(path: string, submodule: boolean, policy: Pick<Norm
 function sameSet(left: readonly string[], right: readonly string[]): boolean { const a = [...left].sort(); const b = [...right].sort(); return a.length === b.length && a.every((value, index) => value === b[index]) }
 function isUniqueConstraint(error: unknown): boolean { return String((error as { code?: unknown }).code ?? '').startsWith('SQLITE_CONSTRAINT') || String(error).includes('UNIQUE constraint failed') }
 function parseWorktreeList(value: string): Array<{ path: string; branch?: string }> { return value.trim().split(/\n\n+/u).filter(Boolean).map((block) => { const lines = block.split('\n'); const path = lines[0]?.startsWith('worktree ') ? lines[0].slice(9) : ''; const branch = lines.find((line) => line.startsWith('branch '))?.slice(7); return { path, ...(branch ? { branch } : {}) } }) }
+function parseDeclaredTreeEntries(value: string): Array<{ mode: string; type: string; object: string; path: string }> {
+  return value.split('\0').filter(Boolean).map(record => {
+    const tab = record.indexOf('\t')
+    const header = record.slice(0, tab).split(' ')
+    if (tab < 0 || header.length !== 3) throw new GitBoundaryError('git-manifest-tree-output', 'Git returned malformed declared-path tree metadata')
+    return { mode: header[0]!, type: header[1]!, object: header[2]!, path: normalizeRepoPath(record.slice(tab + 1)) }
+  }).sort((left, right) => left.path.localeCompare(right.path))
+}
 async function readOptionalRef(ctx: GitContext, executable: string, ref: string, cwd: string, options: Omit<GitCommandOptions, 'cwd'>): Promise<string | undefined> { try { return (await runGit(ctx, executable, ['rev-parse', '--verify', ref], { ...options, cwd })).stdout.trim() } catch (error) { if (error instanceof GitBoundaryError && error.code === 'git-command-failed') return undefined; throw error } }
 async function isAncestor(ctx: GitContext, executable: string, ancestor: string, descendant: string, cwd: string, options: Omit<GitCommandOptions, 'cwd'>): Promise<boolean> { try { await runGit(ctx, executable, ['merge-base', '--is-ancestor', ancestor, descendant], { ...options, cwd }); return true } catch (error) { if (error instanceof GitBoundaryError && error.code === 'git-command-failed') return false; throw error } }
 async function snapshotGitConfig(ctx: GitContext, executable: string, cwd: string, options: Omit<GitCommandOptions, 'cwd'>): Promise<readonly GitConfigSnapshot[]> { const files: GitConfigSnapshot[] = []; for (const logicalPath of GIT_CONFIG_LOGICAL_PATHS) { const selector = logicalPath === '.git/config' ? 'config' : 'config.worktree'; const raw = (await runGit(ctx, executable, ['rev-parse', '--git-path', selector], { ...options, cwd })).stdout.trim(); const path = resolve(cwd, raw); try { files.push({ logicalPath, path, exists: true, sha256: createHash('sha256').update(await readFile(path)).digest('hex') }) } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') files.push({ logicalPath, path, exists: false }); else throw error } } return files }
