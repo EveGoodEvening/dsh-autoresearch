@@ -3,9 +3,10 @@ import { createHash, randomUUID } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { DatabaseSync, type SQLOutputValue } from 'node:sqlite'
 import { StateLayout } from './state-layout.js'
-import type { ExperimentDurableState, RunDurableState } from './types.js'
+import { EVALUATOR_CONTRACT_GENERATION, normalizeEvaluatorRegistration, normalizeRegistrationManifest, registrationFingerprint, serializeRegistrationJson } from './types.js'
+import type { DurableRegistrationIdentity, EvaluatorRegistration, ExperimentDurableState, RegistrationManifest, RunDurableState } from './types.js'
 
-export const TRACKER_SCHEMA_VERSION = 6
+export const TRACKER_SCHEMA_VERSION = 8
 export const TRACKER_BUSY_TIMEOUT_MS = 5_000
 const TRACKER_RETRY_WAIT = new Int32Array(new SharedArrayBuffer(4))
 
@@ -41,6 +42,11 @@ export interface InitialRunRecord {
   runTag: string; branch: string; worktree: string; agentId?: string; sessionId?: string
   policy: unknown; policySha256: string; provenance: unknown; provenanceSha256: string; createdAt?: string
 }
+export interface RegisteredRunRecord extends InitialRunRecord {
+  readonly registration: EvaluatorRegistration
+  readonly manifest: RegistrationManifest
+}
+
 export interface ExperimentRecord {
   experimentId: string; runId: string; ordinal: number; kind: 'baseline' | 'candidate'; parentCommit: string
   candidateCommit?: string; command: string; args: readonly string[]; cwd?: string; createdAt?: string
@@ -121,15 +127,44 @@ export class DurableTracker {
 
   createRun(record: InitialRunRecord): void {
     const at = record.createdAt ?? new Date().toISOString()
+    this.transaction(() => this.insertRun(record, at))
+  }
+  createRegisteredRun(record: RegisteredRunRecord): DurableRegistrationIdentity {
+    const at = record.createdAt ?? new Date().toISOString()
+    const registration = normalizeEvaluatorRegistration(record.registration)
+    const manifest = normalizeRegistrationManifest(record.manifest)
+    const fingerprint = registrationFingerprint(registration, manifest)
+    const identity: DurableRegistrationIdentity = { contractGeneration: EVALUATOR_CONTRACT_GENERATION, evaluatorId: registration.evaluatorId, registration, manifest, registrationFingerprint: fingerprint }
     this.transaction(() => {
-      this.database.prepare(`INSERT INTO runs (run_id, repository_id, repository, git_common_dir, caller_cwd, start_commit, run_tag, branch, worktree,
-        agent_id, session_id, policy_json, policy_sha256, provenance_json, provenance_sha256, state, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'initializing', ?, ?)`).run(
-        record.runId, record.repositoryId, record.repository, record.gitCommonDir, record.callerCwd, record.startCommit, record.runTag, record.branch, record.worktree,
-        record.agentId ?? null, record.sessionId ?? null, canonicalJson(redactEnvironment(record.policy)), record.policySha256,
-        canonicalJson(redactEnvironment(record.provenance)), record.provenanceSha256, at, at)
-      this.insertTransition(record.runId, null, 'run', null, 'initializing', { intent: { kind: 'create-run' } }, at)
+      this.insertRun(record, at)
+      this.database.prepare(`INSERT INTO run_registrations (run_id, contract_generation, evaluator_id, registration_json, manifest_json, registration_fingerprint, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)`).run(record.runId, identity.contractGeneration, identity.evaluatorId, serializeRegistrationJson(identity.registration), serializeRegistrationJson(identity.manifest), identity.registrationFingerprint, at)
     })
+    return identity
+  }
+  readRegistration(runId: string): DurableRegistrationIdentity | undefined {
+    this.requireRun(runId)
+    const row = this.database.prepare('SELECT * FROM run_registrations WHERE run_id = ?').get(runId)
+    if (!row) return undefined
+    try {
+      if (row['contract_generation'] !== EVALUATOR_CONTRACT_GENERATION) throw new TrackerTransitionError('unsupported evaluator contract generation')
+      const registrationJson = textJson(row['registration_json'], 'registration')
+      const manifestJson = textJson(row['manifest_json'], 'registration manifest')
+      const registrationValue = parseJson(registrationJson, 'registration')
+      const manifestValue = parseJson(manifestJson, 'registration manifest')
+      assertRegistrationShape(registrationValue)
+      assertManifestShape(manifestValue)
+      const registration = normalizeEvaluatorRegistration(registrationValue)
+      const manifest = normalizeRegistrationManifest(manifestValue)
+      if (registrationJson !== serializeRegistrationJson(registration) || manifestJson !== serializeRegistrationJson(manifest)) throw new TrackerTransitionError('durable evaluator registration JSON is not canonical')
+      const evaluatorId = String(row['evaluator_id'])
+      const fingerprint = registrationFingerprint(registration, manifest)
+      if (registration.evaluatorId !== evaluatorId || row['registration_fingerprint'] !== fingerprint) throw new TrackerTransitionError('durable evaluator registration identity is inconsistent')
+      return { contractGeneration: EVALUATOR_CONTRACT_GENERATION, evaluatorId, registration, manifest, registrationFingerprint: fingerprint }
+    } catch (error) {
+      if (error instanceof TrackerTransitionError) throw error
+      throw new TrackerTransitionError(`durable evaluator registration is corrupt: ${(error as Error).message}`)
+    }
   }
   acquireActiveLock(runId: string, repositoryId: string, runTag: string, acquiredAt = new Date().toISOString()): void {
     this.transaction(() => {
@@ -386,6 +421,15 @@ export class DurableTracker {
     if (!this.foreignKeysEnabled()) throw new TrackerBlockedError('tracker-schema-invalid', 'tracker foreign keys are disabled')
   }
   private secureSidecars(): void { for (const suffix of ['', '-wal', '-shm']) { try { this.layout.secureFile(`${this.path}${suffix}`) } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error } } }
+  private insertRun(record: InitialRunRecord, at: string): void {
+    this.database.prepare(`INSERT INTO runs (run_id, repository_id, repository, git_common_dir, caller_cwd, start_commit, run_tag, branch, worktree,
+      agent_id, session_id, policy_json, policy_sha256, provenance_json, provenance_sha256, state, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'initializing', ?, ?)`).run(
+      record.runId, record.repositoryId, record.repository, record.gitCommonDir, record.callerCwd, record.startCommit, record.runTag, record.branch, record.worktree,
+      record.agentId ?? null, record.sessionId ?? null, canonicalJson(redactEnvironment(record.policy)), record.policySha256,
+      canonicalJson(redactEnvironment(record.provenance)), record.provenanceSha256, at, at)
+    this.insertTransition(record.runId, null, 'run', null, 'initializing', { intent: { kind: 'create-run' } }, at)
+  }
   private transaction<T>(operation: () => T): T { this.database.exec('BEGIN IMMEDIATE'); try { const result = operation(); this.database.exec('COMMIT'); return result } catch (error) { try { this.database.exec('ROLLBACK') } catch { /* transaction may already be aborted */ }; throw error } }
   private requireRun(runId: string): Record<string, SQLOutputValue> { const row = this.getRun(runId); if (!row) throw new TrackerTransitionError(`unknown run ${runId}`); return row }
   private requireExperiment(experimentId: string): Record<string, SQLOutputValue> { const row = this.database.prepare('SELECT * FROM experiments WHERE experiment_id = ?').get(experimentId); if (!row) throw new TrackerTransitionError(`unknown experiment ${experimentId}`); return row }
@@ -443,6 +487,8 @@ const MIGRATIONS: Record<number, (database: DatabaseSync) => void> = {
   4(database) { database.exec(`DROP TRIGGER experiments_immutable_lineage; CREATE TRIGGER experiments_immutable_lineage BEFORE UPDATE OF run_id, ordinal, kind, parent_commit, candidate_commit, command, args_json, cwd ON experiments WHEN OLD.run_id != NEW.run_id OR OLD.ordinal != NEW.ordinal OR OLD.kind != NEW.kind OR OLD.parent_commit != NEW.parent_commit OR OLD.command != NEW.command OR OLD.args_json != NEW.args_json OR OLD.cwd IS NOT NEW.cwd OR OLD.candidate_commit IS NOT NULL OR NEW.candidate_commit IS NULL OR length(NEW.candidate_commit) != 40 BEGIN SELECT RAISE(ABORT, 'immutable experiment lineage/evaluator'); END;`) },
   5(database) { database.exec(`CREATE TABLE schema_metadata_canonical (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), version INTEGER NOT NULL, created_at TEXT NOT NULL) STRICT; INSERT INTO schema_metadata_canonical SELECT singleton, version, created_at FROM schema_metadata; DROP TABLE schema_metadata; ALTER TABLE schema_metadata_canonical RENAME TO schema_metadata;`) },
   6(database) { database.exec(`ALTER TABLE attempts ADD COLUMN outcome_json TEXT; CREATE TRIGGER attempts_immutable_outcome BEFORE UPDATE OF outcome_json ON attempts WHEN OLD.outcome_json IS NOT NULL OR NEW.outcome_json IS NULL BEGIN SELECT RAISE(ABORT, 'immutable attempt outcome'); END;`) },
+  7(database) { database.exec(`CREATE TABLE run_registrations (run_id TEXT PRIMARY KEY REFERENCES runs(run_id) ON DELETE RESTRICT, contract_generation TEXT NOT NULL CHECK(contract_generation = 'host-registration-v1'), evaluator_id TEXT NOT NULL, registration_json TEXT NOT NULL, manifest_json TEXT NOT NULL, registration_fingerprint TEXT NOT NULL CHECK(length(registration_fingerprint)=64), created_at TEXT NOT NULL) STRICT; CREATE TRIGGER run_registrations_immutable BEFORE UPDATE ON run_registrations BEGIN SELECT RAISE(ABORT, 'immutable evaluator registration identity'); END;`) },
+  8(database) { database.exec(`CREATE TRIGGER run_registrations_presence_monotonic BEFORE DELETE ON run_registrations BEGIN SELECT RAISE(ABORT, 'evaluator registration presence is monotonic'); END;`) },
 }
 
 let expectedSchemaFingerprint: string | undefined
@@ -592,6 +638,36 @@ function safeStateComponent(value: string, label: string): string { if (!/^[A-Za
 function integer(value: unknown, label: string): number { const result = Number(value); if (!Number.isSafeInteger(result)) throw new TrackerTransitionError(`${label} must be an integer`); return result }
 function timestamp(value: unknown, label: string): number { const result = typeof value === 'string' ? Date.parse(value) : Number.NaN; if (!Number.isFinite(result)) throw new TrackerTransitionError(`${label} must be an ISO timestamp`); return result }
 function parseJson(value: unknown, label: string): unknown { if (typeof value !== 'string') throw new TrackerTransitionError(`${label} must be JSON text`); try { return JSON.parse(value) } catch { throw new TrackerTransitionError(`${label} is malformed`) } }
+function textJson(value: unknown, label: string): string { if (typeof value !== 'string') throw new TrackerTransitionError(`${label} must be JSON text`); return value }
+function assertRegistrationShape(value: unknown): asserts value is EvaluatorRegistration {
+  assertObjectKeys(value, 'registration', ['evaluatorId', 'command', 'args', 'environment', 'metricName', 'metricDirection', 'evaluatorFiles', 'dataset'], ['cwd'])
+  assertString(value.evaluatorId, 'registration.evaluatorId')
+  assertString(value.command, 'registration.command')
+  assertStringArray(value.args, 'registration.args')
+  if (value.cwd !== undefined) assertString(value.cwd, 'registration.cwd')
+  assertStringRecord(value.environment, 'registration.environment')
+  assertString(value.metricName, 'registration.metricName')
+  assertString(value.metricDirection, 'registration.metricDirection')
+  assertStringArray(value.evaluatorFiles, 'registration.evaluatorFiles')
+  assertDatasetShape(value.dataset)
+}
+function assertDatasetShape(value: unknown): asserts value is EvaluatorRegistration['dataset'] {
+  if (!isJsonObject(value) || typeof value.kind !== 'string') throw new TrackerTransitionError('registration.dataset must be an object with a string kind')
+  if (value.kind === 'none') assertObjectKeys(value, 'registration.dataset', ['kind'])
+  else if (value.kind === 'local') { assertObjectKeys(value, 'registration.dataset', ['kind', 'files'], ['identity']); assertStringArray(value.files, 'registration.dataset.files'); if (value.identity !== undefined) assertString(value.identity, 'registration.dataset.identity') }
+  else if (value.kind === 'external') { assertObjectKeys(value, 'registration.dataset', ['kind', 'digest'], ['identity']); assertString(value.digest, 'registration.dataset.digest'); if (value.identity !== undefined) assertString(value.identity, 'registration.dataset.identity') }
+  else throw new TrackerTransitionError('registration.dataset has an unknown kind')
+}
+function assertManifestShape(value: unknown): asserts value is RegistrationManifest { assertStringRecord(value, 'registration manifest') }
+function assertObjectKeys(value: unknown, label: string, required: readonly string[], optional: readonly string[] = []): asserts value is Record<string, unknown> {
+  if (!isJsonObject(value)) throw new TrackerTransitionError(`${label} must be an object`)
+  const allowed = [...required, ...optional]
+  if (required.some(key => !hasOwn(value, key)) || Object.keys(value).some(key => !allowed.includes(key))) throw new TrackerTransitionError(`${label} has an invalid shape`)
+}
+function assertString(value: unknown, label: string): asserts value is string { if (typeof value !== 'string') throw new TrackerTransitionError(`${label} must be a string`) }
+function assertStringArray(value: unknown, label: string): asserts value is string[] { if (!Array.isArray(value) || value.some(item => typeof item !== 'string')) throw new TrackerTransitionError(`${label} must be an array of strings`) }
+function assertStringRecord(value: unknown, label: string): asserts value is Record<string, string> { if (!isJsonObject(value) || Object.values(value).some(item => typeof item !== 'string')) throw new TrackerTransitionError(`${label} must be an object of strings`) }
+function isJsonObject(value: unknown): value is Record<string, unknown> { return value !== null && typeof value === 'object' && !Array.isArray(value) }
 
 function hasOwn(value: object, property: PropertyKey): boolean { return Object.prototype.hasOwnProperty.call(value, property) }
 function isSqliteBusyOrLocked(error: unknown): boolean {

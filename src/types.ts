@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto'
+
 export type MetricDirection = 'minimize' | 'maximize'
 export type RunMode = 'background' | 'foreground'
 
@@ -7,6 +9,109 @@ export type AttemptId = string
 export type ArtifactId = string
 export type TransitionId = string
 export type FullCommitSha = string
+export const EVALUATOR_CONTRACT_GENERATION = 'host-registration-v1' as const
+export type EvaluatorContractGeneration = typeof EVALUATOR_CONTRACT_GENERATION
+export type AlgorithmQualifiedDigest = `sha256:${string}`
+export type RegistrationManifest = Readonly<Record<string, string>>
+
+export type DatasetRegistration =
+  | { readonly kind: 'none' }
+  | { readonly kind: 'local'; readonly files: readonly string[]; readonly identity?: string }
+  | { readonly kind: 'external'; readonly digest: AlgorithmQualifiedDigest; readonly identity?: string }
+
+export class RegistrationPathOverlapError extends TypeError {
+  readonly paths: readonly string[]
+  constructor(paths: readonly string[]) {
+    super(`evaluatorFiles and dataset.files must not overlap: ${paths.join(', ')}`)
+    this.name = 'RegistrationPathOverlapError'
+    this.paths = [...paths]
+  }
+}
+
+export interface EvaluatorRegistration {
+  readonly evaluatorId: string
+  readonly command: string
+  readonly args: readonly string[]
+  readonly cwd?: string
+  readonly environment: Readonly<Record<string, string>>
+  readonly metricName: string
+  readonly metricDirection: MetricDirection
+  readonly evaluatorFiles: readonly string[]
+  readonly dataset: DatasetRegistration
+}
+
+export interface DurableRegistrationIdentity {
+  readonly contractGeneration: EvaluatorContractGeneration
+  readonly evaluatorId: string
+  readonly registration: EvaluatorRegistration
+  readonly manifest: RegistrationManifest
+  readonly registrationFingerprint: string
+}
+
+export type RegistrationBlockEvidence =
+  | { readonly kind: 'legacy-run'; readonly code: 'legacy-contract'; readonly message: string }
+  | { readonly kind: 'registration-blocked'; readonly code: 'evaluator-registration-mismatch' | 'registration-corrupt'; readonly message: string }
+
+export function normalizeEvaluatorRegistration(value: EvaluatorRegistration): EvaluatorRegistration {
+  const evaluatorId = normalizedRegistrationText(value.evaluatorId, 'evaluatorId')
+  const command = normalizedRegistrationText(value.command, 'command')
+  const args = value.args.map((item, index) => normalizedRegistrationText(item, `args[${index}]`, true))
+  const cwd = value.cwd === undefined ? undefined : normalizedRepositoryRelativePath(value.cwd, 'cwd')
+  const metricName = normalizedRegistrationText(value.metricName, 'metricName')
+  if (value.metricDirection !== 'minimize' && value.metricDirection !== 'maximize') throw new TypeError('metricDirection must be minimize or maximize')
+  const environment = Object.fromEntries(Object.entries(value.environment).sort(([a], [b]) => compareRegistrationText(a, b)).map(([name, item]) => [normalizedEnvironmentName(name), normalizedRegistrationText(item, `environment.${name}`, true)]))
+  const evaluatorFiles = normalizedRegistrationPathList(value.evaluatorFiles, 'evaluatorFiles')
+  const dataset = normalizeDatasetRegistration(value.dataset)
+  if (dataset.kind === 'local') {
+    const evaluatorPaths = new Set(evaluatorFiles)
+    const overlap = dataset.files.filter(path => evaluatorPaths.has(path))
+    if (overlap.length > 0) throw new RegistrationPathOverlapError(overlap)
+  }
+  return { evaluatorId, command, args, ...(cwd === undefined ? {} : { cwd }), environment, metricName, metricDirection: value.metricDirection, evaluatorFiles, dataset }
+}
+
+export function normalizeRegistrationManifest(value: RegistrationManifest): RegistrationManifest {
+  const entries = Object.entries(value).map(([path, digest]) => [normalizedRepositoryRelativePath(path, 'manifest path'), lowercaseSha256(digest, `manifest ${path}`)] as const).sort(([a], [b]) => compareRegistrationText(a, b))
+  if (new Set(entries.map(([path]) => path)).size !== entries.length) throw new TypeError('manifest paths must be unique')
+  return Object.fromEntries(entries)
+}
+
+export function registrationFingerprint(registration: EvaluatorRegistration, manifest: RegistrationManifest): string {
+  const normalized = normalizeEvaluatorRegistration(registration)
+  const normalizedManifest = normalizeRegistrationManifest(manifest)
+  const expectedPaths = [...normalized.evaluatorFiles, ...(normalized.dataset.kind === 'local' ? normalized.dataset.files : [])].sort(compareRegistrationText)
+  const actualPaths = Object.keys(normalizedManifest)
+  if (expectedPaths.length !== actualPaths.length || expectedPaths.some((path, index) => path !== actualPaths[index])) throw new TypeError('registration manifest must contain exactly every declared local file')
+  const fields = [EVALUATOR_CONTRACT_GENERATION, normalized.evaluatorId, serializeRegistrationJson(normalized), serializeRegistrationJson(normalizedManifest)]
+  const hash = createHash('sha256')
+  for (const field of fields) { const bytes = Buffer.from(field, 'utf8'); hash.update(String(bytes.length)); hash.update(':'); hash.update(bytes) }
+  return hash.digest('hex')
+}
+
+function normalizeDatasetRegistration(value: DatasetRegistration): DatasetRegistration {
+  if (value.kind === 'none') return { kind: 'none' }
+  const identity = value.identity === undefined ? undefined : normalizedRegistrationText(value.identity, 'dataset.identity')
+  if (value.kind === 'local') return { kind: 'local', files: normalizedRegistrationPathList(value.files, 'dataset.files'), ...(identity === undefined ? {} : { identity }) }
+  if (value.kind === 'external') { if (!value.digest.startsWith('sha256:')) throw new TypeError('dataset.digest must be algorithm-qualified'); return { kind: 'external', digest: `sha256:${lowercaseSha256(value.digest.slice('sha256:'.length), 'dataset.digest')}`, ...(identity === undefined ? {} : { identity }) } }
+  throw new TypeError('unknown dataset registration kind')
+}
+
+function compareRegistrationText(left: string, right: string): number { return left < right ? -1 : left > right ? 1 : 0 }
+function normalizedRegistrationList(values: readonly string[], label: string): string[] { return [...new Set(values.map((item, index) => normalizedRegistrationText(item, `${label}[${index}]`)))].sort(compareRegistrationText) }
+function normalizedRegistrationPathList(values: readonly string[], label: string): string[] { return [...new Set(values.map((item, index) => normalizedRepositoryRelativePath(item, `${label}[${index}]`)))].sort(compareRegistrationText) }
+function normalizedRepositoryRelativePath(value: string, label: string): string {
+  const path = normalizedRegistrationText(value, label)
+  if (path.startsWith('/') || path.startsWith('\\') || /^[A-Za-z]:/u.test(path)) throw new TypeError(`${label} must be a repository-relative path`)
+  if (path.includes('\\')) throw new TypeError(`${label} must use canonical forward-slash separators`)
+  if (path.split('/').some(component => component === '' || component === '.' || component === '..')) throw new TypeError(`${label} must not contain empty, dot, or parent components`)
+  return path
+}
+function normalizedEnvironmentName(value: string): string { if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(value)) throw new TypeError(`invalid environment name ${value}`); return value }
+function normalizedRegistrationText(value: string, label: string, allowEmpty = false): string { if (typeof value !== 'string' || value !== value.trim() || (!allowEmpty && value.length === 0) || /[\0\r\n]/u.test(value)) throw new TypeError(`${label} must be normalized text`); return value }
+function lowercaseSha256(value: string, label: string): string { if (!/^[0-9a-f]{64}$/u.test(value)) throw new TypeError(`${label} must be a lowercase SHA-256`); return value }
+export function serializeRegistrationJson(value: unknown): string { return JSON.stringify(sortRegistrationJson(value)) }
+function sortRegistrationJson(value: unknown): unknown { if (Array.isArray(value)) return value.map(sortRegistrationJson); if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).sort(([a], [b]) => compareRegistrationText(a, b)).map(([key, item]) => [key, sortRegistrationJson(item)])); return value }
+
 
 export interface EvaluatorArgv {
   readonly command: string

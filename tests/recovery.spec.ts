@@ -7,9 +7,9 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { SubprocessHandle, SubprocessOutcome, SubprocessOutputReader, SubprocessSpawnSpec } from '@deepseek-ai/dsh-subprocess'
 import { afterEach, describe, expect, it } from 'vitest'
 import { acquireRunLock, allocateRunWorktree, captureGitConfigBaseline, checkoutCandidateForEvaluation, commitCandidate, discoverRepository, durableGitIdentity, makeRunGitIdentity, snapshotCandidate, validateCandidate } from '../src/git.ts'
-import { reconcileRecovery, type RecoveryRequest } from '../src/recovery.ts'
+import { classifyDurableRegistration, reconcileRecovery, type RecoveryRequest } from '../src/recovery.ts'
 import { DurableTracker } from '../src/tracker.ts'
-import type { DurableRunPolicy } from '../src/types.ts'
+import { serializeRegistrationJson, type DurableRegistrationIdentity, type DurableRunPolicy, type EvaluatorRegistration } from '../src/types.ts'
 
 const SHA = 'a'.repeat(40)
 const HASH = 'b'.repeat(64)
@@ -171,6 +171,51 @@ describe('recovery reconciler', () => {
     expect(second).toEqual(first)
     expect(tracker.listTransitions(request.runId)).toHaveLength(1)
     tracker.close()
+  })
+  it('discriminates legacy and new registration evidence only through the inert helper', async () => {
+    const legacy = fixture(); createRun(legacy.tracker, legacy.request)
+    expect(classifyDurableRegistration(legacy.tracker, legacy.request.runId)).toMatchObject({ kind: 'legacy', evidence: { kind: 'legacy-run', code: 'legacy-contract' } })
+    await expect(reconcileRecovery(unusedContext, legacy.request)).resolves.toEqual({ kind: 'initialize', runId: legacy.request.runId, startCommit: SHA, reuseLock: false })
+    expect(legacy.tracker.database.prepare('SELECT COUNT(*) AS count FROM run_registrations').get()).toEqual({ count: 0 })
+    legacy.tracker.close()
+
+    const registered = fixture()
+    const registration: EvaluatorRegistration = { evaluatorId: 'judge', command: 'node', args: ['score.mjs'], environment: {}, metricName: 'score', metricDirection: 'maximize', evaluatorFiles: ['score.mjs'], dataset: { kind: 'none' } }
+    registered.tracker.createRegisteredRun({ runId: registered.request.runId, repositoryId: registered.request.discovery.repositoryId, repository: registered.request.discovery.repository, gitCommonDir: registered.request.discovery.gitCommonDir, callerCwd: registered.request.discovery.callerCwd, startCommit: registered.request.discovery.startCommit, runTag: registered.request.identity.runTag, branch: registered.request.identity.branch, worktree: registered.request.identity.worktree, policy: registered.request.policy, policySha256: registered.request.policySha256, provenance: {}, provenanceSha256: registered.request.provenanceSha256, registration, manifest: { 'score.mjs': HASH } })
+    expect(classifyDurableRegistration(registered.tracker, registered.request.runId)).toMatchObject({ kind: 'registered', identity: { evaluatorId: 'judge', registrationFingerprint: expect.stringMatching(/^[0-9a-f]{64}$/u) } })
+    await expect(reconcileRecovery(unusedContext, registered.request)).resolves.toEqual({ kind: 'initialize', runId: registered.request.runId, startCommit: SHA, reuseLock: false })
+    registered.tracker.close()
+  })
+
+  it('typed-blocks directly seeded corrupt registration evidence without changing legacy recovery dispatch', async () => {
+    const { tracker, request } = fixture()
+    createRun(tracker, request)
+    tracker.database.prepare(`INSERT INTO run_registrations (run_id, contract_generation, evaluator_id, registration_json, manifest_json, registration_fingerprint, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`).run(
+      request.runId, 'host-registration-v1', 'judge', '{malformed', '{}', '0'.repeat(64), new Date().toISOString(),
+    )
+    expect(classifyDurableRegistration(tracker, request.runId)).toMatchObject({ kind: 'blocked', evidence: { kind: 'registration-blocked', code: 'registration-corrupt' } })
+    await expect(reconcileRecovery(unusedContext, request)).resolves.toEqual({ kind: 'initialize', runId: request.runId, startCommit: SHA, reuseLock: false })
+    tracker.close()
+  })
+
+  it('typed-blocks extended, duplicate-key, and non-canonical persisted registration JSON', async () => {
+    const registration: EvaluatorRegistration = { evaluatorId: 'judge', command: 'node', args: ['score.mjs'], environment: {}, metricName: 'score', metricDirection: 'maximize', evaluatorFiles: ['score.mjs'], dataset: { kind: 'none' } }
+    const corruptions: readonly { readonly field: 'registration_json' | 'manifest_json'; readonly mutate: (identity: DurableRegistrationIdentity) => string }[] = [
+      { field: 'registration_json', mutate: identity => serializeRegistrationJson({ ...identity.registration, extension: true }) },
+      { field: 'registration_json', mutate: identity => serializeRegistrationJson(identity.registration).replace('"command":"node"', '"command":"node","command":"node"') },
+      { field: 'registration_json', mutate: identity => serializeRegistrationJson({ ...identity.registration, evaluatorFiles: ['score.mjs', 'score.mjs'] }) },
+      { field: 'manifest_json', mutate: identity => ` ${serializeRegistrationJson(identity.manifest)}` },
+      { field: 'manifest_json', mutate: identity => serializeRegistrationJson(identity.manifest).replace('{', `{"score.mjs":"${HASH}",`) },
+    ]
+    for (const corruption of corruptions) {
+      const { tracker, request } = fixture()
+      const identity = tracker.createRegisteredRun({ runId: request.runId, repositoryId: request.discovery.repositoryId, repository: request.discovery.repository, gitCommonDir: request.discovery.gitCommonDir, callerCwd: request.discovery.callerCwd, startCommit: request.discovery.startCommit, runTag: request.identity.runTag, branch: request.identity.branch, worktree: request.identity.worktree, policy: request.policy, policySha256: request.policySha256, provenance: {}, provenanceSha256: request.provenanceSha256, registration, manifest: { 'score.mjs': HASH } })
+      tracker.database.exec('DROP TRIGGER run_registrations_immutable')
+      tracker.database.prepare(`UPDATE run_registrations SET ${corruption.field} = ? WHERE run_id = ?`).run(corruption.mutate(identity), request.runId)
+      expect(classifyDurableRegistration(tracker, request.runId)).toMatchObject({ kind: 'blocked', evidence: { kind: 'registration-blocked', code: 'registration-corrupt' } })
+      await expect(reconcileRecovery(unusedContext, request)).resolves.toEqual({ kind: 'initialize', runId: request.runId, startCommit: SHA, reuseLock: false })
+      tracker.close()
+    }
   })
 })
 

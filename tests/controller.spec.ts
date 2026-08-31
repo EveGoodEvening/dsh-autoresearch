@@ -13,6 +13,7 @@ import { resolveConfig, type Config } from '../src/config.ts'
 import { AutoresearchRunController } from '../src/controller.ts'
 
 import { DurableTracker } from '../src/tracker.ts'
+import { EVALUATOR_CONTRACT_GENERATION } from '../src/types.ts'
 const input = {
   repository: '.', run_tag: 'controller-test', objective: 'improve score', mutable_globs: ['src/**'],
   evaluation: { command: 'node', args: ['evaluate.mjs'] }, metric_name: 'score', metric_direction: 'minimize' as const,
@@ -243,6 +244,43 @@ function candidateAuditCommits(root: string, runId: string): string[] {
 }
 
 describe('controller real Git/SQLite outcomes', () => {
+  it('keeps production controller start on the legacy route without writing registration evidence', async () => {
+    const f = controllerFixture([{ stdout: '{"score":1}\n' }])
+    const controller = createCaseController(f)
+    try {
+      const ready = await controller.prepare()
+      const tracker = DurableTracker.open(ready.tracker)
+      expect(tracker.database.prepare('SELECT COUNT(*) AS count FROM run_registrations').get()).toEqual({ count: 0 })
+      expect(tracker.database.prepare("SELECT COUNT(*) AS count FROM transitions WHERE coalesce(intent_json, '') LIKE '%host-registration-v1%' OR coalesce(outcome_json, '') LIKE '%host-registration-v1%'").get()).toEqual({ count: 0 })
+      expect(String(tracker.getRun(ready.runId)?.['policy_json'])).not.toContain('registrationFingerprint')
+      tracker.close()
+    } finally {
+      await controller.dispose()
+      rmSync(f.root, { recursive: true, force: true })
+    }
+  })
+
+  it('keeps production terminal resume from classifying or replaying malformed registration evidence', async () => {
+    const f = controllerFixture([{ stdout: '{"score":1}\n' }])
+    try {
+      const first = await runControllerCase(f, { max_experiments: 1, target: 1 })
+      first.tracker.database.prepare(`INSERT INTO run_registrations (run_id, contract_generation, evaluator_id, registration_json, manifest_json, registration_fingerprint, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`).run(
+        first.ready.runId, EVALUATOR_CONTRACT_GENERATION, 'inactive-judge', '{malformed', '{}', '0'.repeat(64), new Date().toISOString(),
+      )
+      const seededRow = first.tracker.database.prepare('SELECT * FROM run_registrations WHERE run_id = ?').get(first.ready.runId)
+      const transitionCount = first.tracker.listTransitions(first.ready.runId).length
+      const evaluatorSpawns = f.subprocess.evaluatorSpawns
+      first.tracker.close()
+
+      const resumed = await createCaseController(f, { max_experiments: 1, target: 1 }, first.ready.runId).run()
+      expect(resumed).toEqual(first.result)
+      const tracker = DurableTracker.open(first.ready.tracker)
+      expect(tracker.database.prepare('SELECT * FROM run_registrations WHERE run_id = ?').get(first.ready.runId)).toEqual(seededRow)
+      expect(tracker.listTransitions(first.ready.runId)).toHaveLength(transitionCount)
+      expect(f.subprocess.evaluatorSpawns).toBe(evaluatorSpawns)
+      tracker.close()
+    } finally { rmSync(f.root, { recursive: true, force: true }) }
+  })
   it.each([
     ['minimize', 5, 5, 'target-reached'],
     ['maximize', 5, 5, 'target-reached'],

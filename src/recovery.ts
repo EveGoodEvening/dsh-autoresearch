@@ -6,7 +6,7 @@ import { GitBoundaryError, inspectRunGitState, validateCandidate, verifyCandidat
 import type { CandidateSnapshot, GitCommandOptions, RepositoryDiscovery, RunGitIdentity, RunGitInspection } from './git.js'
 import type { EvaluatorAttemptFacts, EvaluatorFailureCode } from './evaluator.js'
 import type { ArtifactRecord, DurableTracker, RecoveryState } from './tracker.js'
-import type { AttemptId, BestResult, BlockerEvidence, DurableRunPolicy, ExperimentId, FullCommitSha, RunDurableState, RunId } from './types.js'
+import type { AttemptId, BestResult, BlockerEvidence, DurableRegistrationIdentity, DurableRunPolicy, ExperimentId, FullCommitSha, RegistrationBlockEvidence, RunDurableState, RunId } from './types.js'
 import type { SQLOutputValue } from 'node:sqlite'
 
 export type RecoveryBlockCode = 'run-missing' | 'repository-mismatch' | 'start-commit-mismatch' | 'policy-mismatch' | 'provenance-mismatch' | 'lock-mismatch' | 'state-ambiguous' | 'commit-missing' | 'git-external-mutation' | 'protected-change' | 'artifact-incomplete' | 'attempt-uncertain' | 'decision-mismatch' | 'reconciliation-unauthorized'
@@ -33,6 +33,21 @@ type Row = Record<string, SQLOutputValue>
 type RecoveredAttemptResult = { readonly kind: 'measured'; readonly metric: number } | { readonly kind: 'failed'; readonly code: EvaluatorFailureCode; readonly message: string }
 class RecoveryEvidenceError extends Error {
   constructor(readonly code: RecoveryBlockCode, message: string) { super(message); this.name = 'RecoveryEvidenceError' }
+}
+export type DurableRegistrationClassification =
+  | { readonly kind: 'legacy'; readonly evidence: RegistrationBlockEvidence }
+  | { readonly kind: 'registered'; readonly identity: DurableRegistrationIdentity }
+  | { readonly kind: 'blocked'; readonly evidence: RegistrationBlockEvidence }
+
+/** Inert Chunk 01 inspection seam. Production recovery dispatch intentionally remains legacy-only. */
+export function classifyDurableRegistration(tracker: DurableTracker, runId: RunId): DurableRegistrationClassification {
+  try {
+    const identity = tracker.readRegistration(runId)
+    if (!identity) return { kind: 'legacy', evidence: { kind: 'legacy-run', code: 'legacy-contract', message: 'run contains only legacy raw policy/provenance evidence' } }
+    return { kind: 'registered', identity }
+  } catch (error) {
+    return { kind: 'blocked', evidence: { kind: 'registration-blocked', code: 'registration-corrupt', message: error instanceof Error ? error.message : 'durable evaluator registration is corrupt' } }
+  }
 }
 
 export async function reconcileRecovery(ctx: Context, request: RecoveryRequest): Promise<RecoveryDirective> {

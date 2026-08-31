@@ -6,6 +6,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { Worker } from 'node:worker_threads'
 import { afterEach, describe, expect, it } from 'vitest'
 import { DurableTracker, TRACKER_BUSY_TIMEOUT_MS, TRACKER_SCHEMA_VERSION, TrackerBlockedError, TrackerTransitionError } from '../src/tracker.ts'
+import { EVALUATOR_CONTRACT_GENERATION, normalizeEvaluatorRegistration, normalizeRegistrationManifest, registrationFingerprint, RegistrationPathOverlapError, serializeRegistrationJson, type EvaluatorRegistration } from '../src/types.ts'
 
 const roots: string[] = []
 const SHA = 'a'.repeat(40)
@@ -106,11 +107,30 @@ describe('durable SQLite tracker', () => {
     const malformedPath = fixturePath('malformed.sqlite'); const malformed = new DatabaseSync(malformedPath); malformed.exec(`CREATE TABLE schema_metadata (singleton INTEGER PRIMARY KEY, version INTEGER NOT NULL, created_at TEXT NOT NULL) STRICT; INSERT INTO schema_metadata VALUES (1, ${TRACKER_SCHEMA_VERSION}, 'now')`); malformed.close(); chmodSync(malformedPath, 0o600); expectBlocked(malformedPath, 'tracker-schema-invalid')
   })
 
+  it('migrates version seven registrations to monotonic presence without changing their rows', () => {
+    const path = fixturePath('registration-v7.sqlite')
+    const tracker = DurableTracker.open(path)
+    const registration: EvaluatorRegistration = { evaluatorId: 'judge', command: 'node', args: [], environment: {}, metricName: 'score', metricDirection: 'maximize', evaluatorFiles: [], dataset: { kind: 'none' } }
+    tracker.createRegisteredRun({ ...initial(), registration, manifest: {} })
+    tracker.close()
+    const versionSeven = new DatabaseSync(path)
+    versionSeven.exec('DROP TRIGGER run_registrations_presence_monotonic; UPDATE schema_metadata SET version = 7 WHERE singleton = 1')
+    versionSeven.close()
+    const migrated = DurableTracker.open(path)
+    expect(migrated.schemaVersion()).toBe(TRACKER_SCHEMA_VERSION)
+    expect(migrated.readRegistration('run-1')?.registration).toEqual(normalizeEvaluatorRegistration(registration))
+    expect(() => migrated.database.prepare('DELETE FROM run_registrations WHERE run_id = ?').run('run-1')).toThrow(/presence is monotonic/u)
+    migrated.close()
+  })
+
   it('rejects same-named ineffective replacements for every canonical trigger and index', () => {
     const triggerTables: Readonly<Record<string, string>> = {
       runs_immutable_identity: 'runs',
       experiments_immutable_lineage: 'experiments',
       attempts_immutable_intent: 'attempts',
+      attempts_immutable_outcome: 'attempts',
+      run_registrations_immutable: 'run_registrations',
+      run_registrations_presence_monotonic: 'run_registrations',
     }
     for (const [trigger, table] of Object.entries(triggerTables)) {
       const path = fixturePath(`${trigger}.sqlite`)
@@ -146,7 +166,7 @@ describe('durable SQLite tracker', () => {
     const definitions = canonical.prepare(`SELECT type, name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' AND sql IS NOT NULL ORDER BY CASE type WHEN 'table' THEN 0 WHEN 'index' THEN 1 ELSE 2 END, name`).all()
     canonical.close()
 
-    for (const table of ['schema_metadata', 'runs', 'experiments', 'attempts', 'artifacts', 'transitions', 'transition_artifacts', 'active_locks']) {
+    for (const table of ['schema_metadata', 'runs', 'experiments', 'attempts', 'artifacts', 'transitions', 'transition_artifacts', 'active_locks', 'run_registrations']) {
       const path = fixturePath(`${table}.sqlite`)
       const database = new DatabaseSync(path)
       for (const definition of definitions) {
@@ -336,6 +356,71 @@ describe('durable SQLite tracker', () => {
     expect(() => DurableTracker.open(join(publicRoot, 'tracker.sqlite'))).toThrow(/state root/)
     const path = fixturePath(); const tracker = DurableTracker.open(path); tracker.createRun(initial())
     expect(() => tracker.exportTsv('run-1', join(tmpdir(), 'outside.tsv'))).toThrow(/beneath state root/)
+    tracker.close()
+  })
+  it('uses exact UTF-16 code-unit ordering for registration normalization and fingerprinting', () => {
+    const registration: EvaluatorRegistration = {
+      evaluatorId: 'judge', command: 'node', args: ['score.mjs'], environment: { z: 'lower-last', A: 'upper-first', a: 'lower-first', Z: 'upper-last', _: 'underscore' },
+      metricName: 'score', metricDirection: 'maximize', evaluatorFiles: ['中.mjs', 'a.mjs', 'é.mjs', 'A.mjs', 'Ω.mjs', 'a.mjs'],
+      dataset: { kind: 'local', files: ['é.json', 'A.json', '中.json', 'a.json', 'Ω.json'] },
+    }
+    const manifest = {
+      'Ω.mjs': '1'.repeat(64), 'a.json': '2'.repeat(64), '中.json': '3'.repeat(64), 'A.mjs': '4'.repeat(64), 'é.json': '5'.repeat(64),
+      'a.mjs': '6'.repeat(64), 'Ω.json': '7'.repeat(64), 'A.json': '8'.repeat(64), '中.mjs': '9'.repeat(64), 'é.mjs': HASH,
+    }
+    const normalized = normalizeEvaluatorRegistration(registration)
+    expect(Object.keys(normalized.environment)).toEqual(['A', 'Z', '_', 'a', 'z'])
+    expect(normalized.evaluatorFiles).toEqual(['A.mjs', 'a.mjs', 'é.mjs', 'Ω.mjs', '中.mjs'])
+    expect(normalized.dataset).toEqual({ kind: 'local', files: ['A.json', 'a.json', 'é.json', 'Ω.json', '中.json'] })
+    expect(registrationFingerprint(registration, manifest)).toBe('4eb5f846ea4b2db6e9fe0f307d668144d9b19e4634736e6e7233cf3205a781fe')
+    expect(registrationFingerprint({ ...registration, environment: { _: 'underscore', z: 'lower-last', a: 'lower-first', Z: 'upper-last', A: 'upper-first' } }, Object.fromEntries(Object.entries(manifest).reverse()))).toBe('4eb5f846ea4b2db6e9fe0f307d668144d9b19e4634736e6e7233cf3205a781fe')
+  })
+
+  it('rejects evaluator and local-dataset path overlap during registration normalization', () => {
+    const registration: EvaluatorRegistration = {
+      evaluatorId: 'judge', command: 'node', args: [], environment: {}, metricName: 'score', metricDirection: 'maximize', evaluatorFiles: ['shared/input.json'], dataset: { kind: 'local', files: ['shared/input.json'] },
+    }
+    expect(() => normalizeEvaluatorRegistration(registration)).toThrow(RegistrationPathOverlapError)
+    expect(() => normalizeEvaluatorRegistration(registration)).toThrow('evaluatorFiles and dataset.files must not overlap: shared/input.json')
+  })
+
+  it('rejects non-canonical repository-relative registration and manifest paths', () => {
+    const registration: EvaluatorRegistration = {
+      evaluatorId: 'judge', command: 'node', args: [], environment: {}, metricName: 'score', metricDirection: 'maximize', evaluatorFiles: ['scripts/score.mjs'], dataset: { kind: 'local', files: ['data/train.json'] },
+    }
+    const adversarial = ['', '.', '/absolute', '\\server\\share', 'C:\\absolute', 'C:ambiguous', '../escape', 'dir/../escape', './alias', 'dir/./alias', 'dir//alias', 'dir/', 'dir\\alias']
+    for (const path of adversarial) {
+      expect(() => normalizeEvaluatorRegistration({ ...registration, cwd: path })).toThrow(/normalized|repository-relative|canonical|component/u)
+      expect(() => normalizeEvaluatorRegistration({ ...registration, evaluatorFiles: [path] })).toThrow(/normalized|repository-relative|canonical|component/u)
+      expect(() => normalizeEvaluatorRegistration({ ...registration, dataset: { kind: 'local', files: [path] } })).toThrow(/normalized|repository-relative|canonical|component/u)
+      expect(() => normalizeRegistrationManifest({ [path]: HASH })).toThrow(/normalized|repository-relative|canonical|component/u)
+    }
+    expect(() => normalizeEvaluatorRegistration({ ...registration, evaluatorFiles: ['shared/input.json'], dataset: { kind: 'local', files: ['shared/./input.json'] } })).toThrow(/component/u)
+    expect(() => registrationFingerprint(registration, { 'scripts/score.mjs': HASH, 'data/./train.json': HASH })).toThrow(/component/u)
+  })
+
+  it('atomically writes and strictly reads a complete inert registration identity', () => {
+    const tracker = DurableTracker.open(fixturePath())
+    const registration: EvaluatorRegistration = { evaluatorId: 'judge', command: 'node', args: ['score.mjs'], environment: {}, metricName: 'score', metricDirection: 'maximize', evaluatorFiles: ['scripts/score.mjs'], dataset: { kind: 'local', files: ['data/train.json'] } }
+    const identity = tracker.createRegisteredRun({ ...initial(), registration, manifest: { 'data/train.json': HASH, 'scripts/score.mjs': 'c'.repeat(64) } })
+    expect(identity.contractGeneration).toBe(EVALUATOR_CONTRACT_GENERATION)
+    expect(tracker.readRegistration('run-1')).toEqual(identity)
+    const row = tracker.database.prepare('SELECT registration_json, manifest_json FROM run_registrations WHERE run_id = ?').get('run-1')
+    expect(row).toEqual({ registration_json: serializeRegistrationJson(identity.registration), manifest_json: serializeRegistrationJson(identity.manifest) })
+    expect(() => tracker.database.prepare('DELETE FROM run_registrations WHERE run_id = ?').run('run-1')).toThrow(/presence is monotonic/u)
+    expect(tracker.readRegistration('run-1')).toEqual(identity)
+    tracker.database.exec("DROP TRIGGER run_registrations_immutable; UPDATE run_registrations SET registration_fingerprint = 'd' || substr(registration_fingerprint, 2)")
+    expect(() => tracker.readRegistration('run-1')).toThrow(/inconsistent/)
+    tracker.close()
+  })
+
+  it('rolls back the run row when atomic registration persistence fails', () => {
+    const tracker = DurableTracker.open(fixturePath())
+    tracker.database.exec("CREATE TEMP TRIGGER reject_registration BEFORE INSERT ON run_registrations BEGIN SELECT RAISE(ABORT, 'injected registration failure'); END")
+    const registration: EvaluatorRegistration = { evaluatorId: 'judge', command: 'node', args: [], environment: {}, metricName: 'score', metricDirection: 'maximize', evaluatorFiles: [], dataset: { kind: 'none' } }
+    expect(() => tracker.createRegisteredRun({ ...initial(), registration, manifest: {} })).toThrow()
+    expect(tracker.getRun('run-1')).toBeUndefined()
+    expect(tracker.database.prepare('SELECT COUNT(*) AS count FROM transitions').get()).toEqual({ count: 0 })
     tracker.close()
   })
 })
