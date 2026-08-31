@@ -209,6 +209,7 @@ describe('host-owned Git boundary', () => {
       acquireControllerClaim(f.tracker, f.identity.runId, 'claim-owner', 1_000, new Date('2026-01-01T00:00:00.000Z'), ownerProcess)
 
       expect(() => recoverTerminalRunLockUnderControllerClaim(f.tracker, f.identity.runId, attempted.ownerId, attempted.process)).toThrowError(expect.objectContaining({ code: 'run-controller-lost' }))
+      expect(f.tracker.recoveryState(f.identity.runId).activeLock).toBeDefined()
       expect(authority.prepare('SELECT 1 FROM active_locks WHERE run_id = ?').get(f.identity.runId)).toBeDefined()
       expect(authority.prepare('SELECT owner_id, owner_pid, owner_start_token FROM controller_claims WHERE run_id = ?').get(f.identity.runId)).toEqual({ owner_id: 'claim-owner', owner_pid: ownerProcess.pid, owner_start_token: ownerProcess.startToken })
       authority.close()

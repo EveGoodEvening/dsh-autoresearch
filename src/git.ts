@@ -374,7 +374,6 @@ export function recoverTerminalRunLock(tracker: DurableTracker, runId: string): 
 export function recoverTerminalRunLockUnderControllerClaim(tracker: DurableTracker, runId: string, ownerId: string, process: ControllerProcessIdentity): boolean {
   const recovery = tracker.recoveryState(runId)
   if (!['completed', 'baseline-blocked', 'blocked', 'round-failed', 'cancelled'].includes(String(recovery.run['state'])) || recovery.run['terminal_quiescent'] !== 1 || recovery.processDisposition !== 'quiescent') return false
-  const released = tracker.releaseActiveLock(runId)
   const repositoryId = String(recovery.run['repository_id']); const runTag = String(recovery.run['run_tag'])
   const authority = openLockAuthority(tracker, runId)
   try {
@@ -383,6 +382,7 @@ export function recoverTerminalRunLockUnderControllerClaim(tracker: DurableTrack
     if (!claim || claim['owner_id'] !== ownerId || claim['owner_pid'] !== process.pid || (claim['owner_start_token'] === null ? undefined : String(claim['owner_start_token'])) !== process.startToken) throw new GitBoundaryError('run-controller-lost', 'Controller instance no longer owns this run')
     const row = authority.prepare('SELECT repository_id, run_tag FROM active_locks WHERE run_id = ?').get(runId)
     if (row && (row['repository_id'] !== repositoryId || row['run_tag'] !== runTag)) throw new GitBoundaryError('run-lock-identity', 'Shared active lock identity differs from the durable run')
+    const released = tracker.releaseActiveLock(runId)
     const lock = authority.prepare('DELETE FROM active_locks WHERE run_id = ? AND repository_id = ? AND run_tag = ?').run(runId, repositoryId, runTag).changes
     authority.exec('COMMIT')
     return released || lock === 1
