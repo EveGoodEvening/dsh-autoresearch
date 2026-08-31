@@ -257,12 +257,15 @@ Chunks 01-03 are deliberately inert preparation. Until Chunk 04 lands, the regis
 - **Work:** Preserve `docs/plan/PLAN.md` and `docs/plan/CHECKLIST.md`; initialize every status unchecked; make this tracker the sole live remediation record.
 - **Depends on:** none.
 - **Exact verification:** The implementation commit changes only this file; every H row contains claim, existence, disposition, rationale, evidence, owner, dependencies, exact verification, and three unchecked statuses.
-- **Implementation commit:** `docs(plan): add handoff remediation checklist`
-- **Required tracker-accounting commit:** `docs(plan): record handoff chunk 00`; changes only this checklist and must land before Chunk 01 starts.
-- [ ] Implementation complete
-- [ ] Focused verification complete
-- [ ] Focused review complete
-- [ ] Tracker-accounting commit complete
+- **Implementation commit:** `e2d3e1ef8a7fb053afad0f8874621a34aa67d712` (`docs(plan): add handoff remediation checklist`).
+- **Focused verification:** Commit inspection confirms the implementation changed only `docs/plan/handoff-2026-0830-checklist.md`; H-01 through H-15 each contain claim, existence, disposition, rationale, evidence, owner, dependencies, exact verification, and three initially unchecked statuses.
+- **Focused review:** Clean; independent plan gates found no unresolved tracker-structure, scope, or accounting issue.
+- **Required tracker-accounting commit:** `docs(plan): record handoff chunk 00`; this checklist-only accounting change is ready to land before Chunk 01 starts. Its SHA remains external until the commit exists.
+- **Rollback:** Revert the tracker-only implementation and accounting commits before dependent work begins; no code, runtime state, or historical plan requires migration.
+- [x] Implementation complete
+- [x] Focused verification complete
+- [x] Focused review complete
+- [x] Tracker-accounting commit complete
 
 ### Chunk 01 — Prepare inert durable registration and manifest primitives
 
@@ -405,7 +408,7 @@ Fill each implementation row only after the fact exists. Rows 00-07 require the 
 
 | Chunk | Implementation commit | Focused verification evidence | Review result | Tracker-accounting commit | Rollback note |
 |---|---|---|---|---|---|
-| 00 | _unchecked_ | _unchecked_ | _unchecked_ | `docs(plan): record handoff chunk 00` — _unchecked_ | New tracker only; revert before dependent work if necessary. |
+| 00 | `e2d3e1ef8a7fb053afad0f8874621a34aa67d712` | Commit changed only this checklist; H-01..H-15 rows contain every required field and three initially unchecked statuses. | Clean; independent plan gates found no unresolved issue. | `docs(plan): record handoff chunk 00` — complete and ready to land; SHA external until committed. | Revert the tracker-only implementation and accounting commits before dependent work; no code, runtime state, or historical plan migration. |
 | 01 | _unchecked_ | _unchecked_ | _unchecked_ | `docs(plan): record handoff chunk 01` — _unchecked_ | Inert primitives only; revert before dependent preparation, with legacy/new schema discrimination intact. |
 | 02 | _unchecked_ | _unchecked_ | _unchecked_ | `docs(plan): record handoff chunk 02` — _unchecked_ | Inert helpers only; reverse before activation and preserve existing evaluator behavior. |
 | 03 | _unchecked_ | _unchecked_ | _unchecked_ | `docs(plan): record handoff chunk 03` — _unchecked_ | Inert registry/schema machinery only; reverse before activation without changing the registered legacy route. |
