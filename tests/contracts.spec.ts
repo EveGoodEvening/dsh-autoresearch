@@ -320,11 +320,13 @@ describe('configuration and policy normalization', () => {
     expect(decodeActivationToolInput(valid)).toEqual(valid)
   })
 
-  it('keeps the activation schema numeric and collection bounds in parity with the decoder', () => {
-    const schema = ACTIVATION_AUTORESEARCH_TOOL_SCHEMA.oneOf[0].properties
-    expect(schema.mutable_globs).toMatchObject({ required: true, minItems: 1, items: { type: 'string' } })
-    expect(schema.timeout_ms).toMatchObject({ type: 'number', minimum: 1, maximum: Number.MAX_SAFE_INTEGER, multipleOf: 1 })
-    expect(schema.max_experiments).toMatchObject({ type: 'number', minimum: 1, maximum: Number.MAX_SAFE_INTEGER, multipleOf: 1 })
+  it('authors only value-schema DSL keys while the strict decoder enforces numeric bounds', () => {
+    const schema = ACTIVATION_AUTORESEARCH_TOOL_SCHEMA
+    expect(schema.mutable_globs).toMatchObject({ required: true, items: { type: 'string' } })
+    expect(schema.timeout_ms).toEqual(expect.objectContaining({ type: 'number' }))
+    expect(schema.max_experiments).toEqual(expect.objectContaining({ type: 'number' }))
+    expect(Object.keys(schema.timeout_ms)).not.toEqual(expect.arrayContaining(['minimum', 'maximum', 'multipleOf']))
+    expect(Object.keys(schema.max_experiments)).not.toEqual(expect.arrayContaining(['minimum', 'maximum', 'multipleOf']))
     expect(schema.mode).toMatchObject({ enum: ['background', 'foreground'] })
   })
 
