@@ -371,6 +371,26 @@ export function recoverTerminalRunLock(tracker: DurableTracker, runId: string): 
   const released = tracker.releaseActiveLock(runId)
   return releaseTerminalAuthority(tracker, runId) || released
 }
+export function recoverTerminalRunLockUnderControllerClaim(tracker: DurableTracker, runId: string, ownerId: string, process: ControllerProcessIdentity): boolean {
+  const recovery = tracker.recoveryState(runId)
+  if (!['completed', 'baseline-blocked', 'blocked', 'round-failed', 'cancelled'].includes(String(recovery.run['state'])) || recovery.run['terminal_quiescent'] !== 1 || recovery.processDisposition !== 'quiescent') return false
+  const released = tracker.releaseActiveLock(runId)
+  const repositoryId = String(recovery.run['repository_id']); const runTag = String(recovery.run['run_tag'])
+  const authority = openLockAuthority(tracker, runId)
+  try {
+    authority.exec('BEGIN IMMEDIATE')
+    const claim = authority.prepare('SELECT owner_id, owner_pid, owner_start_token FROM controller_claims WHERE run_id = ?').get(runId)
+    if (!claim || claim['owner_id'] !== ownerId || claim['owner_pid'] !== process.pid || (claim['owner_start_token'] === null ? undefined : String(claim['owner_start_token'])) !== process.startToken) throw new GitBoundaryError('run-controller-lost', 'Controller instance no longer owns this run')
+    const row = authority.prepare('SELECT repository_id, run_tag FROM active_locks WHERE run_id = ?').get(runId)
+    if (row && (row['repository_id'] !== repositoryId || row['run_tag'] !== runTag)) throw new GitBoundaryError('run-lock-identity', 'Shared active lock identity differs from the durable run')
+    const lock = authority.prepare('DELETE FROM active_locks WHERE run_id = ? AND repository_id = ? AND run_tag = ?').run(runId, repositoryId, runTag).changes
+    authority.exec('COMMIT')
+    return released || lock === 1
+  } catch (error) {
+    try { authority.exec('ROLLBACK') } catch { /* preserve rollback failure */ }
+    throw error
+  } finally { authority.close() }
+}
 function openLockAuthority(tracker: DurableTracker, runId: string): DatabaseSync {
   const run = tracker.getRun(runId)
   if (!run) throw new GitBoundaryError('run-lock-identity', 'Shared lock authority requires a durable run')

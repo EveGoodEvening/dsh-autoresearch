@@ -7,7 +7,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { SubprocessHandle, SubprocessOutputReader, SubprocessOutcome, SubprocessSpawnSpec } from '@deepseek-ai/dsh-subprocess'
 import { DurableTracker } from '../src/tracker.ts'
-import { acquireControllerClaim, acquireRunLock, allocateRunWorktree, captureGitConfigBaseline, commitCandidate, deriveRegistrationManifestAtStartCommit, discoverRepository, durableGitIdentity, GitBoundaryError, heartbeatControllerClaim, inspectRunGitState, makeRunGitIdentity, prepareCandidateTree, reconcileAcceptedHead, reconcileRejectedHead, recoverTerminalRunLock, releaseControllerClaim, releaseTerminalRunLock, removeRunWorktree, resolveGitExecutable, runGit, snapshotCandidate, validateCandidate, validateFrozenCandidatePaths, verifyCandidateTree, verifyExactWorktree, type GitContext } from '../src/git.ts'
+import { acquireControllerClaim, acquireRunLock, allocateRunWorktree, captureGitConfigBaseline, commitCandidate, deriveRegistrationManifestAtStartCommit, discoverRepository, durableGitIdentity, GitBoundaryError, heartbeatControllerClaim, inspectRunGitState, makeRunGitIdentity, prepareCandidateTree, reconcileAcceptedHead, reconcileRejectedHead, recoverTerminalRunLock, recoverTerminalRunLockUnderControllerClaim, releaseControllerClaim, releaseTerminalRunLock, removeRunWorktree, resolveGitExecutable, runGit, snapshotCandidate, validateCandidate, validateFrozenCandidatePaths, verifyCandidateTree, verifyExactWorktree, type GitContext } from '../src/git.ts'
 
 const roots: string[] = []
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
@@ -180,6 +180,50 @@ describe('host-owned Git boundary', () => {
     authority.prepare('INSERT INTO active_locks (repository_id, run_tag, run_id, acquired_at) VALUES (?, ?, ?, ?)').run('wrong-repository', f.identity.runTag, f.identity.runId, new Date().toISOString())
     expect(() => recoverTerminalRunLock(f.tracker, f.identity.runId)).toThrowError(expect.objectContaining({ code: 'run-lock-identity' }))
     expect(authority.prepare('SELECT repository_id FROM active_locks WHERE run_id = ?').get(f.identity.runId)?.['repository_id']).toBe('wrong-repository')
+    authority.close()
+  })
+
+  it('recovers a stale terminal active lock under the exact controller claim without removing that claim', async () => {
+    const f = await createRun(fixture(), 'claimed-recovery', 'run-claimed-recovery')
+    const authority = new DatabaseSync(join(f.discovery.gitCommonDir, 'dsh-autoresearch-locks.sqlite'))
+    const processIdentity = { pid: 424_242, startToken: '10001' }
+    f.tracker.transitionRun(f.identity.runId, 'cancelled', { terminalReason: 'done', quiescent: true })
+    acquireControllerClaim(f.tracker, f.identity.runId, 'claim-owner', 1_000, new Date('2026-01-01T00:00:00.000Z'), processIdentity)
+
+    expect(recoverTerminalRunLockUnderControllerClaim(f.tracker, f.identity.runId, 'claim-owner', processIdentity)).toBe(true)
+    expect(authority.prepare('SELECT 1 FROM active_locks WHERE run_id = ?').get(f.identity.runId)).toBeUndefined()
+    expect(authority.prepare('SELECT owner_id, owner_pid, owner_start_token FROM controller_claims WHERE run_id = ?').get(f.identity.runId)).toEqual({ owner_id: 'claim-owner', owner_pid: processIdentity.pid, owner_start_token: processIdentity.startToken })
+    authority.close()
+  })
+
+  it('does not let a wrong controller owner, pid, or start token recover another controller claim', async () => {
+    for (const [caseName, attempted] of Object.entries({
+      owner: { ownerId: 'wrong-owner', process: { pid: 424_242, startToken: '10001' } },
+      pid: { ownerId: 'claim-owner', process: { pid: 424_243, startToken: '10001' } },
+      startToken: { ownerId: 'claim-owner', process: { pid: 424_242, startToken: '10002' } },
+    })) {
+      const f = await createRun(fixture(), `fenced-${caseName}`, `run-fenced-${caseName}`)
+      const authority = new DatabaseSync(join(f.discovery.gitCommonDir, 'dsh-autoresearch-locks.sqlite'))
+      const ownerProcess = { pid: 424_242, startToken: '10001' }
+      f.tracker.transitionRun(f.identity.runId, 'cancelled', { terminalReason: 'done', quiescent: true })
+      acquireControllerClaim(f.tracker, f.identity.runId, 'claim-owner', 1_000, new Date('2026-01-01T00:00:00.000Z'), ownerProcess)
+
+      expect(() => recoverTerminalRunLockUnderControllerClaim(f.tracker, f.identity.runId, attempted.ownerId, attempted.process)).toThrowError(expect.objectContaining({ code: 'run-controller-lost' }))
+      expect(authority.prepare('SELECT 1 FROM active_locks WHERE run_id = ?').get(f.identity.runId)).toBeDefined()
+      expect(authority.prepare('SELECT owner_id, owner_pid, owner_start_token FROM controller_claims WHERE run_id = ?').get(f.identity.runId)).toEqual({ owner_id: 'claim-owner', owner_pid: ownerProcess.pid, owner_start_token: ownerProcess.startToken })
+      authority.close()
+    }
+  })
+
+  it('keeps legacy terminal recovery behavior that removes both the stale active lock and controller claim', async () => {
+    const f = await createRun(fixture(), 'legacy-recovery', 'run-legacy-recovery')
+    const authority = new DatabaseSync(join(f.discovery.gitCommonDir, 'dsh-autoresearch-locks.sqlite'))
+    f.tracker.transitionRun(f.identity.runId, 'cancelled', { terminalReason: 'done', quiescent: true })
+    acquireControllerClaim(f.tracker, f.identity.runId, 'legacy-owner', 1_000, new Date('2026-01-01T00:00:00.000Z'), { pid: 424_242, startToken: '20001' })
+
+    expect(recoverTerminalRunLock(f.tracker, f.identity.runId)).toBe(true)
+    expect(authority.prepare('SELECT 1 FROM active_locks WHERE run_id = ?').get(f.identity.runId)).toBeUndefined()
+    expect(authority.prepare('SELECT 1 FROM controller_claims WHERE run_id = ?').get(f.identity.runId)).toBeUndefined()
     authority.close()
   })
 
