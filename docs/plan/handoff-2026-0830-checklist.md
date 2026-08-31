@@ -142,9 +142,9 @@ This is the durable remediation tracker for the findings in `docs/plan/handoff-2
 - **Owner chunk:** Chunk 05.
 - **Dependencies:** Chunk 04 activates the durable evaluator/dataset identity before tracker/history evolution.
 - **Exact verification:** In a two-candidate run, persist distinctive hypothesis/intended edits/summary and show them in the second handoff and after close/reopen/resume; false annotations must not change command, metric, Git validation, acceptance, target, or recovery; migrated older rows must render an honest unavailable/absent marker.
-- [ ] Implementation
-- [ ] Review
-- [ ] Accounting
+- [x] Implementation
+- [x] Review
+- [x] Accounting
 
 ### H-09 — Later children cannot inspect rejected changes or useful diagnostics
 
@@ -156,9 +156,9 @@ This is the durable remediation tracker for the findings in `docs/plan/handoff-2
 - **Owner chunk:** Chunk 05.
 - **Dependencies:** H-08 durable history storage and existing Git/artifact identity checks.
 - **Exact verification:** A rejected candidate followed by another proposal must yield bounded Host-observed paths/diff statistics after worktree restoration. Failure handoff uses only the enumerated structured vocabulary plus artifact available/pruned/unavailable markers, never raw log text, a full patch, an arbitrary path reader, or Bash. Persisted stdout/stderr artifacts remain provider-bounded and apply exact configured-value redaction across chunk boundaries, multiline values, and truncation; adversarial encoded/transformed/unknown values demonstrate the documented residual disclosure risk rather than supporting a secret-free claim. Summaries survive recovery and stay within `maxHandoffChars`.
-- [ ] Implementation
-- [ ] Review
-- [ ] Accounting
+- [x] Implementation
+- [x] Review
+- [x] Accounting
 
 ### H-10 — Cancelled replay fabricates `lastState: initializing`
 
@@ -383,12 +383,16 @@ For H-01, H-03, H-04, and H-05, this amendment adds Chunk 03R as an additional o
 - **Work:** Persist validated hypothesis/intended edits/implementation summary as explicitly untrusted annotation in the same transaction that creates its experiment after the trusted Git snapshot. Append Host-observed commit, changed paths, deterministic diff statistics, and allowlisted structured failure facts idempotently. Define recovery at report→snapshot→experiment→commit→evaluation→publication barriers with no orphan, duplicate, cross-candidate, or premature entry. Retain provider-bounded/redacted artifacts, expose no raw log/full patch/arbitrary reader/Bash, and render deterministic newest-first bounded handoff with honest unavailable/pruned markers. A schema migration does not make Chunk 04 legacy policies resumable.
 - **Depends on:** Chunk 04 and its tracker-accounting commit.
 - **Exact verification:** Focused tests and typecheck cover every named crash barrier, atomic annotation ownership, migration/reopen idempotence, structured vocabulary, redaction/truncation residual-risk cases, size caps, deterministic history/TSV, pruning, and non-authoritative false annotations.
-- **Implementation commit:** `feat(research): persist bounded experiment context`
-- **Required tracker-accounting commit:** `docs(plan): record handoff chunk 05`; changes only this checklist and must land before Chunk 06 starts.
-- [ ] Implementation complete
-- [ ] Focused verification complete
-- [ ] Focused review complete
-- [ ] Tracker-accounting commit complete
+- **Implementation commit:** `acf5875ebe6851c8de0501393cff3dfd3c141f04` (`feat(research): persist bounded experiment context`).
+- **Focused verification:** The focused suite passed 6 files with 256 tests passed; `pnpm run typecheck` passed. Coverage confirmed bounded explicitly untrusted hypothesis/intended-edits/implementation-summary annotations; Host-observed commit facts, changed paths, deterministic diff statistics, and allowlisted failure vocabulary; exact configured-secret redaction across chunk boundaries, multiline values, and truncation with the residual risk from encoded, transformed, or unknown secret values recorded rather than a universal secret-free claim; crash barriers and idempotence across report, snapshot, experiment, commit, evaluation, and publication; deterministic newest-first budgeted/truncated handoff; migrated, pruned, and unavailable TSV/history rendering; and continued exclusion of raw logs, full patches, Bash, and arbitrary readers.
+- **Focused review:** Clean after review-fix loops; three independent final reviewers found no unresolved issue across annotation bounds and non-authority, Host facts, changed-path/diff/failure summaries, redaction and residual disclosure risk, crash recovery/idempotence, handoff budgets/truncation, history migration/pruning, or child-tool restrictions.
+- **Authority boundary:** Research annotations remain explicitly untrusted and cannot affect evaluator command, metric, Git validation, acceptance, target, or recovery. Host-observed facts remain mechanically separate and authoritative only within their defined provenance; no secret-free, sandbox, or broader authority claim is added.
+- **Required tracker-accounting commit:** `docs(plan): record handoff chunk 05`; this checklist-only accounting change is complete and ready to land before Chunk 06 starts. Its SHA remains external until the commit exists.
+- **Rollback:** Before any Chunk 05-schema run exists, revert the implementation and checklist-only accounting commits together while retaining the Chunk 04 legacy/current guards. After any Chunk 05-schema run exists, roll forward while preserving migrated TSV/history, untrusted annotations, Host facts, bounded failure evidence, artifact availability/pruning state, exact-secret redaction semantics and documented residual risk, crash-barrier ownership, and idempotent recovery; never reinterpret annotations as authority or expose raw artifacts to proposal children.
+- [x] Implementation complete
+- [x] Focused verification complete
+- [x] Focused review complete
+- [x] Tracker-accounting commit complete
 
 ### Chunk 06 — Continue after quiescent candidate failures
 
