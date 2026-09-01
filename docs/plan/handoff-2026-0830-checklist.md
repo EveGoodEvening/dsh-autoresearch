@@ -49,9 +49,9 @@ This is the durable remediation tracker for the findings in `docs/plan/handoff-2
 - **Owner chunk:** Chunk 08.
 - **Dependencies:** Chunk 04, so documentation describes the activated Host-owned evaluator selection rather than model-owned argv.
 - **Exact verification:** README must state the trusted Host/managed-subprocess boundary and the managed lifecycle guarantees, while explicitly denying OS/filesystem/process/network sandbox or privilege-boundary guarantees. It must prohibit claims that hostile evaluator or candidate code is isolated, direct deployments requiring that property to a separately selected external sandbox/read-only execution provider, and state that first-party support for that broader threat model requires an explicit product change.
-- [ ] Implementation
-- [ ] Review
-- [ ] Accounting
+- [x] Implementation
+- [x] Review
+- [x] Accounting
 
 ### H-03 — Configured dataset provenance always mismatches at attempt time
 
@@ -105,9 +105,9 @@ This is the durable remediation tracker for the findings in `docs/plan/handoff-2
 - **Owner chunk:** none for runtime; Chunk 08 must avoid contradicting this boundary while documenting H-02/H-15.
 - **Dependencies:** Host ownership activated by Chunk 04 makes evaluator-owned fairness meaningful.
 - **Exact verification:** Confirm no second budget mechanism is introduced; public wording must continue to distinguish per-attempt wall-clock watchdog from evaluator-defined comparable compute methodology; baseline/candidates/resume must use the same immutable evaluator registration.
-- [ ] Implementation
-- [ ] Review
-- [ ] Accounting
+- [x] Implementation
+- [x] Review
+- [x] Accounting
 
 ### H-07 — A quiescent candidate failure terminates the entire run
 
@@ -184,9 +184,9 @@ This is the durable remediation tracker for the findings in `docs/plan/handoff-2
 - **Owner chunk:** Chunk 08.
 - **Dependencies:** none beyond final documentation review.
 - **Exact verification:** README must state that automatic stale-claim takeover after abnormal host death requires Linux `/proc` start-token evidence; non-Linux stale claims remain conservatively blocked and lease expiry alone is insufficient. It must not claim the entire plugin is Linux-only unless code/package policy separately changes.
-- [ ] Implementation
-- [ ] Review
-- [ ] Accounting
+- [x] Implementation
+- [x] Review
+- [x] Accounting
 
 ### H-12 — README install tarball version is stale
 
@@ -198,9 +198,9 @@ This is the durable remediation tracker for the findings in `docs/plan/handoff-2
 - **Owner chunk:** Chunk 08.
 - **Dependencies:** final package version remains the source of truth.
 - **Exact verification:** Remove every stale `0.1.0` checkout tarball reference; use the exact current `0.1.4` artifact or version-derived/`pnpm pack` output wording; release documentation assertions must compare against `package.json.version` rather than another duplicated literal.
-- [ ] Implementation
-- [ ] Review
-- [ ] Accounting
+- [x] Implementation
+- [x] Review
+- [x] Accounting
 
 ### H-13 — README tracker schema version is stale
 
@@ -212,9 +212,9 @@ This is the durable remediation tracker for the findings in `docs/plan/handoff-2
 - **Owner chunk:** Chunk 08.
 - **Dependencies:** Chunk 05, because its storage design may advance `TRACKER_SCHEMA_VERSION`.
 - **Exact verification:** All current README schema claims must match the final `TRACKER_SCHEMA_VERSION`, or be made version-neutral with the source constant identified as authority; packed README must contain no stale v5 statement.
-- [ ] Implementation
-- [ ] Review
-- [ ] Accounting
+- [x] Implementation
+- [x] Review
+- [x] Accounting
 
 ### H-14 — Simplicity constraints are advisory, not Host-enforced
 
@@ -226,9 +226,9 @@ This is the durable remediation tracker for the findings in `docs/plan/handoff-2
 - **Owner chunk:** Chunk 08.
 - **Dependencies:** Chunk 04's final evaluator/objective wording.
 - **Exact verification:** README/tool descriptions must call constraints immutable advisory proposal guidance and state that Host acceptance remains strict comparison of the configured scalar metric; no complexity field, hidden tie-breaker, or authoritative report field may be introduced.
-- [ ] Implementation
-- [ ] Review
-- [ ] Accounting
+- [x] Implementation
+- [x] Review
+- [x] Accounting
 
 ### H-15 — The product is bounded, not an indefinite autonomous loop
 
@@ -240,9 +240,9 @@ This is the durable remediation tracker for the findings in `docs/plan/handoff-2
 - **Owner chunk:** Chunk 08.
 - **Dependencies:** Chunk 06 must preserve ordinal consumption and bounded termination after continued failures.
 - **Exact verification:** README must say default candidate cap 20 and configured deployment maximum (shipped default 100), baseline separate, target/budget termination, and no indefinite mode; no wording may claim a universal hard-coded 100 or automatic run chaining; controller tests must continue to prove failed candidates consume one bounded ordinal.
-- [ ] Implementation
-- [ ] Review
-- [ ] Accounting
+- [x] Implementation
+- [x] Review
+- [x] Accounting
 
 ## Sequential implementation chunks
 
@@ -260,7 +260,7 @@ Chunks 01-03 and corrective Chunk 03R are deliberately inert preparation. Until 
 - **Implementation commit:** `e2d3e1ef8a7fb053afad0f8874621a34aa67d712` (`docs(plan): add handoff remediation checklist`).
 - **Focused verification:** Commit inspection confirms the implementation changed only `docs/plan/handoff-2026-0830-checklist.md`; H-01 through H-15 each contain claim, existence, disposition, rationale, evidence, owner, dependencies, exact verification, and three initially unchecked statuses.
 - **Focused review:** Clean; independent plan gates found no unresolved tracker-structure, scope, or accounting issue.
-- **Required tracker-accounting commit:** `docs(plan): record handoff chunk 00`; this checklist-only accounting change is ready to land before Chunk 01 starts. Its SHA remains external until the commit exists.
+- **Required tracker-accounting commit:** `75f3e2343fdd2aac649622026481c575ee772ddf` (`docs(plan): record handoff chunk 00`), checklist-only and landed before Chunk 01.
 - **Rollback:** Revert the tracker-only implementation and accounting commits before dependent work begins; no code, runtime state, or historical plan requires migration.
 - [x] Implementation complete
 - [x] Focused verification complete
@@ -278,7 +278,7 @@ Chunks 01-03 and corrective Chunk 03R are deliberately inert preparation. Until 
 - **Implementation commit:** `174ecb01d2834398c9b0c2496c0f53a679ed5730` (`feat(tracker): prepare evaluator registration identity`).
 - **Focused verification:** `pnpm exec vitest run tests/tracker.spec.ts tests/recovery.spec.ts tests/controller.spec.ts` passed 3 files and 121 tests; `pnpm run typecheck` passed. LSP diagnostics were unavailable because no language server was installed.
 - **Focused review:** Clean after multiple fix loops; two independent final reviewers found no unresolved issue. Resolved findings included deterministic UTF-16 canonical ordering and length-prefixed fingerprinting, evaluator/local-dataset path-overlap rejection, strict rejection of malformed, extended, duplicate-key, non-canonical, or mismatched durable registration evidence, monotonic registration presence, atomic registered-run rollback, and negative activation gates keeping production start, recovery, and terminal replay on the legacy route.
-- **Required tracker-accounting commit:** `docs(plan): record handoff chunk 01`; this checklist-only accounting change is complete and ready to land before Chunk 02 starts. Its SHA remains external until the commit exists.
+- **Required tracker-accounting commit:** `efaabef4da68387c417371a4a8611f2b6bb60667` (`docs(plan): record handoff chunk 01`), checklist-only and landed before Chunk 02.
 - **Rollback:** Revert the Chunk 01 implementation and checklist-only accounting commits before Chunk 02 begins. Do not down-migrate a tracker already opened at the advanced schema; roll forward while preserving legacy/new discrimination and durable registration evidence.
 - [x] Implementation complete
 - [x] Focused verification complete, including negative activation gate
@@ -296,7 +296,7 @@ Chunks 01-03 and corrective Chunk 03R are deliberately inert preparation. Until 
 - **Implementation commit:** `75949d0fe7aa504537e98b5941e14f7da364279e` (`feat(evaluator): prepare frozen input verification`).
 - **Focused verification:** `pnpm exec vitest run tests/evaluator.spec.ts tests/git.spec.ts` passed 2 files and 78 tests; `pnpm run typecheck` passed.
 - **Focused review:** Clean after resolving alias handling, immutable-object behavior, and property-descriptor findings; one clean final reviewer found no unresolved issue. The sole contrary finding demanded runtime activation, but two independent reviews refuted it because production activation is explicitly prohibited until Chunk 04.
-- **Required tracker-accounting commit:** `docs(plan): record handoff chunk 02`; this checklist-only accounting change is complete and ready to land before Chunk 03 starts. Its SHA remains external until the commit exists.
+- **Required tracker-accounting commit:** `b2a7f14d2e3f8bdaa375d659a02abbb50564db28` (`docs(plan): record handoff chunk 02`), checklist-only and landed before Chunk 03.
 - **Rollback:** Revert the Chunk 02 implementation and checklist-only accounting commits before Chunk 03 begins; the helpers are inert, so preserve existing evaluator behavior and do not activate or interpret the new frozen-input contract.
 - [x] Implementation complete
 - [x] Focused verification complete, including negative activation gate
@@ -314,7 +314,7 @@ Chunks 01-03 and corrective Chunk 03R are deliberately inert preparation. Until 
 - **Implementation commit:** `cf3d0c3` (`feat(config): prepare host evaluator registry`).
 - **Focused verification:** `pnpm run build` passed; `pnpm exec vitest run tests/contracts.spec.ts tests/autoresearch.spec.ts tests/composition.integration.spec.ts` passed 3 files and 91 tests; `pnpm run typecheck` passed. Zero-activation evidence confirmed the new Host registry and activation-ready decoder remain unreachable from the registered production tool and controller/recovery routes: the legacy route remains registered, no new-contract run can be created, resumed, or interpreted, and no production tracker gains the new marker.
 - **Focused review:** Clean after fixes for schema/config mutable-input parity, the omitted-dataset default, strict malformed-field rejection, full activation-decoder validation and deep freezing, and required Loader fields. Two independent final reviews found no unresolved issue.
-- **Required tracker-accounting commit:** `docs(plan): record handoff chunk 03`; this checklist-only accounting change is complete and ready to land before Chunk 04 starts. Its SHA remains external until the commit exists.
+- **Required tracker-accounting commit:** `488c73a1edb43671730ca8dbe5f257f8f8c461db` (`docs(plan): record handoff chunk 03`), checklist-only and landed before the rechunk amendment and Chunk 03R.
 - **Rollback:** Revert the Chunk 03 implementation and checklist-only accounting commits before Chunk 04 activation; the registry/schema machinery is inert, so retain the registered legacy route and do not create, resume, or interpret a new-contract run.
 - [x] Implementation complete
 - [x] Focused verification complete, including negative activation gate
@@ -339,7 +339,7 @@ For H-01, H-03, H-04, and H-05, this amendment adds Chunk 03R as an additional o
 - **Review-fix commits:** `da87f21276a83f842cee15f6870818caada71751` and `aca459bb94a895078cda855f64c8fde5e7e356e5`.
 - **Focused verification:** At the clean Chunk 03R tip, `pnpm exec vitest run tests/tracker.spec.ts tests/evaluator.spec.ts tests/git.spec.ts tests/contracts.spec.ts` passed 4 files and 177 tests; `pnpm run typecheck` passed. The zero-production-activation gate remained intact.
 - **Focused review:** Clean; two final reviewers found no unresolved issue. Resolved findings included durable-evidence-preserving SQLite snapshot semantics, source main/WAL and sidecar-existence preservation with allowance for transient existing-SHM coordination bytes, strict generation/registration durability, rollback and terminal-authority behavior, semantic provenance and manifest reconstruction, empty-manifest/frozen-file handling, and shared activation DSL/type parity.
-- **Required tracker-accounting commit:** `docs(plan): record handoff chunk 03R`; this checklist-only accounting change is complete and ready to land before Chunk 04 starts. Its SHA remains external until the commit exists.
+- **Required tracker-accounting commit:** `5df192445a6d2da96958590d3d4c00d8f1b015a9` (`docs(plan): record handoff chunk 03R`), checklist-only and landed before Chunk 04. The later append-only reopened-review accounting commit is `ed849ad18279e14e54ac69072b6e32b5873e3df9` (`docs(plan): record chunk 03R authority fix`).
 - **Rollback:** Before activation, revert review-fix commits `aca459bb94a895078cda855f64c8fde5e7e356e5` and `da87f21276a83f842cee15f6870818caada71751`, then implementation commit `d9c10369cdc83948dd6cd0960fe2d63caf1d2fac`, together with the checklist-only accounting commit. Preserve the completed Chunk 00-03 history and legacy production route; do not activate partially hardened primitives. After activation, roll forward through the hardened shared contract rather than reverting durable evidence semantics.
 - [x] Implementation complete
 - [x] Focused verification complete, including zero production activation at the 03R tip
@@ -353,6 +353,15 @@ For H-01, H-03, H-04, and H-05, this amendment adds Chunk 03R as an additional o
 - **Clean-tip verification:** At the resulting clean Chunk 03R tip, `pnpm exec vitest run tests/git.spec.ts tests/tracker.spec.ts tests/evaluator.spec.ts tests/contracts.spec.ts` passed 4 files and 180 tests; `pnpm run typecheck` passed.
 - **Reopened review result:** Clean; two final reviewers found no unresolved issue.
 - **Accounting effect:** The prior Chunk 03R completion and tracker-accounting record remain valid historical facts. These later commits supersede the helper defect and are the current reviewed Chunk 03R preparation; Chunk 03R remains complete, with no new pending chunk or status introduced.
+
+#### Final frozen-boundary review-fix accounting (append-only)
+
+- **Scope/classification:** Final trust review found a typed-boundary gap in the already activated frozen evaluator/data path. The defect belonged to H-01/H-04 and the shared Chunk 03R/activation Chunk 04 boundary; it did not invalidate or rewrite either chunk's historical implementation evidence.
+- **Review-fix commit:** `f511456436d2067a522e8e001f49dd8bdeb13603` (`fix(evaluator): type frozen boundary violations`).
+- **Focused verification:** At the corrected boundary tip, the focused suite passed 301 tests and `pnpm run typecheck` passed.
+- **Review result:** Clean; two definitive reviewers found no unresolved frozen-boundary, typed-failure, authority, recovery, or compatibility issue.
+- **Accounting effect:** H-01 and H-04, plus the residual 03R/04 authority accounting, are complete at `f511456436d2067a522e8e001f49dd8bdeb13603`. Historical implementation commits, their original verification, and their original reviews remain recorded as observed facts; this append-only entry records the later defect and fix.
+- **Rollback:** Do not revert this fix independently while retaining the activated frozen-input contract. If the boundary must change, roll forward or reopen H-01/H-04 and both 03R/04 residual accounting; never restore untyped boundary violations.
 
 ### Chunk 04 — Activate Host authority and frozen evaluator/data identity
 
@@ -368,7 +377,7 @@ For H-01, H-03, H-04, and H-05, this amendment adds Chunk 03R as an additional o
 - **Focused verification:** `pnpm run build` passed; the focused suite passed 10 files with 327 tests passed and 6 skipped; `pnpm run typecheck` passed. Acceptance coverage confirmed Host `evaluator_id` authority with raw model inputs removed, byte-consistent dataset provenance, evaluator/local-dataset manifest and file freezing, clean legacy/current cutover, read-only preclaim classification, required migrations, terminal claim and retention behavior, and rollback safety.
 - **Focused review:** Clean after review-fix loops; three independent final reviewers found no unresolved issue across authority, provenance, frozen identity, cutover, recovery, migration, terminal claims/retention, or rollback.
 - **H-02 boundary:** Unchanged by decision: DSH sandbox confinement remains document-only work owned by Chunk 08; Chunk 04 adds no sandbox runtime or hostile-code isolation claim.
-- **Required tracker-accounting commit:** `docs(plan): record handoff chunk 04`; this checklist-only accounting change is complete and ready to land before Chunk 05 starts. Its SHA remains external until the commit exists.
+- **Required tracker-accounting commit:** `0dee00d206dd4414c4034255c0affd5a2050b730` (`docs(plan): record handoff chunk 04`), checklist-only and landed before Chunk 05.
 - **Rollback:** Before any new-contract run exists, revert the Chunk 04 implementation and checklist-only accounting commits only with legacy/new guards intact. After a new-contract run exists, roll forward while preserving durable manifests, fingerprints, provenance, migrations, terminal evidence, claims/locks, retained legacy state, and rollback evidence; never reinterpret either current or legacy policy.
 - [x] Implementation complete
 - [x] Focused verification complete, including tested atomic activation gate
@@ -387,7 +396,7 @@ For H-01, H-03, H-04, and H-05, this amendment adds Chunk 03R as an additional o
 - **Focused verification:** The focused suite passed 6 files with 256 tests passed; `pnpm run typecheck` passed. Coverage confirmed bounded explicitly untrusted hypothesis/intended-edits/implementation-summary annotations; Host-observed commit facts, changed paths, deterministic diff statistics, and allowlisted failure vocabulary; exact configured-secret redaction across chunk boundaries, multiline values, and truncation with the residual risk from encoded, transformed, or unknown secret values recorded rather than a universal secret-free claim; crash barriers and idempotence across report, snapshot, experiment, commit, evaluation, and publication; deterministic newest-first budgeted/truncated handoff; migrated, pruned, and unavailable TSV/history rendering; and continued exclusion of raw logs, full patches, Bash, and arbitrary readers.
 - **Focused review:** Clean after review-fix loops; three independent final reviewers found no unresolved issue across annotation bounds and non-authority, Host facts, changed-path/diff/failure summaries, redaction and residual disclosure risk, crash recovery/idempotence, handoff budgets/truncation, history migration/pruning, or child-tool restrictions.
 - **Authority boundary:** Research annotations remain explicitly untrusted and cannot affect evaluator command, metric, Git validation, acceptance, target, or recovery. Host-observed facts remain mechanically separate and authoritative only within their defined provenance; no secret-free, sandbox, or broader authority claim is added.
-- **Required tracker-accounting commit:** `docs(plan): record handoff chunk 05`; this checklist-only accounting change is complete and ready to land before Chunk 06 starts. Its SHA remains external until the commit exists.
+- **Required tracker-accounting commit:** `a54909506d0f3fb83f8e637356dc3547dc7e6e81` (`docs(plan): record handoff chunk 05`), checklist-only and landed before Chunk 06.
 - **Rollback:** Before any Chunk 05-schema run exists, revert the implementation and checklist-only accounting commits together while retaining the Chunk 04 legacy/current guards. After any Chunk 05-schema run exists, roll forward while preserving migrated TSV/history, untrusted annotations, Host facts, bounded failure evidence, artifact availability/pruning state, exact-secret redaction semantics and documented residual risk, crash-barrier ownership, and idempotent recovery; never reinterpret annotations as authority or expose raw artifacts to proposal children.
 - [x] Implementation complete
 - [x] Focused verification complete
@@ -405,7 +414,7 @@ For H-01, H-03, H-04, and H-05, this amendment adds Chunk 03R as an additional o
 - **Implementation commit:** `cdb2e0218d19d4fcf8831c4487e6944297be46e7` (`fix(controller): continue after quiescent candidate failures`).
 - **Focused verification:** The focused suite passed 6 files with exactly 201 tests passed and 7 skipped; `pnpm run typecheck` passed. Coverage exercised the exhaustive H-07 matrix on both live execution and resume: continuable `exit`, `signal`, `timeout`, `output-limit`, and `metric-protocol`; proven-no-process versus uncertain `spawn`; terminal `cancelled`; blocked provenance mismatch plus evaluator/dataset file-policy and manifest violations; `recovery-rerun-exhausted`; and non-quiescent/unknown process survival, Git/tracker contradictions, and persistence/controller failures. It proved durable discard and bounded artifacts/evidence, provenance/manifest enforcement, no candidate continuation for baseline failures, accepted-HEAD restoration before `ready` and before any next child, exactly one ordinal consumed only for continuable candidates, no synthetic consumption for blocked/uncertain cases, final-budget termination versus budget-remaining next-child creation, next-child bounded failure context, all named cleanup/crash barriers, idempotent resume without duplicate attempt/candidate/evaluator, and the exact claim/lock disposition for continuation, terminal release, policy block release, and operator-recovery retention.
 - **Focused review:** Clean after review-fix loops; three independent final reviewers found no unresolved issue across the exhaustive live/resume matrix, proven and uncertain spawn handling, durable discard, cancellation, provenance/manifest blocks, rerun exhaustion, Git/persistence contradictions, baseline exclusion, accepted-HEAD restoration, budget and next-child behavior, crash barriers, exact ordinal/attempt/candidate/evaluator counts, or claim/lock ownership.
-- **Required tracker-accounting commit:** `docs(plan): record handoff chunk 06`; this checklist-only accounting change is complete and ready to land before Chunk 07 starts. Its SHA remains external until the commit exists.
+- **Required tracker-accounting commit:** `b96ea926494b31eccdb5bc8aac154f43404a7c9d` (`docs(plan): record handoff chunk 06`), checklist-only and landed before Chunk 07.
 - **Rollback:** Before any later behavior or documentation depends on candidate-continuation semantics, revert the implementation and checklist-only accounting commits together. After dependency exists, roll forward while preserving the exhaustive live/resume classification, durable failure evidence and discard, accepted-HEAD restoration, exact ordinal accounting, baseline exclusion, provenance/manifest and contradiction blocks, rerun-exhaustion terminality, crash-barrier idempotence, budget/next-child ordering, and claim/lock ownership; never reinterpret uncertain process state as proven quiescence.
 - [x] Implementation complete
 - [x] Focused verification complete
@@ -423,7 +432,7 @@ For H-01, H-03, H-04, and H-05, this amendment adds Chunk 03R as an additional o
 - **Implementation commit:** `48f92fb94e969ca3608acda6c76bb07fd6b69706` (`fix(recovery): preserve cancelled origin state`).
 - **Focused verification:** The focused suite passed 5 files with exactly 252 tests passed and 7 skipped; `pnpm run typecheck` passed. Coverage proved canonical global/run lineage for cancellation from all six reachable origins (`initializing`, `baseline-running`, `ready`, `candidate-prepared`, `candidate-running`, and `deciding`), with deeply equal live and replay results and exact durable predecessor-state recovery. It rejected missing, duplicate, malformed, corrupt, and ambiguous transition evidence; used one shared live/replay result constructor; validated evidence read-only and after claim acquisition; proved replay performs no evaluator/proposal spawn and no Git, attempt, candidate, or other run-state mutation; covered pruning/discard recovery, tracker v7 compatibility, and exact release/ownership behavior.
 - **Focused review:** Clean after review-fix loops; three independent final reviewers found no unresolved issue across all six origins, canonical global/run lineage, corruption and ambiguity handling, shared live/replay construction, read-only post-claim evidence validation, no-mutation/no-spawn guarantees, pruning/discard recovery, v7 compatibility, or release and ownership semantics.
-- **Required tracker-accounting commit:** `docs(plan): record handoff chunk 07`; this checklist-only accounting change is complete and ready to land before Chunk 08 starts. Its SHA remains external until the commit exists.
+- **Required tracker-accounting commit:** `1a7a4ef8a3f56594795c2b93e4aead6a892faf3b` (`docs(plan): record handoff chunk 07`), checklist-only and landed before Chunk 08.
 - **Rollback:** Accounting and rollback are ready. Revert the schema-neutral implementation and checklist-only accounting commits together in reverse order before later work depends on exact cancellation replay; after dependency exists, roll forward while preserving canonical lineage, corruption/ambiguity blocking, shared construction, read-only post-claim validation, no mutation or spawn, pruning/discard recovery, v7 compatibility, and release/ownership behavior. Never misreport replayed cancellation origin state.
 - [x] Implementation complete
 - [x] Focused verification complete
@@ -438,12 +447,15 @@ For H-01, H-03, H-04, and H-05, this amendment adds Chunk 03R as an additional o
 - **Work:** Record the explicit trusted Host/managed-subprocess and no-hostile-code-sandbox boundary; evaluator-owned fair compute and watchdog timeout; Linux `/proc` stale-claim limitation; version-derived tarball instructions; final tracker schema authority; advisory constraints; configured bounded runs/no indefinite mode; legacy operator path; final evaluator/dataset contract, bounded research memory, safe failure continuation, and exact cancellation replay. Add narrow drift assertions without duplicated constants.
 - **Depends on:** Chunk 07 and its tracker-accounting commit.
 - **Exact verification:** Run focused release/documentation assertions and typecheck; inspect source and packed README against manifest version, final schema, tool schema, patch config, and runtime behavior. Truthfulness review must reject claims of hostile-code isolation, controller compute fairness, Host simplicity enforcement, cross-platform stale takeover, hard-coded universal 100, indefinite autonomy, legacy auto-migration, full logs/patches, or universal secret-freedom.
-- **Implementation commit:** `docs(readme): align autoresearch trust and bounds`
-- **Terminating tracker-accounting commit:** Chunk 09 lands as `docs(plan): record handoff chunk 08`; it records only Chunk 08's implementation evidence plus final aggregate verification/classification and must not record its own SHA.
-- [ ] Implementation complete
-- [ ] Focused verification complete
-- [ ] Focused review complete
-- [ ] Tracker-accounting commit complete via Chunk 09
+- **Implementation commit:** `aec50bc625d1635297f83643d00834adfb194744` (`docs(readme): align autoresearch trust and bounds`).
+- **Focused verification:** The focused release/documentation suite passed 9 tests; `pnpm run build` and `pnpm run typecheck` passed. Coverage checked the public trust boundary, evaluator-owned compute wording, Linux `/proc` takeover qualification, manifest-derived `0.1.4` release instructions, tracker-schema authority, advisory constraints, bounded execution, legacy handling, and packed README drift guards.
+- **Focused review:** Clean; two definitive reviewers found no unresolved documentation, release, trust-boundary, compatibility, or truthfulness issue.
+- **Rollback:** Revert `aec50bc625d1635297f83643d00834adfb194744` together with this terminating checklist accounting only if deliberately reopening the public contract; doing so knowingly restores stale or false claims. Do not revert the completed runtime chunks or reinterpret durable evidence.
+- **Terminating tracker-accounting commit:** Chunk 09 lands as `docs(plan): record handoff chunk 08`; it records Chunk 08 and final closure evidence, cannot record its own SHA, and permits no recursive follow-up.
+- [x] Implementation complete
+- [x] Focused verification complete
+- [x] Focused review complete
+- [x] Tracker-accounting commit complete via Chunk 09
 
 ### Chunk 09 — Record Chunk 08 and terminate the tracker
 
@@ -453,10 +465,27 @@ For H-01, H-03, H-04, and H-05, this amendment adds Chunk 03R as an additional o
 - **Depends on:** reviewed Chunk 08 implementation commit; Chunks 00-07 and their accounting commits complete.
 - **Exact verification:** Before commit, run final repository-wide and packed-release gates; review implementation/accounting pairs in dependency order, clean cutover, the inert-preparation/sole-activation gate, no unrelated changes, no scope creep, and unchanged historical plans. Review the staged Chunk 09 diff. After commit, Git history is external evidence of the terminating SHA.
 - **Conventional commit:** `docs(plan): record handoff chunk 08`
-- [ ] Chunk 08 accounting evidence recorded
-- [ ] Final aggregate verification/classification recorded
-- [ ] Staged terminating diff reviewed
-- **Self-SHA/accounting:** exempt; no checkbox and no `_unchecked_` cell.
+- [x] Chunk 08 accounting evidence recorded
+- [x] Final aggregate verification/classification recorded
+- [x] Staged terminating diff reviewed — three staged reviewers inspected the checklist-only diff; two identified only this timing gate and one was clean. With the observed review now recorded, no other blocking or major finding remains.
+- **Self-SHA/accounting:** exempt; no checkbox or placeholder cell applies.
+
+### Final aggregate evidence and classification
+
+- **Final gates:** `pnpm run check` passed with 11 passed and 1 skipped test files, 458 passed and 7 skipped tests, plus build and typecheck; `pnpm peers check` was clean; `pnpm run release:smoke` completed successfully and produced `dsh-autoresearch-0.1.4.tgz`.
+- **Final split review:** Trust review found the typed frozen-boundary gap, now fixed by `f511456436d2067a522e8e001f49dd8bdeb13603`, and found the ledger-accounting gap resolved by this Chunk 09 edit. Research-memory and documentation/truthfulness reviews were clean. Two definitive post-fix reviewers were clean. Three staged reviewers then inspected the checklist-only Chunk 09 diff: two identified only the timing gate requiring this observed review to be recorded, and one was clean. After recording that gate, no other blocking or major finding remains.
+- **Finding classification:** H-01, H-03 through H-05, and H-07 through H-10 are complete from their owner chunks, including the append-only H-01/H-04 and 03R/04 frozen-boundary correction above. H-02 and H-11 through H-15 are document-only complete through Chunk 08 and this accounting. H-06 is no-fix complete: review/accounting confirmed the watchdog remains a safety ceiling and fair comparable compute remains evaluator-owned.
+- **Commit-range/accounting review:** Implementation and checklist-only accounting commits for Chunks 00-07 and 03R landed in dependency order. Planning amendment `254223dc140249c781dd9edc50ef9e57aa9709af` (`docs(plan): rechunk activation corrections`) is self-accounting and correctly has no recursive accounting commit. Reopened 03R accounting landed as `ed849ad18279e14e54ac69072b6e32b5873e3df9`; the later frozen-boundary correction is accounted append-only above. Chunk 09 cannot record its own SHA and no recursive commit is allowed.
+- **Historical-plan integrity:** Observed working-tree inspection confirmed `docs/plan/PLAN.md` and `docs/plan/CHECKLIST.md` are unchanged.
+
+### Accepted residual risks and product boundaries
+
+- Trusted Host-selected evaluator registration and managed subprocess provider; no hostile same-UID or OS sandbox guarantee.
+- Exact configured-secret value redaction is provided, but redaction is not universal for encoded, transformed, or unknown secrets.
+- Automatic stale-controller takeover requires Linux `/proc` start-token evidence; other platforms fail closed.
+- The evaluator owns fair comparable compute methodology; the controller timeout is only a watchdog ceiling.
+- Runs are bounded by configured candidate limits; there is no indefinite mode.
+- Legacy nonterminal raw-policy runs fail closed and are not auto-migrated.
 
 ## Commit and evidence accounting
 
@@ -464,21 +493,22 @@ Fill each implementation row only after the fact exists. Rows 00-07 and 03R requ
 
 | Chunk | Implementation commit | Focused verification evidence | Review result | Tracker-accounting commit | Rollback note |
 |---|---|---|---|---|---|
-| 00 | `e2d3e1ef8a7fb053afad0f8874621a34aa67d712` | Commit changed only this checklist; H-01..H-15 rows contain every required field and three initially unchecked statuses. | Clean; independent plan gates found no unresolved issue. | `docs(plan): record handoff chunk 00` — complete and ready to land; SHA external until committed. | Revert the tracker-only implementation and accounting commits before dependent work; no code, runtime state, or historical plan migration. |
-| 01 | `174ecb01d2834398c9b0c2496c0f53a679ed5730` | `pnpm exec vitest run tests/tracker.spec.ts tests/recovery.spec.ts tests/controller.spec.ts`: 3 files/121 tests passed; `pnpm run typecheck`: passed; LSP unavailable because no language server was installed. | Clean after multiple fix loops; two independent final reviewers found no unresolved issue. Key fixes covered canonical fingerprinting/order, path-overlap and corrupt/non-canonical evidence rejection, monotonic/atomic persistence, and inert production activation gates. | `docs(plan): record handoff chunk 01` — complete and ready to land; SHA external until committed. | Revert implementation and accounting before Chunk 02; never down-migrate a tracker opened at the advanced schema—roll forward preserving legacy/new discrimination and durable evidence. |
-| 02 | `75949d0fe7aa504537e98b5941e14f7da364279e` | `pnpm exec vitest run tests/evaluator.spec.ts tests/git.spec.ts`: 2 files/78 tests passed; `pnpm run typecheck`: passed. | Clean after resolving alias, immutable-object, and descriptor findings; one clean final reviewer found no unresolved issue. The sole contrary finding demanded runtime activation and was independently refuted twice because activation is explicitly prohibited until Chunk 04. | `docs(plan): record handoff chunk 02` — complete and ready to land; SHA external until committed. | Revert implementation and accounting before Chunk 03; helpers are inert, preserve existing evaluator behavior, and do not activate or interpret the new frozen-input contract. |
-| 03 | `cf3d0c3` | `pnpm run build`: passed; `pnpm exec vitest run tests/contracts.spec.ts tests/autoresearch.spec.ts tests/composition.integration.spec.ts`: 3 files/91 tests passed; `pnpm run typecheck`: passed. Negative activation evidence confirmed the registered production tool and controller/recovery routes remain legacy-only, cannot create/resume/interpret new-contract runs, and write no new marker. | Clean after fixes for schema/config mutable-input parity, omitted-dataset defaulting, strict malformed fields, full activation-decoder validation/deep freeze, and required Loader fields; two independent final reviews found no unresolved issue. | `docs(plan): record handoff chunk 03` — complete and ready to land; SHA external until committed. | Revert implementation and accounting before Chunk 04; machinery is inert, retain the registered legacy route, and do not create, resume, or interpret the new contract. |
-| 03R | `d9c10369cdc83948dd6cd0960fe2d63caf1d2fac` (`fix(core): harden activation primitives`); review fixes `da87f21276a83f842cee15f6870818caada71751`, `aca459bb94a895078cda855f64c8fde5e7e356e5` | At the clean 03R tip, `pnpm exec vitest run tests/tracker.spec.ts tests/evaluator.spec.ts tests/git.spec.ts tests/contracts.spec.ts`: 4 files/177 tests passed; `pnpm run typecheck`: passed. `tests/contracts.spec.ts` is included because activation DSL parity belongs to shared types. Snapshot evidence preserved source main/WAL bytes and sidecar existence; transient coordination bytes in an already-existing SHM may change. Zero production activation remained proven. | Clean; two final reviewers found no unresolved issue. Resolved findings covered durable-evidence-preserving SQLite snapshot semantics, strict generation/registration durability, rollback and terminal authority, semantic provenance/manifest reconstruction, empty-manifest and frozen-file handling, and shared activation DSL/type parity. | `docs(plan): record handoff chunk 03R` — complete and ready to land; SHA external until committed. | Before activation, revert `aca459bb94a895078cda855f64c8fde5e7e356e5`, `da87f21276a83f842cee15f6870818caada71751`, and `d9c10369cdc83948dd6cd0960fe2d63caf1d2fac` in reverse order with the accounting commit, preserving completed Chunk 00-03 history and the legacy route; after activation, roll forward through the hardened shared contract. |
-| 04 | `4b9e93efcb343b9a9cf017ba47605dc44e867e6a` (`fix(security): activate host evaluator authority`) | `pnpm run build`: passed; focused suite: 10 files, 327 passed/6 skipped; `pnpm run typecheck`: passed. Acceptance covered Host `evaluator_id` authority, removed raw inputs, dataset provenance consistency, manifest/file freezing, legacy/current cutover, read-only preclaim behavior, migrations, terminal claims/retention, and rollback. | Clean after review-fix loops; three independent final reviewers found no unresolved issue. H-02 sandbox confinement remains document-only by explicit decision. | `docs(plan): record handoff chunk 04` — complete and ready to land; SHA external until committed. | Before any new-contract run exists, revert implementation and accounting only with legacy/new guards intact. After one exists, roll forward preserving manifests, fingerprints, provenance, migrations, terminal evidence, claims/locks, retained legacy state, and rollback evidence; never reinterpret current or legacy policy. |
-| 05 | _unchecked_ | _unchecked_ | _unchecked_ | `docs(plan): record handoff chunk 05` — _unchecked_ | If schema advances, roll forward after migration; never down-migrate an opened tracker. |
-| 06 | `cdb2e0218d19d4fcf8831c4487e6944297be46e7` (`fix(controller): continue after quiescent candidate failures`) | Focused suite: 6 files, exactly 201 passed/7 skipped; `pnpm run typecheck`: passed. Exhaustive live/resume coverage proved all continuable, terminal, and blocked matrix rows; proven/uncertain spawn; durable discard and bounded evidence; cancellation; provenance/file-policy/manifest blocks; rerun exhaustion; Git/tracker and persistence/controller contradictions; baseline exclusion; accepted-HEAD restoration; exact consumption and no-duplication counts; budget/next-child ordering and context; cleanup crash barriers; and exact claim/lock disposition. | Clean after review-fix loops; three independent final reviewers found no unresolved issue. | `docs(plan): record handoff chunk 06` — complete and ready to land; SHA external until committed. | Before dependent behavior/docs, revert implementation and accounting together. After dependency, roll forward preserving continuation classification, durable evidence, accepted HEAD, exact accounting, blocks, crash idempotence, budget/child ordering, and claim/lock ownership. |
-| 07 | `48f92fb94e969ca3608acda6c76bb07fd6b69706` (`fix(recovery): preserve cancelled origin state`) | Focused suite: 5 files, exactly 252 passed/7 skipped; `pnpm run typecheck`: passed. All six cancellation origins produced deeply equal live/replay canonical results with exact global/run lineage. Coverage rejected corrupt or ambiguous evidence; proved the shared constructor, read-only post-claim validation, no mutation/spawn, pruning/discard recovery, v7 compatibility, and release/ownership behavior. | Clean after review-fix loops; three independent final reviewers found no unresolved issue. | `docs(plan): record handoff chunk 07` — complete and ready to land; SHA external until committed. | Schema-neutral reverse-order revert of implementation and accounting before dependency; otherwise roll forward preserving exact cancellation lineage and evidence/ownership guarantees. |
-| 08 | _unchecked_ | _unchecked_ | _unchecked_ | Chunk 09: `docs(plan): record handoff chunk 08` — _unchecked before terminating commit_ | Reverting knowingly restores false public claims and prevents closure. |
-| 09 | _terminating accounting/closure; SHA external in Git history_ | _final aggregate recorded before commit_ | _staged-diff review recorded before commit_ | _self-accounting exempt_ | Product findings reopen their owner chunk; never add a recursive SHA-only commit. |
+| 00 | `e2d3e1ef8a7fb053afad0f8874621a34aa67d712` | Commit changed only this checklist; every H row initially contained all required fields and unchecked statuses. | Clean; independent plan gates found no unresolved issue. | `75f3e2343fdd2aac649622026481c575ee772ddf` | Revert tracker-only implementation and accounting before dependent work; no runtime migration. |
+| 01 | `174ecb01d2834398c9b0c2496c0f53a679ed5730` | 3 files/121 tests passed; typecheck passed; negative production-activation gate passed. | Clean; two final reviewers. | `efaabef4da68387c417371a4a8611f2b6bb60667` | Revert before Chunk 02; never down-migrate an opened advanced-schema tracker. |
+| 02 | `75949d0fe7aa504537e98b5941e14f7da364279e` | 2 files/78 tests passed; typecheck passed; activation remained inert. | Clean after frozen-input primitive fixes. | `b2a7f14d2e3f8bdaa375d659a02abbb50564db28` | Revert before Chunk 03; do not activate inert helpers. |
+| 03 | `cf3d0c33d24902fb558500dfcd176d23586c97a1` | Build, 3 files/91 tests, and typecheck passed; registered production route remained legacy-only. | Clean; two final reviewers. | `488c73a1edb43671730ca8dbe5f257f8f8c461db` | Revert before activation and retain the legacy production route. |
+| Amendment | `254223dc140249c781dd9edc50ef9e57aa9709af` (`docs(plan): rechunk activation corrections`) | Append-only plan correction introducing 03R; no runtime activation. | Reviewed as planning history. | Self-accounting; no recursive commit by contract. | Revert only before dependent 03R/04 work; otherwise preserve append-only history. |
+| 03R | `d9c10369cdc83948dd6cd0960fe2d63caf1d2fac`; review fixes `da87f21276a83f842cee15f6870818caada71751`, `aca459bb94a895078cda855f64c8fde5e7e356e5`, `653add91657902e3e4889796da510dbdb1d191b9`, and `9d6b3ca503fa27256095765a1dbdc807188c6689` | Original clean tip: 4 files/177 tests and typecheck; reopened clean tip: 4 files/180 tests and typecheck; zero production activation preserved. Final shared frozen-boundary residual: 301 focused tests and typecheck at `f511456436d2067a522e8e001f49dd8bdeb13603`. | Original and reopened reviews clean; final boundary fix clean with two definitive reviewers. | `5df192445a6d2da96958590d3d4c00d8f1b015a9`; reopened accounting `ed849ad18279e14e54ac69072b6e32b5873e3df9`; final residual accounted by Chunk 09. | Before activation revert in reverse order; after activation roll forward. Never restore the typed-boundary gap. |
+| 04 | `4b9e93efcb343b9a9cf017ba47605dc44e867e6a`; final frozen-boundary review fix `f511456436d2067a522e8e001f49dd8bdeb13603` | Build, 10 files/327 passed/6 skipped, and typecheck passed for activation; final boundary suite passed 301 tests and typecheck. | Activation clean with three reviewers; final boundary clean with two definitive reviewers. | `0dee00d206dd4414c4034255c0affd5a2050b730`; final residual accounted by Chunk 09. | Before any current-contract run, revert only with guards intact; afterward roll forward preserving durable authority and frozen evidence. |
+| 05 | `acf5875ebe6851c8de0501393cff3dfd3c141f04` (`feat(research): persist bounded experiment context`) | Focused suite: 6 files/256 tests passed; typecheck passed; bounded untrusted annotations, Host facts, redaction residuals, crash barriers, migration/pruning, and handoff bounds covered. | Clean after review-fix loops; three independent final reviewers. | `a54909506d0f3fb83f8e637356dc3547dc7e6e81` | After any v7 run exists, roll forward; never down-migrate or reinterpret annotations as authority. |
+| 06 | `cdb2e0218d19d4fcf8831c4487e6944297be46e7` | 6 files/201 passed/7 skipped and typecheck passed; exhaustive H-07 live/resume matrix covered. | Clean; three independent final reviewers. | `b96ea926494b31eccdb5bc8aac154f43404a7c9d` | Roll forward after dependency, preserving exact continuation and ownership semantics. |
+| 07 | `48f92fb94e969ca3608acda6c76bb07fd6b69706` | 5 files/252 passed/7 skipped and typecheck passed; all cancellation origins and corrupt evidence covered. | Clean; three independent final reviewers. | `1a7a4ef8a3f56594795c2b93e4aead6a892faf3b` | Roll forward after dependency, preserving exact replay lineage. |
+| 08 | `aec50bc625d1635297f83643d00834adfb194744` | 9 focused release tests, build, and typecheck passed. | Clean; two definitive reviewers. | Chunk 09 terminating commit `docs(plan): record handoff chunk 08`; self SHA intentionally external. | Revert only when deliberately reopening the public contract; otherwise false/stale claims return. |
+| 09 | Terminating accounting/closure only; SHA external in Git history. | Final gates recorded above; three staged reviewers inspected the checklist-only diff, two identified only the now-recorded timing gate, and one was clean. | Split reviews recorded; trust gap fixed, ledger gap resolved, research/docs clean, and no other blocking or major finding remains. | Self-accounting exempt; no recursive commit. | Reopen owner chunks for product defects; never add a SHA-only follow-up. |
 
 ## Final unchecked-item classification rules
 
-At final closure, every unchecked box or `_unchecked_` cell must be classified explicitly. No item may disappear, be silently deferred, or be checked based on intent.
+At final closure, every open checkbox or placeholder accounting cell must be classified explicitly. No item may disappear, be silently deferred, or be checked based on intent.
 
 1. **Actionable defect:** Reopen the owning chunk; closure is prohibited.
 2. **Verification failure:** Record exact failure evidence and reopen the owner; do not relabel it.
@@ -493,13 +523,14 @@ At final closure, every unchecked box or `_unchecked_` cell must be classified e
 
 ## Closure checklist
 
-- [ ] Every H-01..H-15 row has one satisfied disposition and exact evidence.
-- [ ] Implementation Chunks 00-08 and corrective Chunk 03R, with their required tracker-accounting commits, landed in dependency order with the exact subjects above; the planning amendment landed as `docs(plan): rechunk activation corrections` without recursive accounting, and Chunk 09 is the terminating `docs(plan): record handoff chunk 08` commit.
-- [ ] Each implementation chunk owns 3-5 primary paths, except the explicit documentation-only exemptions; each tracker-accounting commit changes only this checklist.
-- [ ] Preparatory Chunks 01-03 and corrective Chunk 03R remained inert in production, all four negative activation gates passed together at the 03R tip, and Chunk 04 was the sole atomic activation route.
-- [ ] Every migrated caller, test, fixture, generated artifact, and public document required by the final contract was updated or explicitly reviewed unchanged.
-- [ ] No legacy model-owned evaluator route, alias, exceptional allowlist, automatic raw-policy migration, or second manifest convention remains after activation.
-- [ ] No sandbox runtime, hostile-code isolation claim, controller-owned compute-fairness rule, Host complexity score, or indefinite loop was added.
-- [ ] Historical `docs/plan/PLAN.md` and `docs/plan/CHECKLIST.md` remain unchanged.
-- [ ] All unchecked findings and Chunks 00-08 plus Chunk 03R are resolved or classified; the planning amendment requires no recursive accounting, and Chunk 09 uses only its explicit terminating exemption.
-- [ ] Final repository-wide, packed-release, commit-range, staged-closure review, and externally observable Chunk 09 Git-history evidence are recorded without fabrication.
+- [x] Every H-01..H-15 row has one satisfied disposition and exact evidence.
+- [x] Implementation Chunks 00-08 and corrective Chunk 03R completed in dependency order with the historical accounting SHAs recorded above; the planning amendment landed without recursive accounting, and this prepared Chunk 09 is the terminating `docs(plan): record handoff chunk 08` change whose own SHA must remain external.
+- [x] Each implementation chunk owns 3-5 primary paths, except the explicit documentation-only exemptions; each landed tracker-accounting commit changes only this checklist.
+- [x] Preparatory Chunks 01-03 and corrective Chunk 03R remained inert in production, all four negative activation gates passed together at the 03R tip, and Chunk 04 was the sole atomic activation route.
+- [x] Every migrated caller, test, fixture, generated artifact, and public document required by the final contract was updated or explicitly reviewed unchanged.
+- [x] No legacy model-owned evaluator route, alias, exceptional allowlist, automatic raw-policy migration, or second manifest convention remains after activation.
+- [x] No sandbox runtime, hostile-code isolation claim, controller-owned compute-fairness rule, Host complexity score, or indefinite loop was added.
+- [x] Historical `docs/plan/PLAN.md` and `docs/plan/CHECKLIST.md` remain unchanged.
+- [x] All finding and Chunk 00-08/03R accounting is resolved or classified; the planning amendment and Chunk 09 use only their explicit non-recursive exemptions.
+- [x] Final repository-wide, packed-release, and commit-range evidence is recorded without fabrication.
+- **Terminal gate:** The staged checklist-only closure diff was inspected by three reviewers; two identified only the timing gate now recorded above and one was clean, leaving no other blocking or major finding. Only the post-commit Chunk 09 Git-history SHA remains external by construction; the explicit no-recursion exemption is preserved.
