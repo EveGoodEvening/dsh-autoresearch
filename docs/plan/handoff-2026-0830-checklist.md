@@ -170,9 +170,9 @@ This is the durable remediation tracker for the findings in `docs/plan/handoff-2
 - **Owner chunk:** Chunk 07.
 - **Dependencies:** Chunk 06 lands first because both modify controller/recovery terminal handling.
 - **Exact verification:** Cancel from every reachable origin (`initializing`, `baseline-running`, `ready`, `candidate-prepared`, `candidate-running`, `deciding`); first and resumed canonical results must be deeply equal and `lastState` must equal the durable transition's `from_state`; missing, duplicate, or malformed cancellation evidence must block as ambiguous; replay must spawn no child/evaluator and mutate no Git/attempt state.
-- [ ] Implementation
-- [ ] Review
-- [ ] Accounting
+- [x] Implementation
+- [x] Review
+- [x] Accounting
 
 ### H-11 — Automatic stale-controller takeover depends on Linux `/proc`
 
@@ -420,12 +420,15 @@ For H-01, H-03, H-04, and H-05, this amendment adds Chunk 03R as an additional o
 - **Work:** Derive `lastState` from exactly one validated durable transition into `cancelled`; route live and resumed results through one canonical constructor; block missing/ambiguous evidence without a schema column or fallback literal.
 - **Depends on:** Chunk 06 and its tracker-accounting commit.
 - **Exact verification:** Focused tests and typecheck compare first/resumed deep equality for every reachable cancellation origin, reject corrupt evidence, and prove replay performs no evaluator, proposal, attempt, candidate, or Git mutation.
-- **Implementation commit:** `fix(recovery): preserve cancelled origin state`
-- **Required tracker-accounting commit:** `docs(plan): record handoff chunk 07`; changes only this checklist and must land before Chunk 08 starts.
-- [ ] Implementation complete
-- [ ] Focused verification complete
-- [ ] Focused review complete
-- [ ] Tracker-accounting commit complete
+- **Implementation commit:** `48f92fb94e969ca3608acda6c76bb07fd6b69706` (`fix(recovery): preserve cancelled origin state`).
+- **Focused verification:** The focused suite passed 5 files with exactly 252 tests passed and 7 skipped; `pnpm run typecheck` passed. Coverage proved canonical global/run lineage for cancellation from all six reachable origins (`initializing`, `baseline-running`, `ready`, `candidate-prepared`, `candidate-running`, and `deciding`), with deeply equal live and replay results and exact durable predecessor-state recovery. It rejected missing, duplicate, malformed, corrupt, and ambiguous transition evidence; used one shared live/replay result constructor; validated evidence read-only and after claim acquisition; proved replay performs no evaluator/proposal spawn and no Git, attempt, candidate, or other run-state mutation; covered pruning/discard recovery, tracker v7 compatibility, and exact release/ownership behavior.
+- **Focused review:** Clean after review-fix loops; three independent final reviewers found no unresolved issue across all six origins, canonical global/run lineage, corruption and ambiguity handling, shared live/replay construction, read-only post-claim evidence validation, no-mutation/no-spawn guarantees, pruning/discard recovery, v7 compatibility, or release and ownership semantics.
+- **Required tracker-accounting commit:** `docs(plan): record handoff chunk 07`; this checklist-only accounting change is complete and ready to land before Chunk 08 starts. Its SHA remains external until the commit exists.
+- **Rollback:** Accounting and rollback are ready. Revert the schema-neutral implementation and checklist-only accounting commits together in reverse order before later work depends on exact cancellation replay; after dependency exists, roll forward while preserving canonical lineage, corruption/ambiguity blocking, shared construction, read-only post-claim validation, no mutation or spawn, pruning/discard recovery, v7 compatibility, and release/ownership behavior. Never misreport replayed cancellation origin state.
+- [x] Implementation complete
+- [x] Focused verification complete
+- [x] Focused review complete
+- [x] Tracker-accounting commit complete
 
 ### Chunk 08 — Align public documentation and drift guards
 
@@ -469,7 +472,7 @@ Fill each implementation row only after the fact exists. Rows 00-07 and 03R requ
 | 04 | `4b9e93efcb343b9a9cf017ba47605dc44e867e6a` (`fix(security): activate host evaluator authority`) | `pnpm run build`: passed; focused suite: 10 files, 327 passed/6 skipped; `pnpm run typecheck`: passed. Acceptance covered Host `evaluator_id` authority, removed raw inputs, dataset provenance consistency, manifest/file freezing, legacy/current cutover, read-only preclaim behavior, migrations, terminal claims/retention, and rollback. | Clean after review-fix loops; three independent final reviewers found no unresolved issue. H-02 sandbox confinement remains document-only by explicit decision. | `docs(plan): record handoff chunk 04` — complete and ready to land; SHA external until committed. | Before any new-contract run exists, revert implementation and accounting only with legacy/new guards intact. After one exists, roll forward preserving manifests, fingerprints, provenance, migrations, terminal evidence, claims/locks, retained legacy state, and rollback evidence; never reinterpret current or legacy policy. |
 | 05 | _unchecked_ | _unchecked_ | _unchecked_ | `docs(plan): record handoff chunk 05` — _unchecked_ | If schema advances, roll forward after migration; never down-migrate an opened tracker. |
 | 06 | `cdb2e0218d19d4fcf8831c4487e6944297be46e7` (`fix(controller): continue after quiescent candidate failures`) | Focused suite: 6 files, exactly 201 passed/7 skipped; `pnpm run typecheck`: passed. Exhaustive live/resume coverage proved all continuable, terminal, and blocked matrix rows; proven/uncertain spawn; durable discard and bounded evidence; cancellation; provenance/file-policy/manifest blocks; rerun exhaustion; Git/tracker and persistence/controller contradictions; baseline exclusion; accepted-HEAD restoration; exact consumption and no-duplication counts; budget/next-child ordering and context; cleanup crash barriers; and exact claim/lock disposition. | Clean after review-fix loops; three independent final reviewers found no unresolved issue. | `docs(plan): record handoff chunk 06` — complete and ready to land; SHA external until committed. | Before dependent behavior/docs, revert implementation and accounting together. After dependency, roll forward preserving continuation classification, durable evidence, accepted HEAD, exact accounting, blocks, crash idempotence, budget/child ordering, and claim/lock ownership. |
-| 07 | _unchecked_ | _unchecked_ | _unchecked_ | `docs(plan): record handoff chunk 07` — _unchecked_ | Schema-neutral reverse-order revert; cancellation replay may regress and must not be misreported. |
+| 07 | `48f92fb94e969ca3608acda6c76bb07fd6b69706` (`fix(recovery): preserve cancelled origin state`) | Focused suite: 5 files, exactly 252 passed/7 skipped; `pnpm run typecheck`: passed. All six cancellation origins produced deeply equal live/replay canonical results with exact global/run lineage. Coverage rejected corrupt or ambiguous evidence; proved the shared constructor, read-only post-claim validation, no mutation/spawn, pruning/discard recovery, v7 compatibility, and release/ownership behavior. | Clean after review-fix loops; three independent final reviewers found no unresolved issue. | `docs(plan): record handoff chunk 07` — complete and ready to land; SHA external until committed. | Schema-neutral reverse-order revert of implementation and accounting before dependency; otherwise roll forward preserving exact cancellation lineage and evidence/ownership guarantees. |
 | 08 | _unchecked_ | _unchecked_ | _unchecked_ | Chunk 09: `docs(plan): record handoff chunk 08` — _unchecked before terminating commit_ | Reverting knowingly restores false public claims and prevents closure. |
 | 09 | _terminating accounting/closure; SHA external in Git history_ | _final aggregate recorded before commit_ | _staged-diff review recorded before commit_ | _self-accounting exempt_ | Product findings reopen their owner chunk; never add a recursive SHA-only commit. |
 
