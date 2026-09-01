@@ -5,9 +5,62 @@ import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { describe, expect, it } from 'vitest'
 import { assertExactTarballEntries, EXPECTED_TARBALL_ENTRIES, isolatedDshEnvironment, resolveReleaseSmokeOptions } from '../scripts/release-smoke.mjs'
+import { TRACKER_SCHEMA_VERSION } from '../src/tracker.ts'
+import { ACTIVATION_AUTORESEARCH_TOOL_SCHEMA } from '../src/types.ts'
 
 const root = join(import.meta.dirname, '..')
 const run = promisify(execFile)
+
+const VERSIONED_TARBALL = /\bdsh-autoresearch-\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?\.tgz\b/u
+const LITERAL_TRACKER_SCHEMA = /\bschema v\d+\b/iu
+const LEGACY_NONTERMINAL_RESUME_BLOCKER = 'legacy-evaluator-policy-unsupported'
+function affirmativeSentence(claim: string) {
+  return new RegExp(
+    String.raw`(?:^|[.!?]\s+)(?![^.!?\n]*\b(?:no|not|never|cannot|can't|doesn't|isn't|aren't|won't|without)\b)[^.!?\n]*(?:${claim})`,
+    'imu',
+  )
+}
+
+
+function assertBoundedControllerReadme(readme: string) {
+  for (const requiredQualification of [
+    'TRACKER_SCHEMA_VERSION in src/tracker.ts',
+    'artifact emitted by `pnpm pack` (the filename is derived from `package.json`)',
+    'does not provide hostile-code filesystem, process, same-UID, privilege, or network isolation',
+    'external sandbox or read-only execution provider',
+    'Linux `/proc/<pid>/stat` start-token evidence',
+    'on non-Linux systems a stale claim remains conservatively blocked; lease expiry alone is not proof that its owner died',
+    'Comparable compute methodology belongs to the trusted evaluator and remains identical through the frozen registration',
+    'Strict improvement of the configured scalar metric against the current best',
+    'They are not a Host-enforced simplicity criterion, complexity field, authoritative report field, or acceptance tie-breaker',
+    'Configured deployment maximum candidate cap (the shipped default, not a universal code constant)',
+    'not full logs or patches',
+    'Only exact configured secret values are redacted',
+    'never automatically converted or reinterpreted as satisfying the current Host-registration contract',
+    'Ordinary SQLite tracker schema migrations may still occur during retention or other writable maintenance; those migrations do not create an evaluator registration or grant resume authority',
+    'There is no indefinite mode or automatic run chaining',
+    'permits the next bounded candidate',
+    'exact pre-cancellation run state (`lastState`)',
+  ]) expect(readme).toContain(requiredQualification)
+
+  for (const forbiddenPositiveClaim of [
+    affirmativeSentence(String.raw`(?:provides?|guarantees?) hostile-code (?:filesystem, process, same-UID, privilege, or network )?isolation`),
+    affirmativeSentence(String.raw`(?:controller|plugin) (?:enforces?|guarantees?) (?:an? )?(?:exact )?fair-compute budget`),
+    affirmativeSentence(String.raw`(?:complexity|simplicity) (?:score )?(?:is|as) (?:an? )?(?:acceptance )?tie-breaker`),
+    affirmativeSentence(String.raw`lease expiry (?:proves|establishes|is) (?:that )?(?:the )?owner (?:has )?died`),
+    affirmativeSentence(String.raw`automatic takeover[^.\n]*non-Linux`),
+    affirmativeSentence(String.raw`research memory (?:includes?|contains?|receives?) full logs (?:and|or) patches`),
+    affirmativeSentence(String.raw`(?:(?:all|every) secrets? (?:are|is) redacted|secret-free)`),
+    affirmativeSentence(String.raw`(?:universal|hard-coded) (?:maximum |candidate )?(?:cap (?:of )?)?100`),
+    affirmativeSentence(String.raw`legacy runs? (?:are |is )?automatically (?:converted|reinterpreted) (?:as|into|under) (?:the )?(?:current )?Host-registration contract`),
+    affirmativeSentence(String.raw`automatically chains? runs? indefinitely`),
+  ]) expect(readme).not.toMatch(forbiddenPositiveClaim)
+
+  expect(readme).not.toMatch(LITERAL_TRACKER_SCHEMA)
+  expect(readme).not.toMatch(VERSIONED_TARBALL)
+  expect(readme).toContain(`fails closed with \`${LEGACY_NONTERMINAL_RESUME_BLOCKER}\``)
+  expect(readme).not.toContain('never auto-migrated')
+}
 
 describe('release and consumer contract', () => {
   it('publishes explicit ESM exports, peers, and files without local runtime paths', async () => {
@@ -59,7 +112,7 @@ describe('release and consumer contract', () => {
       const evidence = JSON.parse(stdout)
       expect(evidence).toMatchObject({
         ok: true,
-        prepareBarrier: { ok: true, prepared: { trackerExists: true, runExists: true, runState: 'initializing', experiments: 0, localLocks: 0, sharedLocks: 0, worktreeExists: false, refs: [], evaluatorMarkerExists: false }, afterRun: { evaluatorMarkerExists: true } },
+        prepareBarrier: { ok: true, prepared: { trackerExists: true, runExists: true, runState: 'initializing', experiments: 0, attempts: 0, localLocks: 1, sharedLocks: 1, worktreeExists: true, refs: [expect.stringMatching(/^refs\/autoresearch\/runs\/[0-9a-f-]+\/accepted$/)], evaluatorMarkerExists: false }, afterRun: { evaluatorMarkerExists: true }, afterDispose: { worktreeExists: true, authorityLocks: 0, controllerClaims: 0 } },
         accepted: { ok: true, strictDecision: 'accept', terminalBeforeLockRelease: true, agentDisposed: true, tsv: { equalBytes: true, firstSha256: expect.stringMatching(/^[0-9a-f]{64}$/), secondSha256: expect.stringMatching(/^[0-9a-f]{64}$/), temporaryFiles: [], lowerLayerAtomicFaultTest: expect.stringContaining('publishes deterministic run-scoped TSV atomically') } },
         tie: { ok: true, strictDecision: 'reject', terminalBeforeLockRelease: true, agentDisposed: true },
         rejected: { ok: true, strictDecision: 'reject', terminalBeforeLockRelease: true, agentDisposed: true },
@@ -84,24 +137,46 @@ describe('release and consumer contract', () => {
     ]))
   })
 
-  it('ships current controller documentation and stable opt-in patch defaults', async () => {
+  it('ships truthful bounded-controller documentation from source authorities', async () => {
     const [readme, patch, license] = await Promise.all([
       readFile(join(root, 'README.md'), 'utf8'),
       readFile(join(root, 'cordis.patch.yml'), 'utf8'),
       readFile(join(root, 'LICENSE'), 'utf8'),
     ])
+
     expect(readme).toContain('AutoresearchRunController')
     expect(readme).toContain('dsh plugin --profile <name> add dsh-autoresearch')
     expect(readme).toContain('dsh --profile <name> --dump-config')
     expect(readme).toContain('DeepSeek Harness `0.1.1-rc.2`')
     expect(readme).toContain('Web `standard` Agent preset')
+    assertBoundedControllerReadme(readme)
+    expect(TRACKER_SCHEMA_VERSION).toBeGreaterThan(0)
+    for (const parameter of Object.keys(ACTIVATION_AUTORESEARCH_TOOL_SCHEMA)) expect(readme).toContain(`\`${parameter}\``)
+    for (const removedAuthority of ['evaluation', 'metric_name', 'metric_direction', 'provenance', 'environment', 'exceptional_allowlists']) expect(ACTIVATION_AUTORESEARCH_TOOL_SCHEMA).not.toHaveProperty(removedAuthority)
     expect(readme).not.toContain('ctx.workflowEngine')
     expect(readme).not.toContain('ctx.subagents')
     expect(patch).toContain('id: autoresearch')
     expect(patch).toContain('name: dsh-autoresearch')
     expect(patch).toContain('defaultMaxExperiments: 20')
+    expect(patch).toContain('maxExperiments: 100')
     expect(license).toContain('MIT License')
   })
+
+  it('packs the same version-neutral README contract', async () => {
+    const work = await mkdtemp(join(tmpdir(), 'autoresearch-packed-readme-'))
+    try {
+      const { stdout } = await run('pnpm', ['pack', '--silent', '--pack-destination', work], { cwd: root })
+      const packed = stdout.trim().split(/\r?\n/u).at(-1)
+      expect(packed).toBeTruthy()
+      const tarball = packed!.startsWith('/') ? packed! : join(work, packed!)
+      const { stdout: packedReadme } = await run('tar', ['-xOf', tarball, 'package/README.md'])
+      const checkoutReadme = await readFile(join(root, 'README.md'), 'utf8')
+      expect(packedReadme).toBe(checkoutReadme)
+      assertBoundedControllerReadme(packedReadme)
+    } finally {
+      await rm(work, { recursive: true, force: true })
+    }
+  }, 20_000)
 
   it('derives the canonical release tarball while preserving explicit overrides', () => {
     const manifest = { name: '@deepseek-ai/dsh-autoresearch', version: '1.2.3' }

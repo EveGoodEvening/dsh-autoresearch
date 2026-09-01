@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
-import { access, mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
+import { access, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
@@ -135,7 +135,7 @@ function inspect(trackerPath: string, runId: string) {
 const evidence: Record<string, unknown> = { installedRoot }
 
 releaseDescribe('packed release scenarios', () => {
-  it('observes the installed controller prepare barrier before any autoresearch mutation', async () => {
+  it('observes activated prepare before mutation and disposal releasing authority while retaining the configured terminal worktree', async () => {
     const harness = await composeHarness()
     const cwd = await repository(harness.root, 'prepare-barrier')
     const owner = await parent(harness.ctx, cwd)
@@ -144,38 +144,75 @@ releaseDescribe('packed release scenarios', () => {
     const { AutoresearchRunController } = await import(installedModule('controller'))
     const { resolveConfig } = await import(installedModule('config'))
     const args = request(cwd, 'release accepted candidate')
-    args.evaluation = {
+    const evaluatorRegistration = {
+      id: 'judge',
       command: process.execPath,
       args: ['-e', `const fs=require('node:fs');fs.appendFileSync(process.argv[1],'spawned\\n');const score=Number(fs.readFileSync('score.txt','utf8'));process.stdout.write(JSON.stringify({score})+'\\n')`, marker],
+      metricName: 'score',
+      metricDirection: 'minimize' as const,
+      metricParserVersion: 'final-line-json-v1' as const,
+      evaluatorFiles: [],
     }
-    const controller = new AutoresearchRunController(harness.ctx, {
-      config: resolveConfig({ terminationGraceMs: 5_000 }), input: args, parent: owner.agent, signal: new AbortController().signal,
+    const config = resolveConfig({ terminationGraceMs: 5_000, evaluatorRegistrations: [evaluatorRegistration] })
+    expect(config.evaluatorRegistry.resolve('judge')).toEqual({
+      evaluatorId: 'judge',
+      command: process.execPath,
+      args: evaluatorRegistration.args,
+      environment: {},
+      metricName: 'score',
+      metricDirection: 'minimize',
+      evaluatorFiles: [],
+      dataset: { kind: 'none' },
+      metricParserVersion: 'final-line-json-v1',
     })
+    const controller = new AutoresearchRunController(harness.ctx, {
+      config, input: args, parent: owner.agent, signal: new AbortController().signal,
+    })
+    let disposed = false
     try {
       const prepared = await controller.prepare()
       const preparedDb = new DatabaseSync(prepared.tracker, { readOnly: true })
       const run = preparedDb.prepare('SELECT run_id,state FROM runs WHERE run_id=?').get(prepared.runId) as Record<string, unknown>
       const experiments = Number(preparedDb.prepare('SELECT COUNT(*) n FROM experiments WHERE run_id=?').get(prepared.runId)?.n)
+      const attempts = Number(preparedDb.prepare('SELECT COUNT(*) n FROM attempts WHERE run_id=?').get(prepared.runId)?.n)
       const localLocks = Number(preparedDb.prepare('SELECT COUNT(*) n FROM active_locks WHERE run_id=? AND released_at IS NULL').get(prepared.runId)?.n)
       preparedDb.close()
+      const acceptedRef = `refs/autoresearch/runs/${prepared.runId}/accepted`
       const refs = git(cwd, ['for-each-ref', '--format=%(refname)', `refs/autoresearch/runs/${prepared.runId}/`]).split('\n').filter(Boolean)
-      const authority = new DatabaseSync(join(git(cwd, ['rev-parse', '--path-format=absolute', '--git-common-dir']), 'dsh-autoresearch-locks.sqlite'), { readOnly: true })
+      const authorityPath = join(git(cwd, ['rev-parse', '--path-format=absolute', '--git-common-dir']), 'dsh-autoresearch-locks.sqlite')
+      const authority = new DatabaseSync(authorityPath, { readOnly: true })
       const sharedLocks = Number(authority.prepare('SELECT COUNT(*) n FROM active_locks WHERE run_id=?').get(prepared.runId)?.n)
       authority.close()
       const preparedObservation = {
         trackerExists: await pathExists(prepared.tracker), runExists: run.run_id === prepared.runId, runState: run.state,
-        experiments, localLocks, sharedLocks, worktreeExists: await pathExists(prepared.worktree), refs, evaluatorMarkerExists: await pathExists(marker), caller: snapshot(cwd),
+        experiments, attempts, localLocks, sharedLocks, worktreeExists: await pathExists(prepared.worktree), refs, evaluatorMarkerExists: await pathExists(marker), caller: snapshot(cwd),
       }
-      expect(preparedObservation).toEqual({ trackerExists: true, runExists: true, runState: 'initializing', experiments: 0, localLocks: 0, sharedLocks: 0, worktreeExists: false, refs: [], evaluatorMarkerExists: false, caller: before })
+      expect(preparedObservation).toEqual({ trackerExists: true, runExists: true, runState: 'initializing', experiments: 0, attempts: 0, localLocks: 1, sharedLocks: 1, worktreeExists: true, refs: [acceptedRef], evaluatorMarkerExists: false, caller: before })
 
       const completed = await controller.run()
       expect(completed.status).toBe('budget-limited')
       expect(await pathExists(marker)).toBe(true)
-      evidence.prepareBarrier = { ok: true, prepared: preparedObservation, afterRun: { status: completed.status, evaluatorMarkerExists: true } }
-    } finally {
       await controller.dispose()
-      await owner.dispose()
-      await harness.dispose().catch(() => undefined)
+      disposed = true
+      const disposedAuthority = new DatabaseSync(authorityPath, { readOnly: true })
+      const afterDispose = {
+        worktreeExists: await pathExists(prepared.worktree),
+        authorityLocks: Number(disposedAuthority.prepare('SELECT COUNT(*) n FROM active_locks WHERE run_id=?').get(prepared.runId)?.n),
+        controllerClaims: Number(disposedAuthority.prepare('SELECT COUNT(*) n FROM controller_claims WHERE run_id=?').get(prepared.runId)?.n),
+      }
+      disposedAuthority.close()
+      expect(afterDispose).toEqual({ worktreeExists: true, authorityLocks: 0, controllerClaims: 0 })
+      evidence.prepareBarrier = { ok: true, prepared: preparedObservation, afterRun: { status: completed.status, evaluatorMarkerExists: true }, afterDispose: { ...afterDispose, retention: 'retained-by-default-configuration' } }
+    } finally {
+      try {
+        if (!disposed) await controller.dispose()
+      } finally {
+        try { await owner.dispose() } finally {
+          try { await rm(cwd, { recursive: true, force: true }) } finally {
+            await harness.dispose().catch(() => undefined)
+          }
+        }
+      }
     }
   }, 45_000)
 
@@ -228,7 +265,7 @@ releaseDescribe('packed release scenarios', () => {
           const temporaryFiles = (await readdir(exportDirectory)).filter(name => name.startsWith(`${run.runId}.tsv.`) && name.endsWith('.tmp'))
           expect(second).toEqual(first)
           expect(firstHash).toBe(secondHash)
-          expect(ordinals).toEqual([...ordinals].sort((left, right) => left - right))
+          expect(ordinals).toEqual([...ordinals].sort((left, right) => right - left))
           expect(lines).toHaveLength(durable.experiments.length + 1)
           expect(first.toString('utf8')).toContain(candidate)
           expect(temporaryFiles).toEqual([])
