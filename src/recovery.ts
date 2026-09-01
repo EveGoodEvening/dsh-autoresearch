@@ -9,9 +9,9 @@ import { DurableTracker, type ArtifactRecord, type RecoveryState } from './track
 import type { AttemptId, BestResult, BlockerEvidence, DurableRunPolicy, ExperimentId, FullCommitSha, RegistrationBlockEvidence, RunDurableState, RunId } from './types.js'
 import type { SQLOutputValue } from 'node:sqlite'
 
-export type RecoveryBlockCode = 'run-missing' | 'repository-mismatch' | 'start-commit-mismatch' | 'policy-mismatch' | 'provenance-mismatch' | 'lock-mismatch' | 'state-ambiguous' | 'commit-missing' | 'git-external-mutation' | 'protected-change' | 'artifact-incomplete' | 'attempt-uncertain' | 'decision-mismatch' | 'reconciliation-unauthorized'
+export type RecoveryBlockCode = 'run-missing' | 'repository-mismatch' | 'start-commit-mismatch' | 'policy-mismatch' | 'provenance-mismatch' | 'lock-mismatch' | 'state-ambiguous' | 'commit-missing' | 'git-external-mutation' | 'protected-change' | 'artifact-incomplete' | 'attempt-uncertain' | 'decision-mismatch' | 'reconciliation-unauthorized' | 'recovery-rerun-exhausted'
 export interface RecoveredExperiment { readonly experimentId: ExperimentId; readonly ordinal: number; readonly kind: 'baseline' | 'candidate'; readonly parentCommit: FullCommitSha; readonly candidateCommit?: FullCommitSha }
-export type RecoveredEvaluation = { readonly kind: 'measured'; readonly attemptId: AttemptId; readonly metric: number; readonly provenanceSha256: string; readonly exit: EvaluatorAttemptFacts; readonly artifacts: readonly ArtifactRecord[] } | { readonly kind: 'failed'; readonly attemptId: AttemptId; readonly code: EvaluatorFailureCode; readonly message: string; readonly provenanceSha256: string; readonly exit: EvaluatorAttemptFacts; readonly artifacts: readonly ArtifactRecord[] }
+export type RecoveredEvaluation = ({ readonly kind: 'measured'; readonly attemptId: AttemptId; readonly metric: number; readonly provenanceSha256: string; readonly exit: EvaluatorAttemptFacts; readonly artifacts: readonly ArtifactRecord[] } | { readonly kind: 'failed'; readonly attemptId: AttemptId; readonly code: EvaluatorFailureCode; readonly message: string; readonly provenanceSha256: string; readonly exit: EvaluatorAttemptFacts; readonly artifacts: readonly ArtifactRecord[] }) & { readonly policyViolation?: { readonly code: 'provenance-mismatch'; readonly message: string } }
 export interface RecoveryRequest { readonly tracker: DurableTracker; readonly runId: RunId; readonly discovery: RepositoryDiscovery; readonly identity: RunGitIdentity; readonly policy: DurableRunPolicy; readonly policySha256: string; readonly provenanceSha256: string; readonly registration?: DurableRegistrationIdentity; readonly gitExecutable: string; readonly gitOptions: Omit<GitCommandOptions, 'cwd' | 'signal'>; readonly signal: AbortSignal }
 export type RecoveryDirective =
   | { readonly kind: 'initialize'; readonly runId: RunId; readonly startCommit: FullCommitSha; readonly reuseLock: boolean }
@@ -20,14 +20,15 @@ export type RecoveryDirective =
   | { readonly kind: 'commit-candidate'; readonly runId: RunId; readonly experiment: RecoveredExperiment; readonly snapshot: CandidateSnapshot; readonly validatedPaths: readonly string[] }
   | { readonly kind: 'evaluate'; readonly runId: RunId; readonly experiment: RecoveredExperiment; readonly commit: FullCommitSha; readonly createExperiment: boolean; readonly attemptOrdinal: number; readonly rerun: boolean }
   | { readonly kind: 'finalize-evaluation'; readonly runId: RunId; readonly experiment: RecoveredExperiment; readonly evaluation: RecoveredEvaluation }
-  | { readonly kind: 'reconcile-candidate'; readonly runId: RunId; readonly experiment: RecoveredExperiment; readonly candidateCommit: FullCommitSha; readonly expectedAcceptedCommit: FullCommitSha; readonly outcome: ({ readonly kind: 'accept' | 'reject'; readonly metric: number } | { readonly kind: 'cleanup'; readonly terminalExperimentState: 'crashed' | 'timed-out' | 'policy-violation' | 'cancelled' }) }
+  | { readonly kind: 'reconcile-candidate'; readonly runId: RunId; readonly experiment: RecoveredExperiment; readonly candidateCommit: FullCommitSha; readonly expectedAcceptedCommit: FullCommitSha; readonly outcome: ({ readonly kind: 'accept' | 'reject'; readonly metric: number } | { readonly kind: 'continue-failure'; readonly terminalExperimentState: 'crashed' | 'timed-out'; readonly code: 'spawn' | 'exit' | 'signal' | 'timeout' | 'output-limit' | 'metric-protocol' } | { readonly kind: 'terminal-block'; readonly code: 'provenance-mismatch' | 'recovery-rerun-exhausted'; readonly message: string } | { readonly kind: 'cancel'; readonly terminalExperimentState: 'cancelled' }) }
   | { readonly kind: 'blocked'; readonly runId: RunId; readonly code: RecoveryBlockCode; readonly evidence: readonly BlockerEvidence[]; readonly lock: 'retain' | 'release-after-persist' }
   | { readonly kind: 'terminal'; readonly runId: RunId; readonly state: 'completed' | 'baseline-blocked' | 'blocked' | 'round-failed' | 'cancelled'; readonly lock: 'release' | 'retain' | 'already-released'; readonly artifacts: readonly ArtifactRecord[] }
 
 const SHA = /^[0-9a-f]{40}$/u
 const HASH = /^[0-9a-f]{64}$/u
 const TERMINAL: Readonly<Record<RunDurableState, boolean>> = { initializing: false, 'baseline-running': false, ready: false, 'candidate-prepared': false, 'candidate-running': false, deciding: false, completed: true, 'baseline-blocked': true, blocked: true, 'round-failed': true, cancelled: true }
-const FAILURE_CODES: Readonly<Record<string, true>> = { spawn: true, timeout: true, cancelled: true, exit: true, signal: true, 'output-limit': true, 'metric-protocol': true }
+const FAILURE_CODES: Readonly<Record<EvaluatorFailureCode, true>> = { spawn: true, timeout: true, cancelled: true, exit: true, signal: true, 'output-limit': true, 'metric-protocol': true }
+const CONTINUABLE_FAILURE_CODES: Readonly<Record<Exclude<EvaluatorFailureCode, 'cancelled' | 'spawn'>, true>> = { timeout: true, exit: true, signal: true, 'output-limit': true, 'metric-protocol': true }
 
 type Row = Record<string, SQLOutputValue>
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === 'object' && value !== null && !Array.isArray(value) }
@@ -171,11 +172,21 @@ function evaluationDirective(request: RecoveryRequest, experiment: RecoveredExpe
 
 function reconstructEvaluation(request: RecoveryRequest, experiment: RecoveredExperiment, attempt: Row, allowPruned = false): RecoveredEvaluation | undefined {
   if (!attempt['exited_at']) return undefined
-  const artifacts = request.tracker.database.prepare('SELECT * FROM artifacts WHERE run_id = ? AND experiment_id = ? AND attempt_id = ? ORDER BY kind').all(request.runId, experiment.experimentId, text(attempt['attempt_id'])) as Row[]
+  const attemptId = text(attempt['attempt_id'])
+  const exit = decodeExit(attempt)
+  const provenanceSha256 = spawnProvenance(attempt)
+  if (provenanceSha256 !== request.provenanceSha256) throw new RecoveryEvidenceError('provenance-mismatch', 'attempt spawn provenance differs from the durable run provenance')
+  const result = decodeAttemptResult(attempt, attemptId)
+  if (experiment.kind === 'candidate' && result.kind === 'failed' && result.code === 'spawn' && exit.providerPid === undefined && exit.spawnedAt === undefined && exit.processTreeQuiescent) {
+    request.tracker.discardProvenNoProcessCandidateArtifacts(attemptId)
+    const remaining = request.tracker.database.prepare('SELECT 1 FROM artifacts WHERE run_id = ? AND experiment_id = ? AND attempt_id = ? LIMIT 1').get(request.runId, experiment.experimentId, attemptId)
+    if (remaining) throw new RecoveryEvidenceError('artifact-incomplete', 'proven-no-process candidate spawn failure retained evaluator artifacts')
+    return { ...result, attemptId, provenanceSha256, exit, artifacts: [] }
+  }
+  const artifacts = request.tracker.database.prepare('SELECT * FROM artifacts WHERE run_id = ? AND experiment_id = ? AND attempt_id = ? ORDER BY kind').all(request.runId, experiment.experimentId, attemptId) as Row[]
   if (artifacts.length === 0) throw new RecoveryEvidenceError('artifact-incomplete', 'completed evaluator attempt has no durable artifacts')
   if (artifacts.length !== 2 || artifacts.map(row => text(row['kind'])).sort().join(',') !== 'stderr,stdout') throw new RecoveryEvidenceError('artifact-incomplete', 'durable attempt artifacts must contain exactly one stdout and one stderr artifact')
   const decoded: ArtifactRecord[] = []
-  const attemptId = text(attempt['attempt_id'])
   for (const row of artifacts) {
     const kind = text(row['kind'])
     if (text(row['artifact_id']) !== `${attemptId}-${kind}` || text(row['run_id']) !== request.runId || text(row['experiment_id']) !== experiment.experimentId || text(row['attempt_id']) !== attemptId) throw new RecoveryEvidenceError('artifact-incomplete', `artifact ${kind} has noncanonical attempt-scoped identity`)
@@ -194,15 +205,12 @@ function reconstructEvaluation(request: RecoveryRequest, experiment: RecoveredEx
     if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata) || Object.keys(metadata).length !== 1 || typeof (metadata as Record<string, unknown>).truncated !== 'boolean') throw new RecoveryEvidenceError('artifact-incomplete', `artifact ${kind} has noncanonical truncation metadata`)
     decoded.push({ artifactId: `${attemptId}-${kind}`, runId: request.runId, experimentId: experiment.experimentId, attemptId, kind, location, sizeBytes, sha256, owner: 'evaluator', retention, metadata })
   }
-  const exit = decodeExit(attempt)
-  const provenanceSha256 = spawnProvenance(attempt)
-  if (provenanceSha256 !== request.provenanceSha256) throw new RecoveryEvidenceError('provenance-mismatch', 'attempt spawn provenance differs from the durable run provenance')
-  const result = decodeAttemptResult(attempt, attemptId)
-  if (result.kind === 'failed') return { ...result, attemptId, provenanceSha256, exit, artifacts: decoded }
+  const policyViolation = frozenMismatchAuthority(request.tracker, experiment.experimentId, attemptId, attempt)
+  if (result.kind === 'failed') return { ...result, attemptId, provenanceSha256, exit, artifacts: decoded, ...(policyViolation ? { policyViolation } : {}) }
   const stdout = decoded.find(item => item.kind === 'stdout')!
   if (Boolean((stdout.metadata as Record<string, unknown>).truncated)) throw new RecoveryEvidenceError('state-ambiguous', `measured attempt ${attemptId} has truncated authoritative stdout`)
   if (!exit.processTreeQuiescent || exit.timedOut || exit.cancelled || exit.signal !== null || exit.exitCode !== 0) throw new RecoveryEvidenceError('state-ambiguous', `measured attempt ${attemptId} conflicts with its durable exit facts`)
-  return { ...result, attemptId, provenanceSha256, exit, artifacts: decoded }
+  return { ...result, attemptId, provenanceSha256, exit, artifacts: decoded, ...(policyViolation ? { policyViolation } : {}) }
 }
 
 function baselineSettlement(request: RecoveryRequest, experiment: RecoveredExperiment, row: Row): RecoveryDirective {
@@ -211,6 +219,7 @@ function baselineSettlement(request: RecoveryRequest, experiment: RecoveredExper
   const state = text(row['state'])
   const metric = number(row['metric'])
   if (state === 'accepted' && metric !== undefined && evaluation.kind === 'measured' && evaluation.metric === metric) return { kind: 'settle-baseline', runId: request.runId, experiment, outcome: { kind: 'accept', metric } }
+  if (state === 'policy-violation' && text(row['failure_code']) === 'provenance-mismatch' && evaluation.policyViolation?.code === 'provenance-mismatch') return { kind: 'settle-baseline', runId: request.runId, experiment, outcome: { kind: 'fail', state, code: 'provenance-mismatch', message: text(row['failure_message']) || evaluation.policyViolation.message, quiescent: evaluation.exit.processTreeQuiescent } }
   const terminal = terminalExperimentState(row)
   if (!terminal || evaluation.kind !== 'failed') return blocked(request, 'state-ambiguous', 'terminal baseline does not match its durable evaluator outcome', 'retain')
   return { kind: 'settle-baseline', runId: request.runId, experiment, outcome: { kind: 'fail', state: terminal, code: evaluation.code, message: evaluation.message, quiescent: evaluation.exit.processTreeQuiescent } }
@@ -233,25 +242,54 @@ function decidingDirective(request: RecoveryRequest, run: Row, experiment: Recov
     return blocked(request, 'attempt-uncertain', message, 'retain')
   }
   const durableMetric = number(row['metric'])
-  const recoveryRerunExhausted = text(row['failure_code']) === 'recovery-rerun-exhausted'
-  if ((isExperimentTerminal(text(row['state'])) || durableMetric !== undefined) && !recoveryRerunExhausted) {
+  const failureCode = row['failure_code'] === null ? undefined : text(row['failure_code'])
+  if (isExperimentTerminal(text(row['state'])) || durableMetric !== undefined) {
+    if (failureCode === 'recovery-rerun-exhausted') {
+      if (!experiment.candidateCommit) return blocked(request, 'commit-missing', 'deciding candidate has no candidate commit', 'retain')
+      const best = decodeBest(run)
+      if (!best) return blocked(request, 'state-ambiguous', 'deciding run has no prior best', 'retain')
+      return { kind: 'reconcile-candidate', runId: request.runId, experiment, candidateCommit: experiment.candidateCommit, expectedAcceptedCommit: best.commit, outcome: { kind: 'terminal-block', code: failureCode, message: 'canonical evaluator measurement recovery reruns are exhausted' } }
+    }
     const evaluation = terminalEvaluation(request, experiment, row)
     if (evaluation instanceof RecoveryEvidenceError) return blocked(request, evaluation.code, evaluation.message, 'retain')
+    if (failureCode === 'provenance-mismatch') {
+      if (evaluation.policyViolation?.code !== 'provenance-mismatch') return blocked(request, 'state-ambiguous', 'candidate provenance mismatch lacks durable post-outcome policy authority', 'retain')
+      if (!experiment.candidateCommit) return blocked(request, 'commit-missing', 'deciding candidate has no candidate commit', 'retain')
+      const best = decodeBest(run)
+      if (!best) return blocked(request, 'state-ambiguous', 'deciding run has no prior best', 'retain')
+      return { kind: 'reconcile-candidate', runId: request.runId, experiment, candidateCommit: experiment.candidateCommit, expectedAcceptedCommit: best.commit, outcome: { kind: 'terminal-block', code: failureCode, message: text(row['failure_message']) || evaluation.policyViolation.message } }
+    }
     if (durableMetric !== undefined && (evaluation.kind !== 'measured' || evaluation.metric !== durableMetric)) return blocked(request, 'state-ambiguous', 'candidate metric does not match its durable evaluator outcome', 'retain')
     if (durableMetric === undefined && evaluation.kind !== 'failed') return blocked(request, 'state-ambiguous', 'terminal candidate failure does not match its durable evaluator outcome', 'retain')
+    if (evaluation.kind === 'failed') {
+      if (!experiment.candidateCommit) return blocked(request, 'commit-missing', 'deciding candidate has no candidate commit', 'retain')
+      const best = decodeBest(run)
+      if (!best) return blocked(request, 'state-ambiguous', 'deciding run has no prior best', 'retain')
+      const terminal = terminalExperimentState(row)
+      if (!terminal) return blocked(request, 'state-ambiguous', 'failed candidate is not durably terminal', 'retain')
+      if (evaluation.code === 'cancelled' && terminal === 'cancelled') return { kind: 'reconcile-candidate', runId: request.runId, experiment, candidateCommit: experiment.candidateCommit, expectedAcceptedCommit: best.commit, outcome: { kind: 'cancel', terminalExperimentState: terminal } }
+      if (!isContinuableCandidateFailure(evaluation)) return blocked(request, 'attempt-uncertain', evaluation.code === 'spawn' ? 'spawn failure does not prove that no evaluator process was created' : `candidate failure ${evaluation.code} is not safely continuable`, 'retain')
+      if (terminal !== 'crashed' && terminal !== 'timed-out') return blocked(request, 'state-ambiguous', 'continuable candidate failure has an incompatible terminal state', 'retain')
+      return { kind: 'reconcile-candidate', runId: request.runId, experiment, candidateCommit: experiment.candidateCommit, expectedAcceptedCommit: best.commit, outcome: { kind: 'continue-failure', terminalExperimentState: terminal, code: evaluation.code } }
+    }
   }
   if (!experiment.candidateCommit) return blocked(request, 'commit-missing', 'deciding candidate has no candidate commit', 'retain')
   const best = decodeBest(run)
   if (!best) return blocked(request, 'state-ambiguous', 'deciding run has no prior best', 'retain')
   const metric = number(row['metric'])
-  if (metric === undefined) {
-    const terminal = terminalExperimentState(row)
-    return terminal ? { kind: 'reconcile-candidate', runId: request.runId, experiment, candidateCommit: experiment.candidateCommit, expectedAcceptedCommit: best.commit, outcome: { kind: 'cleanup', terminalExperimentState: terminal } } : blocked(request, 'state-ambiguous', 'deciding experiment lacks metric or terminal failure', 'retain')
-  }
+  if (metric === undefined) return blocked(request, 'state-ambiguous', 'deciding experiment lacks metric or terminal failure', 'retain')
   const expected = request.policy.metricDirection === 'minimize' ? metric < best.metric : metric > best.metric
   const durable = row['decision'] === null ? undefined : text(row['decision'])
   if (durable && durable !== (expected ? 'accept' : 'reject')) return blocked(request, 'decision-mismatch', 'durable decision differs from strict host recomputation', 'retain')
   return { kind: 'reconcile-candidate', runId: request.runId, experiment, candidateCommit: experiment.candidateCommit, expectedAcceptedCommit: best.commit, outcome: { kind: expected ? 'accept' : 'reject', metric } }
+}
+
+function isContinuableCandidateFailure(evaluation: Extract<RecoveredEvaluation, { kind: 'failed' }>): evaluation is Extract<RecoveredEvaluation, { kind: 'failed' }> & { readonly code: 'spawn' | 'exit' | 'signal' | 'timeout' | 'output-limit' | 'metric-protocol' } {
+  switch (evaluation.code) {
+    case 'spawn': return evaluation.exit.providerPid === undefined && evaluation.exit.spawnedAt === undefined
+    case 'exit': case 'signal': case 'timeout': case 'output-limit': case 'metric-protocol': return CONTINUABLE_FAILURE_CODES[evaluation.code]
+    case 'cancelled': return false
+  }
 }
 
 function terminalDirective(request: RecoveryRequest, state: RunDurableState, recovery: RecoveryState): RecoveryDirective {
@@ -292,15 +330,24 @@ function validateTerminalEvidence(request: RecoveryRequest, state: 'completed' |
       const latest = attempts.filter(row => text(row['experiment_id']) === experimentId).at(-1)
       const experiment = experiments.find(row => text(row['experiment_id']) === experimentId)
       if (!latest || !latest['exited_at'] && text(experiment?.['failure_code']) !== 'recovery-rerun-exhausted') throw new RecoveryEvidenceError('attempt-uncertain', `terminal evaluated experiment ${experimentId} lacks a completed evaluator attempt`)
+      if (latest['exited_at'] && text(experiment?.['failure_code']) === 'provenance-mismatch') {
+        const evaluation = reconstructEvaluation(request, decodeExperiment(experiment!), latest, true)
+        if (evaluation?.policyViolation?.code !== 'provenance-mismatch') throw new RecoveryEvidenceError('state-ambiguous', `terminal provenance mismatch experiment ${experimentId} lacks durable post-outcome policy authority`)
+      }
     }
     if (state === 'baseline-blocked') {
       const baseline = experiments.find(row => text(row['kind']) === 'baseline')
       if (!baseline || !isExperimentTerminal(text(baseline['state']))) throw new RecoveryEvidenceError('state-ambiguous', 'baseline-blocked run lacks a terminal baseline experiment')
       const own = attempts.filter(row => text(row['experiment_id']) === text(baseline['experiment_id']))
+      const exhausted = text(baseline['failure_code']) === 'recovery-rerun-exhausted'
       const latest = own.at(-1)
-      if (!latest || !latest['exited_at']) throw new RecoveryEvidenceError('attempt-uncertain', 'baseline-blocked run lacks a completed baseline evaluator attempt')
-      const outcome = reconstructEvaluation(request, decodeExperiment(baseline), latest, true)
-      if (!outcome || outcome.kind !== 'failed') throw new RecoveryEvidenceError('state-ambiguous', 'baseline-blocked run does not match a failed baseline evaluator outcome')
+      if (!latest || !latest['exited_at']) {
+        if (!exhausted || !latest || latest['process_tree_quiescent'] !== 1) throw new RecoveryEvidenceError('attempt-uncertain', 'baseline-blocked run lacks a completed baseline evaluator attempt')
+      } else {
+        const outcome = reconstructEvaluation(request, decodeExperiment(baseline), latest, true)
+        const mismatch = text(baseline['failure_code']) === 'provenance-mismatch'
+        if (!outcome || (mismatch ? outcome.policyViolation?.code !== 'provenance-mismatch' : outcome.kind !== 'failed')) throw new RecoveryEvidenceError('state-ambiguous', 'baseline-blocked run does not match its evaluator outcome and terminal policy authority')
+      }
     }
     if (state === 'completed') {
       const run = request.tracker.getRun(request.runId)!
@@ -336,11 +383,27 @@ function decodeAttemptResult(row: Row, attemptId: string): RecoveredAttemptResul
     return { kind: 'measured', metric: result.metric }
   }
   if (result.kind === 'failed') {
-    if (keys !== 'code,kind,message' || typeof result.code !== 'string' || !FAILURE_CODES[result.code] || typeof result.message !== 'string' || !result.message.trim()) throw new RecoveryEvidenceError('state-ambiguous', `attempt ${attemptId} has a malformed failed outcome`)
+    if (keys !== 'code,kind,message' || typeof result.code !== 'string' || !Object.hasOwn(FAILURE_CODES, result.code) || typeof result.message !== 'string' || !result.message.trim()) throw new RecoveryEvidenceError('state-ambiguous', `attempt ${attemptId} has a malformed failed outcome`)
     if (text(row['failure_code']) !== result.code || text(row['failure_message']) !== result.message) throw new RecoveryEvidenceError('state-ambiguous', `attempt ${attemptId} failure facts differ from its authoritative outcome`)
     return { kind: 'failed', code: result.code as EvaluatorFailureCode, message: result.message }
   }
   throw new RecoveryEvidenceError('state-ambiguous', `attempt ${attemptId} has an unknown authoritative outcome kind`)
+}
+function frozenMismatchAuthority(tracker: DurableTracker, experimentId: string, attemptId: string, attempt: Row): { code: 'provenance-mismatch'; message: string } | undefined {
+  const rawOutcome = attempt['outcome_json']
+  if (typeof rawOutcome !== 'string') throw new RecoveryEvidenceError('state-ambiguous', `attempt ${attemptId} lacks its raw authoritative outcome representation`)
+  const rows = tracker.database.prepare("SELECT transition_id, outcome_json FROM transitions WHERE experiment_id = ? AND outcome_json IS NOT NULL ORDER BY sequence DESC").all(experimentId) as Row[]
+  for (const row of rows) {
+    const outcome = json(row['outcome_json'])
+    if (!isRecord(outcome) || outcome['kind'] !== 'frozen-file-policy-mismatch' || outcome['code'] !== 'provenance-mismatch' || typeof outcome['message'] !== 'string' || !outcome['message'].trim()) continue
+    if (JSON.stringify(outcome['evaluatorResult']) !== rawOutcome) throw new RecoveryEvidenceError('state-ambiguous', `frozen mismatch authority for attempt ${attemptId} conflicts with its raw evaluator outcome`)
+    const transitionId = row['transition_id']
+    if (typeof transitionId !== 'string' || !transitionId.trim()) throw new RecoveryEvidenceError('state-ambiguous', `frozen mismatch authority for attempt ${attemptId} has a missing or corrupt durable transition identifier`)
+    const artifacts = tracker.database.prepare('SELECT COUNT(*) AS count FROM transition_artifacts ta JOIN artifacts a ON a.artifact_id = ta.artifact_id WHERE ta.transition_id = ? AND a.attempt_id = ?').get(transitionId, attemptId)
+    if (Number(artifacts?.['count'] ?? 0) !== 2) throw new RecoveryEvidenceError('artifact-incomplete', `frozen mismatch authority for attempt ${attemptId} lacks its canonical artifact pair`)
+    return { code: 'provenance-mismatch', message: outcome['message'] }
+  }
+  return undefined
 }
 function decodeExit(row: Row): EvaluatorAttemptFacts { return { ...(row['provider_pid'] === null ? {} : { providerPid: integer(row['provider_pid']) }), ...(row['spawned_at'] === null ? {} : { spawnedAt: text(row['spawned_at']) }), exitedAt: text(row['exited_at']), exitCode: row['exit_code'] === null ? null : integer(row['exit_code']), signal: row['signal'] === null ? null : text(row['signal']), timedOut: row['timed_out'] === 1, cancelled: text(row['failure_code']) === 'cancelled', processTreeQuiescent: row['process_tree_quiescent'] === 1, ...(row['failure_code'] === null ? {} : { failureCode: text(row['failure_code']) }), ...(row['failure_message'] === null ? {} : { failureMessage: text(row['failure_message']) }) } }
 function spawnProvenance(row: Row): string { const intent = json(row['spawn_intent_json']); return intent && typeof intent === 'object' ? String((intent as Record<string, unknown>).provenanceSha256 ?? (intent as Record<string, unknown>).provenance_sha256 ?? '') : '' }

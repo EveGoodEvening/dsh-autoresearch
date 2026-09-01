@@ -7,7 +7,8 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { SubprocessHandle, SubprocessOutcome, SubprocessOutputReader, SubprocessSpawnSpec } from '@deepseek-ai/dsh-subprocess'
 import { afterEach, describe, expect, it } from 'vitest'
 import { acquireRunLock, allocateRunWorktree, captureGitConfigBaseline, checkoutCandidateForEvaluation, commitCandidate, discoverRepository, durableGitIdentity, makeRunGitIdentity, snapshotCandidate, validateCandidate } from '../src/git.ts'
-import { classifyDurableRegistration, reconcileRecovery, type RecoveryRequest } from '../src/recovery.ts'
+import type { EvaluatorFailureCode } from '../src/evaluator.ts'
+import { classifyDurableRegistration, reconcileRecovery, type RecoveredEvaluation, type RecoveryRequest } from '../src/recovery.ts'
 import { DurableTracker } from '../src/tracker.ts'
 import { serializeRegistrationJson, type DurableRegistrationIdentity, type DurableRunPolicy, type EvaluatorRegistration } from '../src/types.ts'
 
@@ -44,7 +45,7 @@ function persistOutcome(
   stdout = '{"score":7}\n',
   stderr = '',
   failed = false,
-  options: { readonly metric?: number; readonly stdoutTruncated?: boolean; readonly stderrTruncated?: boolean } = {},
+  options: { readonly metric?: number; readonly stdoutTruncated?: boolean; readonly stderrTruncated?: boolean; readonly failureCode?: 'exit'; readonly failureMessage?: string; readonly policyViolationMessage?: string } = {},
 ): void {
   tracker.createAttemptIntent({ attemptId, runId: request.runId, experimentId, ordinal }, { provenanceSha256: request.provenanceSha256 })
   const directory = join(tracker.layout.root, 'artifacts', request.runId, experimentId, attemptId)
@@ -55,9 +56,19 @@ function persistOutcome(
     const truncated = kind === 'stdout' ? options.stdoutTruncated ?? false : options.stderrTruncated ?? false
     return { artifactId: `${attemptId}-${kind}`, runId: request.runId, experimentId, attemptId, kind, location: `artifact:sha256:${createHash('sha256').update(path).digest('hex')}`, sizeBytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'), owner: 'evaluator', retention: 'retain', metadata: { truncated } }
   })
-  const result = failed ? { kind: 'failed' as const, code: 'exit', message: 'baseline failed' } : { kind: 'measured' as const, metric: options.metric ?? 7 }
-  tracker.recordAttemptOutcome(attemptId, { facts: { exitedAt: new Date().toISOString(), exitCode: failed ? 1 : 0, signal: null, timedOut: false, processTreeQuiescent: true, ...(failed ? { failureCode: 'exit', failureMessage: 'baseline failed' } : {}) }, artifacts, result })
+  const failureCode = options.failureCode ?? 'exit'
+  const failureMessage = options.failureMessage ?? 'baseline failed'
+  const result = failed ? { kind: 'failed' as const, code: failureCode, message: failureMessage } : { kind: 'measured' as const, metric: options.metric ?? 7 }
+  tracker.recordAttemptOutcome(attemptId, { facts: { exitedAt: new Date().toISOString(), exitCode: failed ? 1 : 0, signal: null, timedOut: false, processTreeQuiescent: true, ...(failed ? { failureCode, failureMessage } : {}) }, artifacts, result, ...(options.policyViolationMessage ? { outcome: { kind: 'frozen-file-policy-mismatch', code: 'provenance-mismatch', message: options.policyViolationMessage, evidence: [{ code: 'provenance-mismatch', message: options.policyViolationMessage }] } } : {}) })
 }
+
+it('keeps controller provenance mismatches outside recovered raw evaluator failure codes', () => {
+  type RecoveredFailureCode = Extract<RecoveredEvaluation, { kind: 'failed' }>['code']
+  // @ts-expect-error Post-evaluator frozen-file classification is not a raw evaluator outcome.
+  const recovered: RecoveredFailureCode = 'provenance-mismatch'
+  const raw: EvaluatorFailureCode = 'exit'
+  expect([recovered, raw]).toEqual(['provenance-mismatch', 'exit'])
+})
 
 const unusedContext = {} as Parameters<typeof reconcileRecovery>[0]
 
@@ -283,6 +294,15 @@ describe('recovery nonterminal state matrix with real Git/SQLite', () => {
     persistOutcome(f.tracker, f.request, 'baseline', 'attempt-1', 1, '{"score":[REDACTED]}\n', '', false, { metric: 1 })
     const first = await reconcileRecovery(f.ctx, f.request); const second = await reconcileRecovery(f.ctx, f.request)
     expect(first).toMatchObject({ kind: 'finalize-evaluation', evaluation: { kind: 'measured', metric: 1 } }); expect(second).toEqual(first)
+    f.tracker.close()
+  })
+
+  it('recovers post-evaluator provenance mismatch authority without rewriting the completed raw metric', async () => {
+    const f = await realFixture(); f.tracker.transitionRun(f.request.runId, 'baseline-running')
+    f.tracker.createExperiment({ experimentId: 'baseline', runId: f.request.runId, ordinal: 0, kind: 'baseline', parentCommit: f.request.discovery.startCommit, command: 'node', args: [] }); f.tracker.transitionExperiment('baseline', 'running')
+    persistOutcome(f.tracker, f.request, 'baseline', 'attempt-1', 1, '{"score":1}\n', '', false, { metric: 1, policyViolationMessage: 'frozen evaluator files differ from the immutable manifest' })
+    const first = await reconcileRecovery(f.ctx, f.request); const second = await reconcileRecovery(f.ctx, f.request)
+    expect(first).toMatchObject({ kind: 'finalize-evaluation', evaluation: { kind: 'measured', metric: 1, policyViolation: { code: 'provenance-mismatch', message: 'frozen evaluator files differ from the immutable manifest' } } }); expect(second).toEqual(first)
     f.tracker.close()
   })
 

@@ -72,19 +72,21 @@ class BoundedAdapter extends LlmAdapter {
     const releaseAccepted = serialized.includes('release accepted candidate')
     const releaseRejected = serialized.includes('release rejected candidate')
     const releaseTie = serialized.includes('release tie candidate')
+    const releaseContinuation = serialized.includes('release continued candidate failure')
     let chunks: StreamChunk[]
-    if ((releaseAccepted || releaseRejected || releaseTie) && !serialized.includes('release-score-read')) {
+    if ((releaseAccepted || releaseRejected || releaseTie || releaseContinuation) && !serialized.includes('release-score-read')) {
       chunks = toolCall('read', { file_path: join(handoff.workspace.worktree, 'score.txt') }, 'release-score-read')
-    } else if ((releaseAccepted || releaseRejected || releaseTie) && !serialized.includes('release-score-write')) {
+    } else if ((releaseAccepted || releaseRejected || releaseTie || releaseContinuation) && !serialized.includes('release-score-write')) {
       let content = '1\n'
       if (releaseAccepted) content = '0\n'
       else if (releaseRejected) content = '2\n'
+      else if (releaseContinuation) content = handoff.identity.ordinal === 1 ? 'not-a-number\n' : '2\n'
       chunks = toolCall('write', {
         file_path: join(handoff.workspace.worktree, 'score.txt'),
         content,
       }, 'release-score-write')
-    } else if (serialized.includes('"name":"read"') || releaseAccepted || releaseRejected || releaseTie) {
-      chunks = toolCall('autoresearch_report', { ...handoff.identity, hypothesis: 'Inspect the strict fixture score', intendedEdits: ['score.txt'], implementationSummary: releaseAccepted || releaseRejected || releaseTie ? 'Wrote the bounded release scenario score.' : 'Observed the bounded candidate input without changing it.', blockerClaim: null }, 'report-call')
+    } else if (serialized.includes('"name":"read"') || releaseAccepted || releaseRejected || releaseTie || releaseContinuation) {
+      chunks = toolCall('autoresearch_report', { ...handoff.identity, hypothesis: 'Inspect the strict fixture score', intendedEdits: ['score.txt'], implementationSummary: releaseAccepted || releaseRejected || releaseTie || releaseContinuation ? 'Wrote the bounded release scenario score.' : 'Observed the bounded candidate input without changing it.', blockerClaim: null }, 'report-call')
     } else {
       chunks = toolCall('read', { file_path: join(handoff.workspace.worktree, 'score.txt') }, 'read-call')
     }

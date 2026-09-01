@@ -117,6 +117,10 @@ export class AutoresearchRunController {
       if (!this.readySettled) { this.readySettled = true; this.rejectReady(error) }
       if (this.claimFailure) throw this.claimFailure
       if (runtime && this.aborter.signal.aborted) return await this.cancelled(runtime)
+      if (runtime && error instanceof RejectedReconciliationBlockedError) {
+        const best = durableBest(runtime.tracker, runtime.runId)
+        return decodeRunResult({ ...common(runtime), status: 'blocked', best, evidence: error.evidence.map(message => ({ code: error.code, message, artifacts: [] })) }, runtime.policy.metricDirection)
+      }
       throw error
     } finally {
       if (runtime) this.releaseClaim(runtime)
@@ -219,6 +223,7 @@ export class AutoresearchRunController {
               return runtime
             }
             claimed = { runId, ownerId: claimOwner }
+            tracker.resumeOwnedArtifactDiscards(runId)
             recoverTerminalRunLockUnderControllerClaim(tracker, runId, claimOwner, claimProcess)
             applyRunRetention(tracker, runId, this.options.config)
             sweepRepositoryRetention(resumeDiscovery.gitCommonDir, this.options.config.stateRoot, this.options.config, runId)
@@ -229,6 +234,7 @@ export class AutoresearchRunController {
           }
           const claimOwner = randomUUID(); const claimProcess = currentControllerProcessIdentity()
           acquireControllerClaim(tracker, runId, claimOwner, CONTROLLER_LEASE_MS, new Date(), claimProcess); claimed = { runId, ownerId: claimOwner }
+          tracker.resumeOwnedArtifactDiscards(runId)
           applyRunRetention(tracker, runId, this.options.config)
           sweepRepositoryRetention(resumeDiscovery.gitCommonDir, this.options.config.stateRoot, this.options.config, runId)
           const runtime = { runId, policy, discovery: resumeDiscovery, identity, tracker, gitExecutable, policySha256: acceptedPolicySha256, provenanceSha256, gitOptions, claimOwner, claimProcess, registration: writableRegistration.identity }
@@ -325,20 +331,40 @@ export class AutoresearchRunController {
       }
       if (this.aborter.signal.aborted) return this.cancelled(runtime)
       if (directive.kind === 'initialize') { await this.allocateAndStartBaseline(runtime, directive.reuseLock); this.assertClaim(runtime); directive = await reconcileRecovery(this.ctx, { ...runtime, signal: this.aborter.signal }); continue }
-      if (directive.kind === 'evaluate') { if (directive.rerun && directive.attemptOrdinal > 2) this.exhaustEvaluationRerun(runtime, directive.experiment); else await this.evaluate(runtime, directive.experiment, directive.commit, directive.createExperiment, directive.attemptOrdinal); this.assertClaim(runtime); directive = await reconcileRecovery(this.ctx, { ...runtime, signal: this.aborter.signal }); continue }
-      if (directive.kind === 'finalize-evaluation') { await this.finalizeEvaluation(runtime, directive.experiment, directive.evaluation); directive = await reconcileRecovery(this.ctx, { ...runtime, signal: this.aborter.signal }); continue }
+      if (directive.kind === 'evaluate') {
+        if (directive.rerun && directive.attemptOrdinal > 2) this.exhaustEvaluationRerun(runtime, directive.experiment)
+        else {
+          try { await this.evaluate(runtime, directive.experiment, directive.commit, directive.createExperiment, directive.attemptOrdinal) }
+          catch (error) {
+            if (!isFrozenEvaluatorViolation(error)) throw error
+            const best = optionalBest(runtime.tracker, runtime.runId)
+            if (directive.experiment.kind === 'candidate' && best) {
+              runtime.tracker.checkpointRun(runtime.runId, { intent: { kind: 'git-reconciliation', outcome: { kind: 'terminal-block', code: 'provenance-mismatch' } } })
+              try {
+                await reconcileRejectedHead(this.ctx, runtime.gitExecutable, runtime.identity.worktree, runtime.identity, directive.commit, best.commit, { ...runtime.gitOptions, signal: this.aborter.signal })
+              } catch (reconcileError) {
+                if (!(reconcileError instanceof GitBoundaryError)) throw reconcileError
+                this.blockRejectedReconciliation(runtime, reconcileError)
+              }
+            }
+            return this.block(runtime, { kind: 'blocked', runId: runtime.runId, code: 'provenance-mismatch', evidence: [{ code: 'provenance-mismatch', message: error instanceof Error ? error.message : 'frozen evaluator files differ from the immutable manifest', artifacts: [] }], lock: 'release-after-persist' })
+          }
+        }
+        this.assertClaim(runtime); directive = await reconcileRecovery(this.ctx, { ...runtime, signal: this.aborter.signal }); continue
+      }
+      if (directive.kind === 'finalize-evaluation') { if (directive.evaluation.policyViolation) this.finalizeFrozenMismatch(runtime, directive.experiment, directive.evaluation, directive.evaluation.policyViolation.message); else await this.finalizeEvaluation(runtime, directive.experiment, directive.evaluation); directive = await reconcileRecovery(this.ctx, { ...runtime, signal: this.aborter.signal }); continue }
       if (directive.kind === 'settle-baseline') { this.settleBaseline(runtime, directive); directive = await reconcileRecovery(this.ctx, { ...runtime, signal: this.aborter.signal }); continue }
       if (directive.kind === 'commit-candidate') { await this.commitRecoveredCandidate(runtime, directive.experiment, directive.snapshot, directive.validatedPaths); this.assertClaim(runtime); directive = await reconcileRecovery(this.ctx, { ...runtime, signal: this.aborter.signal }); continue }
       if (directive.kind === 'reconcile-candidate') { await this.reconcileCandidate(runtime, directive); this.assertClaim(runtime); directive = await reconcileRecovery(this.ctx, { ...runtime, signal: this.aborter.signal }); continue }
       if (directive.kind === 'ready') {
         if (runtime.policy.target !== undefined && isTargetReached(runtime.policy.metricDirection, directive.best.metric, runtime.policy.target)) return this.complete(runtime, 'target-reached', directive.best)
         if (directive.nextOrdinal > runtime.policy.maxExperiments) return this.complete(runtime, 'budget-limited', directive.best)
+        await restoreAcceptedWorktree(this.ctx, runtime.gitExecutable, runtime.identity.worktree, runtime.identity, directive.restoreCommit, { ...runtime.gitOptions, signal: this.aborter.signal })
         try {
-          await restoreAcceptedWorktree(this.ctx, runtime.gitExecutable, runtime.identity.worktree, runtime.identity, directive.restoreCommit, { ...runtime.gitOptions, signal: this.aborter.signal })
           if (!runtime.registration) throw new TypeError('durable evaluator registration is unavailable')
           recomputeRegistrationManifest(runtime.identity.worktree, runtime.registration.manifest)
         } catch (error) {
-          return readonlyBlockedResult(runtime, 'evaluator-registration-mismatch', error instanceof Error ? error.message : 'frozen evaluator registration could not be revalidated')
+          return this.block(runtime, { kind: 'blocked', runId: runtime.runId, code: 'provenance-mismatch', evidence: [{ code: 'evaluator-registration-mismatch', message: error instanceof Error ? error.message : 'frozen evaluator registration could not be revalidated', artifacts: [] }], lock: 'release-after-persist' })
         }
         await this.propose(runtime, directive.best, directive.nextOrdinal)
         this.assertClaim(runtime); directive = await reconcileRecovery(this.ctx, { ...runtime, signal: this.aborter.signal }); continue
@@ -406,24 +432,41 @@ export class AutoresearchRunController {
     const boundary = createEvaluatorBoundary(r.identity.worktree, { evaluation: r.policy.evaluation, normalizedPolicySha256: r.policySha256, evaluatorFiles: r.registration.registration.evaluatorFiles, runId: r.runId, attemptId })
     revalidateEvaluatorBoundary(r.identity.worktree, boundary); revalidateFrozenFileAttempt(r.identity.worktree, frozenFiles)
     let intentCreated = false
+    const persistenceState: { frozenMismatch?: { message: string; evaluation: RecoveredEvaluation } } = {}
     const dataset = registrationDatasetMetadata(r.registration.registration)
     const result = await runEvaluator({ subprocess: this.ctx.subprocess, worktree: r.identity.worktree, boundary, evaluation: r.policy.evaluation, metricName: r.policy.metricName, metricDirection: r.policy.metricDirection, timeoutMs: r.policy.timeoutMs, terminationGraceMs: this.options.config.terminationGraceMs, maxStdoutBytes: this.options.config.maxStdoutBytes, maxStderrBytes: this.options.config.maxStderrBytes, artifactWriterFactory: () => { if (!intentCreated) throw new Error('artifact capability requested before durable attempt intent'); return createEvaluatorArtifactWriterFactory(r.tracker.layout, r.runId, experiment.experimentId, attemptId)() }, environment: r.policy.environment, ...(dataset ? { dataset } : {}), policy: r.policy, signal: this.aborter.signal, persistence: {
       persistSpawnIntent: intent => { r.tracker.createAttemptIntent({ attemptId, runId: r.runId, experimentId: experiment.experimentId, ordinal: attemptOrdinal }, intent); intentCreated = true },
       persistSpawnObserved: facts => r.tracker.recordAttemptObserved(attemptId, facts),
       persistAttemptOutcome: (outcome, outputArtifacts) => {
-        revalidateFrozenFileAttempt(r.identity.worktree, frozenFiles)
+        const artifacts = outputArtifacts.map(item => artifact(r, experiment.experimentId, attemptId, item))
         const attemptResult = outcome.kind === 'measured' ? { kind: 'measured' as const, metric: outcome.metric } : { kind: 'failed' as const, code: outcome.code, message: outcome.message }
-        r.tracker.recordAttemptOutcome(attemptId, { facts: outcome.exit, artifacts: outputArtifacts.map(item => artifact(r, experiment.experimentId, attemptId, item)), result: attemptResult, outcome: { kind: 'evaluator-outcome', result: attemptResult } })
+        let mismatchMessage: string | undefined
+        try { revalidateFrozenFileAttempt(r.identity.worktree, frozenFiles) }
+        catch (error) {
+          if (!isFrozenEvaluatorViolation(error)) throw error
+          mismatchMessage = boundedMismatchMessage(error)
+        }
+        r.tracker.recordAttemptOutcome(attemptId, { facts: outcome.exit, artifacts, result: attemptResult, outcome: mismatchMessage === undefined ? { kind: 'evaluator-outcome' } : { kind: 'frozen-file-policy-mismatch', code: 'provenance-mismatch', message: mismatchMessage, evidence: [{ code: 'provenance-mismatch', message: mismatchMessage }] } })
+        if (experiment.kind === 'candidate' && attemptResult.kind === 'failed' && attemptResult.code === 'spawn' && outcome.exit.providerPid === undefined && outcome.exit.spawnedAt === undefined && outcome.exit.processTreeQuiescent) r.tracker.discardProvenNoProcessCandidateArtifacts(attemptId)
+        if (mismatchMessage !== undefined) persistenceState.frozenMismatch = { message: mismatchMessage, evaluation: { ...outcome, attemptId, artifacts } as RecoveredEvaluation }
       },
     } })
+    if (persistenceState.frozenMismatch) return this.finalizeFrozenMismatch(r, experiment, persistenceState.frozenMismatch.evaluation, persistenceState.frozenMismatch.message)
     const recovered = { ...result, attemptId, artifacts: result.artifacts.map(item => artifact(r, experiment.experimentId, attemptId, item)) } as RecoveredEvaluation
     await this.finalizeEvaluation(r, experiment, recovered)
   }
+  private finalizeFrozenMismatch(r: Runtime, experiment: RecoveredExperiment, evaluation: RecoveredEvaluation, message: string): void {
+    if (experiment.kind === 'candidate') r.tracker.appendFailureResearchFacts(experiment.experimentId, { code: 'provenance-mismatch' })
+    r.tracker.commitTerminalExperiment(experiment.experimentId, 'policy-violation', experimentFacts(evaluation, { failureCode: 'provenance-mismatch', failureMessage: message }))
+    if (experiment.kind === 'baseline') r.tracker.transitionRun(r.runId, 'blocked', { terminalReason: message, blockedCode: 'provenance-mismatch', quiescent: evaluation.exit.processTreeQuiescent })
+    else r.tracker.transitionRun(r.runId, 'deciding', { outcome: { kind: 'candidate-evaluation-failed', code: 'provenance-mismatch', message } })
+  }
+
   private exhaustEvaluationRerun(r: Runtime, experiment: RecoveredExperiment): void {
     const message = 'proven-quiescent evaluator recovery rerun ended without a durable outcome'
     if (experiment.kind === 'candidate') r.tracker.appendFailureResearchFacts(experiment.experimentId, { code: 'recovery-rerun-exhausted' })
     r.tracker.commitTerminalExperiment(experiment.experimentId, 'crashed', { failureCode: 'recovery-rerun-exhausted', failureMessage: message })
-    if (experiment.kind === 'baseline') r.tracker.transitionRun(r.runId, 'baseline-blocked', { terminalReason: message, blockedCode: 'recovery-rerun-exhausted', quiescent: true })
+    if (experiment.kind === 'baseline') r.tracker.transitionRun(r.runId, 'blocked', { terminalReason: message, blockedCode: 'recovery-rerun-exhausted', quiescent: true })
     else r.tracker.transitionRun(r.runId, 'deciding', { outcome: { kind: 'candidate-evaluation-failed', code: 'recovery-rerun-exhausted', message } })
   }
 
@@ -458,14 +501,20 @@ export class AutoresearchRunController {
     if (experiment.kind === 'baseline') {
       const runState = code === 'cancelled' && evaluation.exit.processTreeQuiescent ? 'cancelled' : evaluation.exit.processTreeQuiescent ? 'baseline-blocked' : 'blocked'
       r.tracker.transitionRun(r.runId, runState, { terminalReason: message, blockedCode: evaluation.exit.processTreeQuiescent ? code : 'attempt-uncertain', quiescent: evaluation.exit.processTreeQuiescent })
-    } else r.tracker.transitionRun(r.runId, 'deciding', { outcome: { kind: 'candidate-evaluation-failed', code, message } })
+      return
+    }
+    if (code === 'provenance-mismatch') {
+      r.tracker.transitionRun(r.runId, 'deciding', { outcome: { kind: 'candidate-evaluation-failed', code, message } })
+      return
+    }
+    r.tracker.transitionRun(r.runId, 'deciding', { outcome: { kind: 'candidate-evaluation-failed', code, message } })
   }
 
   private async reconcileCandidate(r: Runtime, directive: Extract<RecoveryDirective, { kind: 'reconcile-candidate' }>): Promise<void> {
     const best = durableBest(r.tracker, r.runId)
     const experimentRow = r.tracker.database.prepare('SELECT state FROM experiments WHERE experiment_id = ?').get(directive.experiment.experimentId)
     const experimentTerminal = experimentRow && !['baseline-pending', 'running'].includes(String(experimentRow['state']))
-    if (!experimentTerminal && directive.outcome.kind !== 'cleanup') r.tracker.checkpointExperiment(directive.experiment.experimentId, { decision: directive.outcome.kind })
+    if (!experimentTerminal && (directive.outcome.kind === 'accept' || directive.outcome.kind === 'reject')) r.tracker.checkpointExperiment(directive.experiment.experimentId, { decision: directive.outcome.kind })
     if (r.tracker.getRun(r.runId)?.['state'] === 'candidate-running') r.tracker.transitionRun(r.runId, 'deciding', { outcome: { kind: 'terminal-experiment-recovered' } })
     r.tracker.checkpointRun(r.runId, { intent: { kind: 'git-reconciliation', outcome: directive.outcome } })
     if (directive.outcome.kind === 'accept') {
@@ -474,11 +523,33 @@ export class AutoresearchRunController {
       if (!experimentTerminal) r.tracker.commitTerminalExperiment(directive.experiment.experimentId, 'accepted', { metric: next.metric, decision: 'accept' })
       const target = r.policy.target !== undefined && isTargetReached(r.policy.metricDirection, next.metric, r.policy.target)
       r.tracker.transitionRun(r.runId, target ? 'completed' : 'ready', { best: next, outcome: { kind: 'reconciled', decision: 'accept' } })
-    } else {
-      await reconcileRejectedHead(this.ctx, r.gitExecutable, r.identity.worktree, r.identity, directive.candidateCommit, directive.expectedAcceptedCommit, { ...r.gitOptions, signal: this.aborter.signal })
-      if (!experimentTerminal && directive.outcome.kind === 'reject') r.tracker.commitTerminalExperiment(directive.experiment.experimentId, 'rejected', { metric: directive.outcome.metric, decision: 'reject' })
-      r.tracker.transitionRun(r.runId, directive.outcome.kind === 'cleanup' ? 'round-failed' : 'ready', { best, outcome: { kind: 'reconciled', decision: directive.outcome.kind } })
+      return
     }
+    try {
+      await reconcileRejectedHead(this.ctx, r.gitExecutable, r.identity.worktree, r.identity, directive.candidateCommit, directive.expectedAcceptedCommit, { ...r.gitOptions, signal: this.aborter.signal })
+    } catch (error) {
+      if (!(error instanceof GitBoundaryError)) throw error
+      return this.blockRejectedReconciliation(r, error)
+    }
+    if (!experimentTerminal && directive.outcome.kind === 'reject') r.tracker.commitTerminalExperiment(directive.experiment.experimentId, 'rejected', { metric: directive.outcome.metric, decision: 'reject' })
+    if (directive.outcome.kind === 'cancel') {
+      r.tracker.transitionRun(r.runId, 'cancelled', { best, terminalReason: this.cancelReason, blockedCode: 'cancelled', quiescent: true, outcome: { kind: 'reconciled', decision: 'cancel' } })
+      return
+    }
+    if (directive.outcome.kind === 'terminal-block') {
+      r.tracker.transitionRun(r.runId, 'blocked', { best, terminalReason: directive.outcome.message, blockedCode: directive.outcome.code, quiescent: true, outcome: { kind: 'candidate-failure-reconciled', code: directive.outcome.code } })
+      return
+    }
+    r.tracker.transitionRun(r.runId, 'ready', { best, outcome: directive.outcome.kind === 'continue-failure' ? { kind: 'candidate-failure-reconciled', code: directive.outcome.code } : { kind: 'reconciled', decision: 'reject' } })
+  }
+
+  private blockRejectedReconciliation(r: Runtime, error: GitBoundaryError): void {
+    const evidence = normalizedGitReconciliationEvidence(error)
+    r.tracker.checkpointRun(r.runId, {
+      blockedCode: 'git-reconciliation-failed',
+      outcome: { kind: 'git-reconciliation-blocked', code: error.code, evidence, head: 'uncertain' },
+    })
+    throw new RejectedReconciliationBlockedError(error.code, evidence)
   }
 
   private async complete(r: Runtime, status: 'target-reached' | 'budget-limited', best: BestResult): Promise<AutoresearchRunResult> {
@@ -489,6 +560,7 @@ export class AutoresearchRunController {
   private async block(r: Runtime, directive: Extract<RecoveryDirective, { kind: 'blocked' }>): Promise<AutoresearchRunResult> {
     const best = optionalBest(r.tracker, r.runId)
     const row = r.tracker.getRun(r.runId)!
+    const provenQuiescent = directive.lock === 'release-after-persist' && r.tracker.recoveryState(r.runId).processDisposition !== 'uncertain'
     if (!['completed','baseline-blocked','blocked','round-failed','cancelled'].includes(String(row['state']))) {
       const unresolved = r.tracker.recoveryState(r.runId).unresolvedExperiment
       if (unresolved) {
@@ -496,10 +568,10 @@ export class AutoresearchRunController {
         if (state === 'baseline-pending') r.tracker.commitTerminalExperiment(id, 'cancelled', { failureCode: directive.code, failureMessage: directive.evidence[0]?.message ?? directive.code })
         else if (state === 'running') r.tracker.commitTerminalExperiment(id, 'crashed', { failureCode: directive.code, failureMessage: directive.evidence[0]?.message ?? directive.code })
       }
-      r.tracker.transitionRun(r.runId, 'blocked', { blockedCode: directive.code, terminalReason: directive.evidence[0]?.message ?? directive.code, quiescent: false, ...(best ? { best } : {}) })
+      r.tracker.transitionRun(r.runId, 'blocked', { blockedCode: directive.code, terminalReason: directive.evidence[0]?.message ?? directive.code, quiescent: provenQuiescent, ...(best ? { best } : {}) })
     }
     const result = best ? { status: 'blocked', best, evidence: directive.evidence } : { status: 'round-failed', reason: directive.evidence[0]?.message ?? directive.code, evidence: directive.evidence }
-    return this.finish(r, result, directive.lock === 'release-after-persist' && r.tracker.recoveryState(r.runId).safeToReleaseTerminalLock)
+    return this.finish(r, result, provenQuiescent)
   }
 
   private async cancelled(r: Runtime): Promise<AutoresearchRunResult> {
@@ -552,6 +624,20 @@ export class AutoresearchRunController {
   }
 }
 
+function normalizedGitReconciliationEvidence(error: GitBoundaryError): readonly string[] {
+  const evidence = [error.message, ...error.evidence]
+    .map(message => message.trim().replace(/[\0\r\n]+/gu, ' '))
+    .filter(message => message.length > 0)
+  return evidence.length > 0 ? evidence : ['Git reconciliation failed while restoring the accepted HEAD']
+}
+
+class RejectedReconciliationBlockedError extends Error {
+  constructor(readonly code: string, readonly evidence: readonly string[]) {
+    super(evidence[0] ?? code)
+    this.name = 'RejectedReconciliationBlockedError'
+  }
+}
+
 function provenanceInput(policy: DurableRunPolicy, policySha256: string, evaluationSha256: string, registration: HostEvaluatorRegistration) { const dataset = registrationDatasetMetadata(registration); return { evaluation: policy.evaluation, evaluatorFiles: registration.evaluatorFiles, metricName: policy.metricName, metricDirection: policy.metricDirection, environment: policy.environment, policy: { normalizedPolicySha256: policySha256, evaluationSha256, policy }, ...(dataset ? { dataset } : {}) } }
 function canonicalPolicy(policy: NormalizedRunPolicy, repository: string, runTag: string): DurableRunPolicy { const { resumeRunId: _resume, mode: _mode, ...durable } = policy; return { ...durable, repository, runTag } }
 function hash(value: unknown): string { return createHash('sha256').update(JSON.stringify(sort(value))).digest('hex') }
@@ -559,6 +645,8 @@ function sort(value: unknown): unknown { if (Array.isArray(value)) return value.
 function normalizedReason(value: string): string { const text = value.trim().replace(/[\0\r\n]+/gu, ' '); return text || 'cancelled' }
 function parseJson(value: unknown): unknown { if (typeof value !== 'string') return undefined; try { return JSON.parse(value) } catch { return undefined } }
 function artifact(r: Runtime, experimentId: string, attemptId: string, item: { kind: string; location: string; sizeBytes: number; sha256: string; truncated: boolean }): ArtifactRecord { return { artifactId: `${attemptId}-${item.kind}`, runId: r.runId, experimentId, attemptId, kind: item.kind, location: item.location, sizeBytes: item.sizeBytes, sha256: item.sha256, owner: 'evaluator', retention: 'retain', metadata: { truncated: item.truncated } } }
+function isFrozenEvaluatorViolation(error: unknown): boolean { const message = error instanceof Error ? error.message : String(error); return /frozen (?:evaluator )?file|registration manifest|immutable manifest/iu.test(message) }
+function boundedMismatchMessage(error: unknown): string { const message = (error instanceof Error ? error.message : String(error)).trim(); return (message || 'frozen evaluator files differ from the immutable manifest').slice(0, 4096) }
 function experimentFacts(evaluation: RecoveredEvaluation, extra: Record<string, unknown>) { return { ...extra, exitCode: evaluation.exit.exitCode, signal: evaluation.exit.signal, timedOut: evaluation.exit.timedOut } as never }
 function optionalBest(tracker: DurableTracker, runId: string): BestResult | undefined { const row = tracker.getRun(runId); return row?.['best_metric'] === null || row?.['best_metric'] === undefined ? undefined : { metric: Number(row['best_metric']), commit: String(row['best_commit']), experimentId: String(row['best_experiment_id']) } }
 function durableBest(tracker: DurableTracker, runId: string): BestResult { const best = optionalBest(tracker, runId); if (!best) throw new Error('durable best result is missing'); return best }

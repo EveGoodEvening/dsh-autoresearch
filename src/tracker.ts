@@ -4,7 +4,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { DatabaseSync, type SQLOutputValue } from 'node:sqlite'
+import { DatabaseSync, type SQLInputValue, type SQLOutputValue } from 'node:sqlite'
 import { StateLayout } from './state-layout.js'
 import { redactConfiguredSecrets } from './evaluator-artifacts.js'
 import { EVALUATOR_CONTRACT_GENERATION, normalizeEvaluatorRegistration, normalizeRegistrationManifest, registrationFingerprint, serializeRegistrationJson } from './types.js'
@@ -22,6 +22,7 @@ const EXPERIMENT_TERMINAL: Readonly<Record<ExperimentDurableState, boolean>> = {
   'baseline-pending': false, running: false, accepted: true, rejected: true, crashed: true, 'timed-out': true, 'policy-violation': true, cancelled: true,
 }
 const RESEARCH_FAILURE_CODES: Readonly<Record<string, true>> = { spawn: true, timeout: true, cancelled: true, exit: true, signal: true, 'output-limit': true, 'metric-protocol': true, 'provenance-mismatch': true, 'recovery-rerun-exhausted': true }
+const CONTINUABLE_CANDIDATE_FAILURE_CODES: Readonly<Record<string, true>> = { spawn: true, timeout: true, exit: true, signal: true, 'output-limit': true, 'metric-protocol': true }
 const RUN_TRANSITIONS: Readonly<Record<RunDurableState, readonly RunDurableState[]>> = {
   initializing: ['baseline-running', 'baseline-blocked', 'blocked', 'cancelled'],
   'baseline-running': ['ready', 'completed', 'baseline-blocked', 'blocked', 'round-failed', 'cancelled'],
@@ -102,6 +103,9 @@ export class DurableTracker {
   readonly database: DatabaseSync
   readonly layout: StateLayout
   private closed = false
+  /** Test-only crash seam after the durable discarding mark and before filesystem deletion. */
+  artifactDiscardMarkedForTest(): void {}
+
   private constructor(readonly path: string, database: DatabaseSync, layout: StateLayout, private readonly dispose?: () => void) { this.database = database; this.layout = layout }
 
   static open(path: string): DurableTracker {
@@ -323,22 +327,71 @@ export class DurableTracker {
       if (attempt['outcome_json'] !== null) throw new TrackerTransitionError(`attempt ${attemptId} already has a durable outcome`)
       const facts = attemptOutcomeFacts(checkpoint)
       this.mergeAttemptObservation(attempt, facts, updatedAt)
-      this.database.prepare('UPDATE attempts SET outcome_json = ?, updated_at = ? WHERE attempt_id = ?').run(canonicalJson(checkpoint.result), updatedAt, attemptId)
+      const resultJson = canonicalJson(checkpoint.result)
+      this.database.prepare('UPDATE attempts SET outcome_json = ?, updated_at = ? WHERE attempt_id = ?').run(resultJson, updatedAt, attemptId)
       const runId = String(attempt['run_id'])
       const experimentId = String(attempt['experiment_id'])
       this.validateAndInsertArtifacts(runId, experimentId, checkpoint.artifacts)
       const run = this.requireRun(runId)
       const state = String(run['state']) as RunDurableState
       if (RUN_TERMINAL[state]) throw new TrackerTransitionError('attempt outcome requires a nonterminal run')
-      const outcome = checkpoint.outcome ?? { kind: 'evaluator-outcome', result: checkpoint.result }
+      const suppliedOutcome = checkpoint.outcome ?? { kind: 'evaluator-outcome' }
+      if (!isOutcomeRecord(suppliedOutcome)) throw new TrackerTransitionError('attempt transition outcome must be an object')
+      const authoritativeResult = parseJson(resultJson, 'attempt outcome')
+      const outcome = suppliedOutcome['kind'] === 'frozen-file-policy-mismatch'
+        ? { ...suppliedOutcome, evaluatorResult: authoritativeResult }
+        : { ...suppliedOutcome, result: authoritativeResult }
       return this.insertTransition(runId, experimentId, 'run', state, state, { outcome, artifacts: checkpoint.artifacts }, updatedAt)
     })
   }
+  discardProvenNoProcessCandidateArtifacts(attemptId: string): void {
+    const artifacts = this.transaction(() => {
+      const attempt = this.database.prepare(`SELECT a.*, e.kind AS experiment_kind FROM attempts a JOIN experiments e ON e.run_id = a.run_id AND e.experiment_id = a.experiment_id WHERE a.attempt_id = ?`).get(attemptId)
+      if (!attempt) throw new TrackerTransitionError(`unknown attempt ${attemptId}`)
+      const outcome = attempt['outcome_json'] === null ? undefined : parseJson(attempt['outcome_json'], 'attempt outcome') as { kind?: unknown; code?: unknown }
+      if (attempt['experiment_kind'] !== 'candidate' || outcome?.kind !== 'failed' || outcome.code !== 'spawn' || attempt['failure_code'] !== 'spawn' || attempt['failure_message'] === null || attempt['exited_at'] === null || attempt['process_tree_quiescent'] !== 1 || attempt['provider_pid'] !== null || attempt['spawned_at'] !== null) throw new TrackerTransitionError('artifact discard requires complete proven-no-process candidate spawn failure evidence')
+      const runId = requiredSqlInputValue(attempt['run_id'], 'attempts.run_id')
+      const experimentId = requiredSqlInputValue(attempt['experiment_id'], 'attempts.experiment_id')
+      const rows = this.database.prepare('SELECT * FROM artifacts WHERE run_id = ? AND experiment_id = ? AND attempt_id = ? ORDER BY kind').all(runId, experimentId, attemptId) as Record<string, SQLOutputValue>[]
+      if (rows.length === 0) return []
+      if (rows.length !== 2 || rows.map(row => String(row['kind'])).join(',') !== 'stderr,stdout' || rows.some(row => !['retain', 'discarding'].includes(String(row['retention'])))) throw new TrackerTransitionError('spawn failure artifact discard requires the canonical evaluator artifact pair')
+      const selected = rows.map(row => {
+        const artifact = prunableArtifact(row, this.layout.root, String(runId))
+        if (artifact.sizeBytes !== 0) throw new TrackerTransitionError('spawn failure artifact discard requires empty evaluator artifacts')
+        return artifact
+      })
+      this.database.prepare("UPDATE artifacts SET retention = 'discarding' WHERE run_id = ? AND experiment_id = ? AND attempt_id = ? AND retention = 'retain'").run(runId, experimentId, attemptId)
+      return selected
+    })
+    this.artifactDiscardMarkedForTest()
+    this.completeArtifactDiscard(artifacts)
+  }
+  resumeOwnedArtifactDiscards(runId: string): void {
+    const rows = this.database.prepare("SELECT DISTINCT attempt_id FROM artifacts WHERE run_id = ? AND retention = 'discarding' ORDER BY attempt_id").all(runId) as Record<string, SQLOutputValue>[]
+    for (const row of rows) {
+      const attemptId = String(row['attempt_id'] ?? '')
+      if (!attemptId) throw new TrackerTransitionError('discarding artifact lacks an attempt identity')
+      this.discardProvenNoProcessCandidateArtifacts(attemptId)
+    }
+  }
+
+  private completeArtifactDiscard(artifacts: readonly PrunableArtifact[]): void {
+    if (artifacts.length === 0) return
+    for (const artifact of artifacts) secureDeleteArtifact(artifact, this.layout.root)
+    this.transaction(() => {
+      for (const artifact of artifacts) {
+        this.database.prepare('DELETE FROM transition_artifacts WHERE artifact_id = ?').run(artifact.artifactId)
+        this.database.prepare("DELETE FROM artifacts WHERE artifact_id = ? AND retention = 'discarding'").run(artifact.artifactId)
+      }
+    })
+  }
+
 
 
   transitionRun(runId: string, to: RunDurableState, facts: TransitionFacts = {}, at = new Date().toISOString()): number {
     return this.transaction(() => {
       const run = this.requireRun(runId); const from = String(run['state']) as RunDurableState; validateTransition('run', from, to)
+      if (from === 'deciding' && to === 'ready') this.validateCandidateReadyTransition(runId)
       if (RUN_TERMINAL[to]) {
         const observedQuiescent = this.isRunQuiescent(runId)
         const terminalQuiescent = facts.quiescent ?? observedQuiescent
@@ -366,6 +419,22 @@ export class DurableTracker {
     })
   }
   commitTerminalExperiment(experimentId: string, to: Exclude<ExperimentDurableState, 'baseline-pending' | 'running'>, facts: ExperimentTransitionFacts, at = new Date().toISOString()): number { return this.transitionExperiment(experimentId, to, facts, at) }
+  private validateCandidateReadyTransition(runId: string): void {
+    const experiment = this.database.prepare("SELECT * FROM experiments WHERE run_id = ? AND kind = 'candidate' ORDER BY ordinal DESC, experiment_id DESC LIMIT 1").get(runId)
+    if (!experiment || !EXPERIMENT_TERMINAL[String(experiment['state']) as ExperimentDurableState]) throw new TrackerTransitionError('deciding-to-ready requires a terminal candidate experiment')
+    const failureCode = experiment['failure_code'] === null ? undefined : String(experiment['failure_code'])
+    if (failureCode === undefined) return
+    if (CONTINUABLE_CANDIDATE_FAILURE_CODES[failureCode] !== true) throw new TrackerTransitionError(`candidate failure ${failureCode} cannot transition the run back to ready`)
+    const expectedState = failureCode === 'timeout' ? 'timed-out' : 'crashed'
+    if (experiment['state'] !== expectedState) throw new TrackerTransitionError('continuable candidate failure has an incompatible terminal state')
+    const experimentId = requiredSqlInputValue(experiment['experiment_id'], 'experiments.experiment_id')
+    const attempt = this.database.prepare('SELECT * FROM attempts WHERE run_id = ? AND experiment_id = ? ORDER BY ordinal DESC LIMIT 1').get(runId, experimentId)
+    if (!attempt || attempt['outcome_json'] === null || attempt['exited_at'] === null || attempt['process_tree_quiescent'] !== 1) throw new TrackerTransitionError('candidate failure continuation requires a complete quiescent attempt outcome')
+    if (failureCode === 'spawn' && (attempt['provider_pid'] !== null || attempt['spawned_at'] !== null)) throw new TrackerTransitionError('spawn failure continuation requires proof that no evaluator process was created')
+    const attemptId = requiredSqlInputValue(attempt['attempt_id'], 'attempts.attempt_id')
+    const artifacts = Number(this.database.prepare('SELECT COUNT(*) AS count FROM artifacts WHERE run_id = ? AND experiment_id = ? AND attempt_id = ?').get(runId, experimentId, attemptId)?.['count'] ?? 0)
+    if (artifacts !== (failureCode === 'spawn' ? 0 : 2)) throw new TrackerTransitionError(failureCode === 'spawn' ? 'proven-no-process candidate spawn continuation requires zero evaluator artifacts' : 'candidate failure continuation requires the complete bounded evaluator artifact pair')
+  }
   appendFailureResearchFacts(experimentId: string, failure: HostFailureFacts, updatedAt = new Date().toISOString()): void {
     this.transaction(() => {
       const experiment = this.requireExperiment(experimentId)
@@ -391,7 +460,7 @@ export class DurableTracker {
   listTransitions(runId: string): Record<string, SQLOutputValue>[] { return this.database.prepare('SELECT * FROM transitions WHERE run_id = ? ORDER BY sequence').all(runId) }
   recoveryState(runId: string): RecoveryState {
     const run = this.requireRun(runId); const unresolvedExperiment = this.database.prepare(`SELECT * FROM experiments WHERE run_id = ? AND state IN ('baseline-pending','running') ORDER BY ordinal DESC LIMIT 1`).get(runId)
-    const unresolvedAttempt = unresolvedExperiment ? this.database.prepare('SELECT * FROM attempts WHERE experiment_id = ? ORDER BY ordinal DESC LIMIT 1').get(unresolvedExperiment['experiment_id']!) : undefined
+    const unresolvedAttempt = unresolvedExperiment ? this.database.prepare('SELECT * FROM attempts WHERE experiment_id = ? ORDER BY ordinal DESC LIMIT 1').get(requiredSqlInputValue(unresolvedExperiment['experiment_id'], 'experiments.experiment_id')) : undefined
     const activeLock = this.database.prepare('SELECT * FROM active_locks WHERE run_id = ? AND released_at IS NULL').get(runId); const quiescent = this.isRunQuiescent(runId)
     const terminal = RUN_TERMINAL[String(run['state']) as RunDurableState]
     const safeToReleaseTerminalLock = Boolean(activeLock && terminal && run['terminal_quiescent'] === 1)
@@ -626,6 +695,9 @@ function attemptOutcomeFacts(checkpoint: AttemptOutcomeCheckpoint): AttemptOutco
   if (facts.failureMessage !== undefined && facts.failureMessage !== result.message) throw new TrackerTransitionError('attempt failure message conflicts with its authoritative result')
   return { ...facts, failureCode: result.code, failureMessage: result.message }
 }
+function isOutcomeRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
 function normalizeUntrustedResearchAnnotation(value: UntrustedResearchAnnotation, secrets: readonly string[] = []): UntrustedResearchAnnotation {
   const text = (item: string, label: string, max: number): string => { if (typeof item !== 'string' || item !== item.trim() || item.length === 0 || item.length > max || /[\0\r]/u.test(item)) throw new TrackerTransitionError(`${label} is not bounded normalized text`); return redactConfiguredSecrets(item, secrets) }
   if (value.trust !== 'untrusted-child-annotation') throw new TrackerTransitionError('research annotation must be explicitly untrusted')
@@ -662,23 +734,25 @@ function validateHostFailureFacts(failure: HostFailureFacts): void {
   if (failure.output !== undefined && failure.output !== 'stdout-limit-exceeded') throw new TrackerTransitionError('Host output fact is invalid')
   if (failure.metricProtocol !== undefined && failure.metricProtocol !== 'rejected') throw new TrackerTransitionError('Host metric protocol fact is invalid')
 }
-interface PrunableArtifact { readonly artifactId: string; readonly path: string; readonly sizeBytes: number; readonly sha256: string }
+interface PrunableArtifact { readonly artifactId: string; readonly kind: 'stdout' | 'stderr'; readonly path: string; readonly sizeBytes: number; readonly sha256: string }
 
 function prunableArtifact(row: Record<string, SQLOutputValue>, root: string, runId: string): PrunableArtifact {
-  const artifactId = String(row['artifact_id'])
-  const experimentId = safeStateComponent(String(row['experiment_id'] ?? ''), 'artifact experiment id')
-  const attemptId = safeStateComponent(String(row['attempt_id'] ?? ''), 'artifact attempt id')
-  const kind = String(row['kind'])
+  const artifactId = String(requiredSqlInputValue(row['artifact_id'], 'artifacts.artifact_id'))
+  const durableRunId = String(requiredSqlInputValue(row['run_id'], 'artifacts.run_id'))
+  const experimentId = safeStateComponent(String(requiredSqlInputValue(row['experiment_id'], 'artifacts.experiment_id')), 'artifact experiment id')
+  const attemptId = safeStateComponent(String(requiredSqlInputValue(row['attempt_id'], 'artifacts.attempt_id')), 'artifact attempt id')
+  const kind = String(requiredSqlInputValue(row['kind'], 'artifacts.kind'))
+  const durableLocation = String(requiredSqlInputValue(row['location'], 'artifacts.location'))
+  const sha256 = String(requiredSqlInputValue(row['sha256'], 'artifacts.sha256'))
   if (kind !== 'stdout' && kind !== 'stderr') throw new TrackerTransitionError(`artifact ${artifactId} has unsupported kind ${kind}`)
-  if (String(row['run_id']) !== runId || artifactId !== `${attemptId}-${kind}` || String(row['owner']) !== 'evaluator') throw new TrackerTransitionError(`artifact ${artifactId} has noncanonical ownership`)
+  if (durableRunId !== runId || artifactId !== `${attemptId}-${kind}` || String(row['owner']) !== 'evaluator') throw new TrackerTransitionError(`artifact ${artifactId} has noncanonical ownership`)
   const path = join(root, 'artifacts', safeStateComponent(runId, 'run id'), experimentId, attemptId, `${kind}.log`)
   const sizeBytes = integer(row['size_bytes'], 'artifact size')
-  const sha256 = String(row['sha256'])
   const location = `artifact:sha256:${createHash('sha256').update(path).digest('hex')}`
-  if (sizeBytes < 0 || !/^[0-9a-f]{64}$/u.test(sha256) || String(row['location']) !== location) throw new TrackerTransitionError(`artifact ${artifactId} has noncanonical location, size, or hash`)
+  if (sizeBytes < 0 || !/^[0-9a-f]{64}$/u.test(sha256) || durableLocation !== location) throw new TrackerTransitionError(`artifact ${artifactId} has noncanonical location, size, or hash`)
   const metadata = parseJson(row['metadata_json'], 'artifact metadata')
   if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata) || Object.keys(metadata).length !== 1 || typeof (metadata as Record<string, unknown>).truncated !== 'boolean') throw new TrackerTransitionError(`artifact ${artifactId} has noncanonical metadata`)
-  return { artifactId, path, sizeBytes, sha256 }
+  return { artifactId, kind, path, sizeBytes, sha256 }
 }
 
 function failedAttempt(value: unknown): boolean {
@@ -878,6 +952,11 @@ function parseBackupFailure(stderr: string): Record<string, unknown> {
 
 
 function booleanInteger(value: unknown): number { return Number(value) }
+function requiredSqlInputValue(value: SQLOutputValue | undefined, column: string): SQLInputValue {
+  if (value === undefined || value === null) throw new TrackerTransitionError(`required durable ${column} is missing`)
+  return value
+}
+
 function tsvCell(value: SQLOutputValue | undefined): string { if (value === null || value === undefined) return ''; return String(value).replaceAll('\\', '\\\\').replaceAll('\t', '\\t').replaceAll('\r', '\\r').replaceAll('\n', '\\n') }
 
 function fileExists(path: string): boolean { try { lstatSync(path); return true } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error } }

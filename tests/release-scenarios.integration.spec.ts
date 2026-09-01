@@ -243,6 +243,32 @@ releaseDescribe('packed release scenarios', () => {
     }
   }, 60_000)
 
+  it('continues through the installed package composition after a failed candidate and preserves restart evidence', async () => {
+    const harness = await composeHarness()
+    try {
+      const cwd = await repository(harness.root, 'continued-failure'); const owner = await parent(harness.ctx, cwd); const before = snapshot(cwd)
+      try {
+        const args = { ...request(cwd, 'release continued candidate failure'), max_experiments: 2 }
+        const value = await execute(harness.ctx, owner.agent, args)
+        expect(value.kind).toBe('foreground')
+        expect(value.run).toMatchObject({ status: 'budget-limited', counts: { experimentsStarted: 2, experimentsCompleted: 2, attempts: 3 }, best: { metric: 1, commit: before.head } })
+        const durable = inspect(value.run.tracker, value.run.runId)
+        expect(durable.experiments).toMatchObject([
+          { ordinal: 0, kind: 'baseline', state: 'accepted', metric: 1 },
+          { ordinal: 1, kind: 'candidate', state: 'crashed' },
+          { ordinal: 2, kind: 'candidate', state: 'rejected', metric: 2, decision: 'reject' },
+        ])
+        expect(snapshot(cwd)).toEqual(before)
+        const { run_tag: _tag, evaluator_id: _evaluatorId, ...stable } = args; const resumed = await execute(harness.ctx, owner.agent, { ...stable, resume_run_id: value.run.runId })
+        expect(resumed.run).toEqual(value.run)
+        const after = inspect(value.run.tracker, value.run.runId)
+        expect(after.experiments).toEqual(durable.experiments)
+        expect(after.lock.released_at).not.toBeNull()
+        evidence.continuedFailure = { ok: true, runId: value.run.runId, installedPackage: true, attempts: value.run.counts.attempts, candidates: durable.experiments.filter(row => row.kind === 'candidate').length, resumedEqual: true }
+      } finally { await owner.dispose() }
+    } finally { await harness.dispose().catch(() => undefined) }
+  }, 45_000)
+
   it('uses real deferred jobs, generic list/output/kill, and quiescent cancellation', async () => {
     const harness = await composeHarness()
     try {

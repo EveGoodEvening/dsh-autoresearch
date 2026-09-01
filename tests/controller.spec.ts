@@ -13,12 +13,12 @@ import type { ToolDefinition, ToolExecutionResult } from '@deepseek-ai/dsh-tools
 import { describe, expect, it, vi, type MockInstance } from 'vitest'
 import { resolveConfig, type Config } from '../src/config.ts'
 import { AutoresearchRunController, type AutoresearchRunReady } from '../src/controller.ts'
-import { currentControllerProcessIdentity, GitBoundaryError } from '../src/git.ts'
+import { acquireControllerClaim, currentControllerProcessIdentity, GitBoundaryError, releaseControllerClaim } from '../src/git.ts'
 
 import { DurableTracker, TRACKER_SCHEMA_VERSION } from '../src/tracker.ts'
 import { sweepRepositoryRetention } from '../src/retention.ts'
 import { evaluatorEvaluationSha256, freezeEvaluatorProvenanceFromManifest } from '../src/evaluator.ts'
-import { EVALUATOR_CONTRACT_GENERATION } from '../src/types.ts'
+import { decodeRunResult, EVALUATOR_CONTRACT_GENERATION } from '../src/types.ts'
 const evaluatorRegistration = { id: 'judge', command: 'fake-evaluator', args: [], metricName: 'score', metricDirection: 'minimize' as const, metricParserVersion: 'final-line-json-v1' as const, evaluatorFiles: ['evaluate.mjs'] }
 const DOWNGRADE_RESEARCH_MEMORY = 'DROP TRIGGER experiments_annotation_immutable; ALTER TABLE experiments DROP COLUMN host_facts_json; ALTER TABLE experiments DROP COLUMN annotation_json;'
 const input = {
@@ -177,32 +177,48 @@ class IntegrationHandle implements SubprocessHandle {
   readonly collected
   readonly done: Promise<SubprocessOutcome>
   private exited = false
-  constructor(private readonly child: ReturnType<typeof spawn>, stdout: Buffer[], stderr: Buffer[], outCap: number, errCap: number) {
+  constructor(private readonly child: ReturnType<typeof spawn>, stdout: Buffer[], stderr: Buffer[], outCap: number, errCap: number, afterOutcome?: () => void) {
     this.pid = child.pid ?? -1
     this.collected = { stdout: new IntegrationReader(() => Buffer.concat(stdout), outCap), stderr: new IntegrationReader(() => Buffer.concat(stderr), errCap) }
-    this.done = new Promise((resolve, reject) => { child.once('error', reject); child.once('close', (exitCode, signal) => { this.exited = true; resolve({ exitCode, signal }) }) })
+    this.done = new Promise((resolve, reject) => { child.once('error', reject); child.once('close', (exitCode, signal) => { this.exited = true; afterOutcome?.(); resolve({ exitCode, signal }) }) })
   }
   terminate(): void { if (!this.exited && this.pid > 0) try { process.kill(-this.pid, 'SIGTERM') } catch {} }
   async waitForExit(): Promise<boolean> { await this.done; return true }
 }
 
-interface EvaluationStep { stdout?: string; stderr?: string; exitCode?: number; signal?: NodeJS.Signals; hang?: boolean; edit?: (cwd: string) => void }
+interface EvaluationStep { stdout?: string; stderr?: string; exitCode?: number; signal?: NodeJS.Signals; hang?: boolean; edit?: (cwd: string) => void; afterOutcome?: (cwd: string) => void }
+interface MatrixEvaluationStep extends EvaluationStep { spawnError?: Error; stdoutLimitBytes?: number }
+type GitSpawnFailure = (spec: SubprocessSpawnSpec) => Error | undefined
 class ControllerSubprocess {
   readonly specs: SubprocessSpawnSpec[] = []
   evaluatorSpawns = 0
-  constructor(private readonly evaluations: EvaluationStep[], private readonly onEvaluatorSpawn?: () => void) {}
+  constructor(private readonly evaluations: EvaluationStep[], private readonly onEvaluatorSpawn?: () => void, private readonly matrixEvaluations = false, private readonly gitSpawnFailure?: GitSpawnFailure) {}
   async resolveExecutable(command: string): Promise<string> { return command === 'git' ? execFileSync('which', ['git']).toString().trim() : command }
   spawn(spec: SubprocessSpawnSpec): SubprocessHandle {
     this.specs.push(spec)
+    if (spec.argv[0]?.endsWith('/git') || spec.argv[0] === 'git') {
+      const failure = this.gitSpawnFailure?.(spec)
+      if (failure) {
+        const stdout: Buffer[] = []; const stderr: Buffer[] = []
+        const child = spawn(process.execPath, ['-e', `process.stderr.write(${JSON.stringify(failure.message)});process.exit(1)`], { cwd: spec.cwd, env: spec.env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] })
+        child.stdout.on('data', (chunk: Buffer) => stdout.push(chunk)); child.stderr.on('data', (chunk: Buffer) => stderr.push(chunk))
+        const handle = new IntegrationHandle(child, stdout, stderr, typeof spec.stdio.stdout === 'object' ? spec.stdio.stdout.maxBytes : 0, typeof spec.stdio.stderr === 'object' ? spec.stdio.stderr.maxBytes : 0)
+        spec.signal?.addEventListener('abort', () => handle.terminate(), { once: true }); return handle
+      }
+    }
     if (spec.argv[0] === 'fake-evaluator') {
       this.onEvaluatorSpawn?.()
       const step = this.evaluations[this.evaluatorSpawns++] ?? { stdout: '{"score":999}\n' }
+      const matrixStep = step as MatrixEvaluationStep
+      if (this.matrixEvaluations && matrixStep.spawnError) throw matrixStep.spawnError
       step.edit?.(spec.cwd)
       const script = step.hang ? 'setInterval(() => {}, 1000)' : step.signal ? `process.kill(process.pid, ${JSON.stringify(step.signal)})` : `process.stdout.write(${JSON.stringify(step.stdout ?? '')});process.stderr.write(${JSON.stringify(step.stderr ?? '')});process.exit(${step.exitCode ?? 0})`
+      const afterOutcome = step.afterOutcome === undefined ? undefined : () => step.afterOutcome!(spec.cwd)
       const stdout: Buffer[] = []; const stderr: Buffer[] = []
       const child = spawn(process.execPath, ['-e', script], { cwd: spec.cwd, env: spec.env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] })
       child.stdout.on('data', (chunk: Buffer) => stdout.push(chunk)); child.stderr.on('data', (chunk: Buffer) => stderr.push(chunk))
-      const handle = new IntegrationHandle(child, stdout, stderr, typeof spec.stdio.stdout === 'object' ? spec.stdio.stdout.maxBytes : 0, typeof spec.stdio.stderr === 'object' ? spec.stdio.stderr.maxBytes : 0)
+      const stdoutCap = this.matrixEvaluations && matrixStep.stdoutLimitBytes !== undefined ? matrixStep.stdoutLimitBytes : typeof spec.stdio.stdout === 'object' ? spec.stdio.stdout.maxBytes : 0
+      const handle = new IntegrationHandle(child, stdout, stderr, stdoutCap, typeof spec.stdio.stderr === 'object' ? spec.stdio.stderr.maxBytes : 0, afterOutcome)
       spec.signal?.addEventListener('abort', () => handle.terminate(), { once: true }); return handle
     }
     const stdout: Buffer[] = []; const stderr: Buffer[] = []
@@ -216,19 +232,20 @@ class ControllerSubprocess {
 
 interface ControllerFixture { root: string; ctx: Context; parent: Agent; subprocess: ControllerSubprocess; creates: CreateAgentOptions[]; order: string[]; trackerPath: () => string; liveCount: () => number }
 interface ProposalLifecycle { afterReport?: (worktree: string) => Promise<void> | void; dispose?: () => Promise<void> | void }
-function controllerFixture(evaluations: EvaluationStep[], edits: Array<(worktree: string, ordinal: number) => void> = [], lifecycle: ProposalLifecycle = {}): ControllerFixture {
+interface MatrixFixtureOptions { capturePrompts?: string[]; blockerClaim?: string | null; evaluatorFailures?: boolean; gitSpawnFailure?: GitSpawnFailure }
+function controllerFixture(evaluations: EvaluationStep[], edits: Array<(worktree: string, ordinal: number) => void> = [], lifecycle: ProposalLifecycle = {}, matrix: MatrixFixtureOptions = {}): ControllerFixture {
   const root = mkdtempSync(join(tmpdir(), 'autoresearch-controller-e2e-'))
   execFileSync('git', ['init', '-b', 'main', root]); execFileSync('git', ['-C', root, 'config', 'user.name', 'Test']); execFileSync('git', ['-C', root, 'config', 'user.email', 'test@example.invalid'])
   mkdirSync(join(root, 'src')); writeFileSync(join(root, 'src', 'code.ts'), 'export const n = 1\n'); writeFileSync(join(root, 'evaluate.mjs'), '// frozen evaluator identity\n')
   execFileSync('git', ['-C', root, 'add', '.']); execFileSync('git', ['-C', root, 'commit', '-m', 'base'])
-  const creates: CreateAgentOptions[] = []; const order: string[] = []; const subprocess = new ControllerSubprocess(evaluations, () => order.push('evaluator-spawn')); const live = new Map<string, Agent>(); let lastTracker = ''
+  const creates: CreateAgentOptions[] = []; const order: string[] = []; const subprocess = new ControllerSubprocess(evaluations, () => order.push('evaluator-spawn'), matrix.evaluatorFailures === true, matrix.gitSpawnFailure); const live = new Map<string, Agent>(); let lastTracker = ''
   const parentCtx = { get(name: string) { if (name === 'agentPresets') return { composedPreset: () => 'preset' }; if (name === 'sandboxPolicy') return { overrideOf: () => 'workspace-write' }; if (name === 'approval') return {}; return undefined }, effect(execute: () => () => Promise<void>) { const cleanup = execute(); let released = false; return async () => { if (!released) { released = true; await cleanup() } } } } as unknown as Context
   const parentAgent = { id: SessionId('parent'), options: { provider: 'provider', model: 'model', maxTokens: 123 }, session: { header: { id: SessionId('parent-session'), cwd: root, delegationDepth: 0 }, append: vi.fn() }, ctx: parentCtx } as unknown as Agent
   const agents = {
     async create(options: CreateAgentOptions): Promise<AgentHandle> {
       creates.push(options); order.push(`child-${creates.length}-create`); const tools = new Map<string, ToolDefinition>(); const listeners: Array<(execution: { name: string }, result: Readonly<ToolExecutionResult>) => void> = []
       const childCtx = { agent: undefined as Agent | undefined, get: (name: string) => name === 'agentPresets' ? { composeFrom: vi.fn() } : undefined, tools: { restrict: () => () => undefined, presentAs: () => () => undefined, register: (tool: ToolDefinition) => { tools.set(tool.name, tool); return () => undefined }, guard: () => () => undefined }, systemPrompt: { context: () => () => undefined, section: () => () => undefined }, on: (name: string, listener: (execution: { name: string }, result: Readonly<ToolExecutionResult>) => void) => { if (name === 'tools/result') listeners.push(listener); return () => undefined } } as unknown as Context
-      let prompt = ''; const child = { id: options.sessionId, options: options.agentOptions ?? {}, session: { header: { id: options.sessionId, ...options.meta }, append: vi.fn() }, ctx: childCtx, status: 'idle', cancel: vi.fn(), followup(message: { content: Array<{ text?: string }> }) { prompt = message.content[0]?.text ?? '' }, async whenIdle() { const payload = JSON.parse(prompt.slice(prompt.indexOf('{'))) as { identity: { runId: string; experimentId: string; ordinal: number; nonce: string }; workspace: { worktree: string } }; edits[payload.identity.ordinal - 1]?.(payload.workspace.worktree, payload.identity.ordinal); const tool = tools.get('autoresearch_report')!; const value = await tool.execute({ ...payload.identity, hypothesis: 'candidate', intendedEdits: ['src/code.ts'], implementationSummary: 'changed', blockerClaim: 'child cannot authorize this blocker' }, { concludeTurn: vi.fn() } as never); listeners.forEach(listener => listener({ name: 'autoresearch_report' }, { isError: false, value } as ToolExecutionResult)); await lifecycle.afterReport?.(payload.workspace.worktree) } } as unknown as Agent
+      let prompt = ''; const child = { id: options.sessionId, options: options.agentOptions ?? {}, session: { header: { id: options.sessionId, ...options.meta }, append: vi.fn() }, ctx: childCtx, status: 'idle', cancel: vi.fn(), followup(message: { content: Array<{ text?: string }> }) { prompt = message.content[0]?.text ?? ''; matrix.capturePrompts?.push(prompt) }, async whenIdle() { const payload = JSON.parse(prompt.slice(prompt.indexOf('{'))) as { identity: { runId: string; experimentId: string; ordinal: number; nonce: string }; workspace: { worktree: string } }; edits[payload.identity.ordinal - 1]?.(payload.workspace.worktree, payload.identity.ordinal); const tool = tools.get('autoresearch_report')!; const value = await tool.execute({ ...payload.identity, hypothesis: 'candidate', intendedEdits: ['src/code.ts'], implementationSummary: 'changed code', blockerClaim: matrix.blockerClaim ?? null }, { agent: child, concludeTurn: vi.fn() } as never); listeners.forEach(listener => listener({ name: tool.name }, { isError: false, value })); await lifecycle.afterReport?.(payload.workspace.worktree) } } as unknown as Agent
       childCtx.agent = child; await options.setup?.(childCtx); live.set(String(options.sessionId), child)
       return { agent: child, dispose: async () => { order.push(`child-${creates.length}-dispose-start`); await lifecycle.dispose?.(); live.delete(String(options.sessionId)); order.push(`child-${creates.length}-dispose-end`) } }
     }, get(id: SessionId) { return live.get(String(id)) },
@@ -236,6 +253,10 @@ function controllerFixture(evaluations: EvaluationStep[], edits: Array<(worktree
   const ctx = Object.assign(parentCtx as unknown as Record<string, unknown>, { subprocess, agents, jobs: { list: () => [] as JobSnapshot[] } }) as unknown as Context
   parentAgent.ctx = ctx
   return { root, ctx, parent: parentAgent, subprocess, creates, order, trackerPath: () => lastTracker, liveCount: () => live.size }
+}
+function matrixControllerFixture(evaluations: MatrixEvaluationStep[], edits: Array<(worktree: string, ordinal: number) => void> = [], options: Omit<MatrixFixtureOptions, 'capturePrompts' | 'evaluatorFailures'> = {}) {
+  const prompts: string[] = []
+  return { fixture: controllerFixture(evaluations, edits, {}, { ...options, capturePrompts: prompts, evaluatorFailures: true }), prompts }
 }
 
 async function runControllerCase(f: ControllerFixture, overrides: Partial<typeof input> & Record<string, unknown> = {}, configOverrides: Config = {}) {
@@ -892,6 +913,164 @@ describe('controller real Git/SQLite outcomes', () => {
     try { const { result, tracker } = await runControllerCase(f, { metric_direction: direction, max_experiments: 1 }); expect(result.status).toBe('budget-limited'); const row = tracker.database.prepare("SELECT state, decision, metric, candidate_commit FROM experiments WHERE kind = 'candidate'").get()!; expect(row).toMatchObject({ state, decision: state === 'accepted' ? 'accept' : 'reject', metric: candidate }); expect(String(row['candidate_commit'])).toMatch(/^[0-9a-f]{40}$/); expect(f.creates).toHaveLength(1); tracker.close() } finally { rmSync(f.root, { recursive: true, force: true }) }
   })
 
+  it.each([
+    ['exit', { exitCode: 9, stderr: 'bounded exit failure' }],
+    ['signal', { signal: 'SIGTERM' as const, stderr: 'bounded signal failure' }],
+    ['timeout', { hang: true }],
+    ['output-limit', { stdout: 'x'.repeat(256), stdoutLimitBytes: 32 }],
+    ['metric-protocol', { stdout: '{"notScore":1}\n' }],
+    ['spawn', { spawnError: new Error('provider refused spawn') }],
+  ] as const)('continues live after proven-quiescent candidate %s failure with exact bounded accounting and handoff', async (code, failure) => {
+    let acceptedBeforeSecondChild = ''
+    const { fixture: f, prompts } = matrixControllerFixture(
+      [{ stdout: '{"score":10}\n' }, failure, { stdout: '{"score":11}\n' }],
+      [
+        worktree => writeFileSync(join(worktree, 'src', 'code.ts'), 'export const n = 2\n'),
+        worktree => { acceptedBeforeSecondChild = execFileSync('git', ['-C', worktree, 'rev-parse', 'HEAD']).toString().trim(); writeFileSync(join(worktree, 'src', 'code.ts'), 'export const n = 3\n') },
+      ],
+    )
+    try {
+      const overrides = code === 'timeout' ? { max_experiments: 2, timeout_ms: 250 } : { max_experiments: 2 }
+      const { result, ready, tracker } = await runControllerCase(f, overrides)
+      const startCommit = execFileSync('git', ['-C', f.root, 'rev-list', '--max-parents=0', 'HEAD']).toString().trim()
+      expect(result).toMatchObject({ status: 'budget-limited', counts: { experimentsStarted: 2, experimentsCompleted: 2, attempts: 3 }, best: { commit: startCommit, metric: 10 } })
+      expect(acceptedBeforeSecondChild).toBe(startCommit)
+      expect(f.creates).toHaveLength(2)
+      expect(f.subprocess.evaluatorSpawns).toBe(3)
+      expect(prompts[1]).toContain(`"failureCode":"${code}"`)
+      expect(prompts[1]).toContain(`"code":"${code}"`)
+      expect(tracker.database.prepare("SELECT ordinal,state,failure_code FROM experiments WHERE kind='candidate' ORDER BY ordinal").all()).toEqual([
+        { ordinal: 1, state: code === 'timeout' ? 'timed-out' : 'crashed', failure_code: code },
+        { ordinal: 2, state: 'rejected', failure_code: null },
+      ])
+      expect(tracker.database.prepare("SELECT ordinal,process_tree_quiescent FROM attempts WHERE experiment_id LIKE '%-candidate-%' ORDER BY experiment_id,ordinal").all()).toEqual([
+        { ordinal: 1, process_tree_quiescent: 1 },
+        { ordinal: 1, process_tree_quiescent: 1 },
+      ])
+      const failed = tracker.database.prepare("SELECT experiment_id FROM experiments WHERE kind='candidate' AND ordinal=1").get()!
+      const artifactKinds = tracker.database.prepare('SELECT kind FROM artifacts WHERE experiment_id=? ORDER BY kind').all(failed['experiment_id'])
+      expect(artifactKinds).toEqual(code === 'spawn' ? [] : [{ kind: 'stderr' }, { kind: 'stdout' }])
+      if (code === 'spawn') {
+        const attempt = tracker.database.prepare('SELECT attempt_id FROM attempts WHERE experiment_id = ?').get(failed['experiment_id'])!
+        expect(existsSync(join(tracker.layout.root, 'artifacts', ready.runId, String(failed['experiment_id']), String(attempt['attempt_id'])))).toBe(false)
+      }
+      const candidateCommits = tracker.database.prepare("SELECT candidate_commit FROM experiments WHERE kind='candidate' ORDER BY ordinal").all().map(row => String(row['candidate_commit']))
+      expect(candidateAuditCommits(f.root, ready.runId).sort()).toEqual(candidateCommits.sort())
+      expect(tracker.database.prepare('SELECT released_at FROM active_locks WHERE run_id=?').get(ready.runId)?.['released_at']).not.toBeNull()
+      expect(controllerClaims(String(tracker.getRun(ready.runId)?.['git_common_dir']), ready.runId)).toEqual([])
+      tracker.close()
+    } finally { rmSync(f.root, { recursive: true, force: true }) }
+  })
+
+  it.each([
+    ['exit', { exitCode: 9 }],
+    ['signal', { signal: 'SIGTERM' as const }],
+    ['timeout', { hang: true }],
+    ['output-limit', { stdout: 'x'.repeat(256), stdoutLimitBytes: 32 }],
+    ['metric-protocol', { stdout: 'not-json\n' }],
+    ['spawn', { spawnError: new Error('provider refused spawn') }],
+  ] as const)('continues %s failure idempotently after the terminal-experiment crash barrier', async (code, failure) => {
+    const { fixture: f } = matrixControllerFixture(
+      [{ stdout: '{"score":10}\n' }, failure, { stdout: '{"score":11}\n' }],
+      [worktree => writeFileSync(join(worktree, 'src', 'code.ts'), 'export const n = 2\n'), worktree => writeFileSync(join(worktree, 'src', 'code.ts'), 'export const n = 3\n')],
+    )
+    const transition = DurableTracker.prototype.transitionRun
+    let interrupted = false
+    const barrier = vi.spyOn(DurableTracker.prototype, 'transitionRun').mockImplementation(function (runId, state, facts, at) {
+      if (!interrupted && state === 'deciding' && (facts?.outcome as { kind?: string } | undefined)?.kind === 'candidate-evaluation-failed') { interrupted = true; throw new Error(`candidate ${code} cleanup barrier`) }
+      return transition.call(this, runId, state, facts, at)
+    })
+    const overrides = code === 'timeout' ? { max_experiments: 2, timeout_ms: 250 } : { max_experiments: 2 }
+    try {
+      const first = createCaseController(f, overrides)
+      await expect(first.run()).rejects.toThrow(`candidate ${code} cleanup barrier`)
+      const ready = await first.ready
+      barrier.mockRestore()
+      const resumed = await createCaseController(f, overrides, ready.runId).run()
+      expect(resumed).toMatchObject({ status: 'budget-limited', counts: { experimentsStarted: 2, experimentsCompleted: 2, attempts: 3 } })
+      const tracker = DurableTracker.open(ready.tracker)
+      expect(tracker.database.prepare("SELECT ordinal,state,failure_code FROM experiments WHERE kind='candidate' ORDER BY ordinal").all()).toEqual([
+        { ordinal: 1, state: code === 'timeout' ? 'timed-out' : 'crashed', failure_code: code },
+        { ordinal: 2, state: 'rejected', failure_code: null },
+      ])
+      if (code === 'spawn') {
+        const failed = tracker.database.prepare("SELECT experiment_id FROM experiments WHERE kind='candidate' AND ordinal=1").get()!
+        const attempt = tracker.database.prepare('SELECT attempt_id FROM attempts WHERE experiment_id = ?').get(failed['experiment_id'])!
+        expect(tracker.database.prepare('SELECT kind FROM artifacts WHERE attempt_id = ?').all(attempt['attempt_id'])).toEqual([])
+        expect(existsSync(join(tracker.layout.root, 'artifacts', ready.runId, String(failed['experiment_id']), String(attempt['attempt_id'])))).toBe(false)
+      }
+      expect(await createCaseController(f, overrides, ready.runId).run()).toEqual(resumed)
+      expect(f.creates).toHaveLength(2)
+      expect(f.subprocess.evaluatorSpawns).toBe(3)
+      tracker.close()
+    } finally { barrier.mockRestore(); rmSync(f.root, { recursive: true, force: true }) }
+  })
+
+  it.each([
+    ['exit', { exitCode: 9 }], ['signal', { signal: 'SIGTERM' as const }], ['timeout', { hang: true }],
+    ['output-limit', { stdout: 'x'.repeat(256), stdoutLimitBytes: 32 }], ['metric-protocol', { stdout: 'not-json\n' }], ['spawn', { spawnError: new Error('provider refused spawn') }],
+  ] as const)('consumes the last candidate budget on %s failure without creating a next child', async (code, failure) => {
+    const { fixture: f } = matrixControllerFixture([{ stdout: '{"score":10}\n' }, failure], [worktree => writeFileSync(join(worktree, 'src', 'code.ts'), 'export const n = 2\n')])
+    const overrides = code === 'timeout' ? { max_experiments: 1, timeout_ms: 250 } : { max_experiments: 1 }
+    try {
+      const { result, tracker } = await runControllerCase(f, overrides)
+      expect(result).toMatchObject({ status: 'budget-limited', counts: { experimentsStarted: 1, experimentsCompleted: 1, attempts: 2 } })
+      expect(f.creates).toHaveLength(1)
+      expect(f.subprocess.evaluatorSpawns).toBe(2)
+      expect(tracker.database.prepare("SELECT ordinal,state,failure_code FROM experiments WHERE kind='candidate'").get()).toEqual({ ordinal: 1, state: code === 'timeout' ? 'timed-out' : 'crashed', failure_code: code })
+      tracker.close()
+    } finally { rmSync(f.root, { recursive: true, force: true }) }
+  })
+
+  it('resumes artifact discards only under the winning controller claim and completes them after a crash', async () => {
+    const { fixture: f } = matrixControllerFixture(
+      [{ stdout: '{"score":10}\n' }, { spawnError: new Error('provider refused spawn') }],
+      [worktree => writeFileSync(join(worktree, 'src', 'code.ts'), 'export const n = 2\n')],
+    )
+    const fault = vi.spyOn(DurableTracker.prototype, 'artifactDiscardMarkedForTest').mockImplementation(() => {
+      throw new Error('artifact discard crash')
+    })
+    try {
+      const interrupted = createCaseController(f, { max_experiments: 1 })
+      await expect(interrupted.run()).rejects.toThrow('artifact discard crash')
+      const ready = await interrupted.ready
+      fault.mockRestore()
+
+      const ownerTracker = DurableTracker.open(ready.tracker)
+      const artifactRows = ownerTracker.database.prepare("SELECT artifact_id, experiment_id, attempt_id, kind, location, retention, size_bytes FROM artifacts WHERE retention = 'discarding' ORDER BY kind").all() as Array<{ artifact_id: string; experiment_id: string; attempt_id: string; kind: string; location: string; retention: string; size_bytes: number }>
+      expect(artifactRows).toHaveLength(2)
+      const { experiment_id: experimentId, attempt_id: attemptId } = artifactRows[0]!
+      const artifactPaths = artifactRows.map(row => join(ownerTracker.layout.root, 'artifacts', ready.runId, row.experiment_id, row.attempt_id, `${row.kind}.log`))
+      expect(artifactRows.map((row, index) => ({ exists: existsSync(artifactPaths[index]!), bytes: readFileSync(artifactPaths[index]!).length, durableBytes: row.size_bytes }))).toEqual([
+        { exists: true, bytes: 0, durableBytes: 0 },
+        { exists: true, bytes: 0, durableBytes: 0 },
+      ])
+      const ownerId = 'active-owner'
+      const ownerProcess = currentControllerProcessIdentity()
+      acquireControllerClaim(ownerTracker, ready.runId, ownerId, 60_000, new Date(), ownerProcess)
+
+      await expect(createCaseController(f, { max_experiments: 1 }, ready.runId).run()).rejects.toMatchObject({ code: 'run-controller-active' })
+      expect(ownerTracker.database.prepare("SELECT artifact_id, retention FROM artifacts WHERE experiment_id = ? AND attempt_id = ? ORDER BY kind").all(experimentId, attemptId)).toEqual(artifactRows.map(({ artifact_id, retention }) => ({ artifact_id, retention })))
+      expect(artifactPaths.every(existsSync)).toBe(true)
+      const genericTracker = DurableTracker.open(ready.tracker)
+      expect(genericTracker.database.prepare("SELECT artifact_id, retention FROM artifacts WHERE experiment_id = ? AND attempt_id = ? ORDER BY kind").all(experimentId, attemptId)).toEqual(artifactRows.map(({ artifact_id, retention }) => ({ artifact_id, retention })))
+      expect(artifactPaths.every(existsSync)).toBe(true)
+      genericTracker.close()
+
+      releaseControllerClaim(ownerTracker, ready.runId, ownerId, ownerProcess)
+      ownerTracker.close()
+      const completed = await createCaseController(f, { max_experiments: 1 }, ready.runId).run()
+      expect(completed).toMatchObject({ status: 'budget-limited', counts: { attempts: 2 } })
+      const recovered = DurableTracker.openReadOnly(ready.tracker)
+      expect(recovered.database.prepare('SELECT * FROM artifacts WHERE experiment_id = ? AND attempt_id = ?').all(experimentId, attemptId)).toEqual([])
+      expect(artifactPaths.every(path => !existsSync(path))).toBe(true)
+      recovered.close()
+    } finally {
+      fault.mockRestore()
+      rmSync(f.root, { recursive: true, force: true })
+    }
+  })
+
   it('reruns a proven-quiescent candidate evaluation exactly once from its recorded candidate commit', async () => {
     const f = controllerFixture([{ stdout: '{"score":10}\n' }, { stdout: '{"score":9}\n' }, { stdout: '{"score":8}\n' }], [(worktree) => writeFileSync(join(worktree, 'src', 'code.ts'), 'export const n = 2\n')])
     const original = DurableTracker.prototype.recordAttemptOutcome
@@ -914,15 +1093,62 @@ describe('controller real Git/SQLite outcomes', () => {
       await expect(createCaseController(f, { max_experiments: 1 }, ready.runId).run()).rejects.toThrow('candidate outcome barrier 2')
       fault.mockRestore()
       const terminal = await createCaseController(f, { max_experiments: 1 }, ready.runId).run()
-      expect(terminal).toMatchObject({ status: 'round-failed', counts: { experimentsStarted: 1, experimentsCompleted: 1, attempts: 3 } })
+      expect(terminal.status).toBe('blocked')
+      if (terminal.status !== 'blocked') throw new Error(`expected blocked recovery result, received ${terminal.status}`)
+      expect(terminal.counts).toEqual({ experimentsStarted: 1, experimentsCompleted: 1, attempts: 3 })
+      expect(terminal.evidence).toEqual([{ code: 'recovery-rerun-exhausted', message: 'canonical evaluator measurement recovery reruns are exhausted', artifacts: [] }])
       const tracker = DurableTracker.open(ready.tracker)
+      const acceptedCommit = String(tracker.getRun(ready.runId)?.['best_commit'])
+      expect(tracker.getRun(ready.runId)).toMatchObject({ state: 'blocked', blocked_code: 'recovery-rerun-exhausted', terminal_reason: 'canonical evaluator measurement recovery reruns are exhausted', terminal_quiescent: 1 })
       expect(tracker.database.prepare("SELECT candidate_commit, state, failure_code FROM experiments WHERE kind = 'candidate'").get()).toEqual({ candidate_commit: candidateCommit, state: 'crashed', failure_code: 'recovery-rerun-exhausted' })
       expect(tracker.database.prepare("SELECT ordinal, process_tree_quiescent, exited_at FROM attempts WHERE experiment_id LIKE '%-candidate-%' ORDER BY ordinal").all()).toEqual([
         { ordinal: 1, process_tree_quiescent: 1, exited_at: null },
         { ordinal: 2, process_tree_quiescent: 1, exited_at: null },
       ])
+      expect(execFileSync('git', ['-C', ready.worktree, 'rev-parse', 'HEAD']).toString().trim()).toBe(acceptedCommit)
       expect(candidateAuditCommits(f.root, ready.runId)).toEqual([candidateCommit])
+      expect(tracker.database.prepare('SELECT released_at FROM active_locks WHERE run_id = ?').get(ready.runId)?.['released_at']).not.toBeNull()
+      expect(controllerClaims(String(tracker.getRun(ready.runId)?.['git_common_dir']), ready.runId)).toEqual([])
       tracker.close()
+      const replay = await createCaseController(f, { max_experiments: 1 }, ready.runId).run()
+      expect(replay).toEqual(terminal)
+      expect(execFileSync('git', ['-C', ready.worktree, 'rev-parse', 'HEAD']).toString().trim()).toBe(acceptedCommit)
+      expect(f.subprocess.evaluatorSpawns).toBe(3)
+    } finally { fault.mockRestore(); rmSync(f.root, { recursive: true, force: true }) }
+  })
+
+  it('replays exhausted baseline recovery without fabricating an evaluator exit', async () => {
+    const f = controllerFixture([{ stdout: '{"score":10}\n' }, { stdout: '{"score":9}\n' }, { stdout: '{"score":8}\n' }])
+    const original = DurableTracker.prototype.recordAttemptOutcome
+    let interruptions = 0
+    const fault = vi.spyOn(DurableTracker.prototype, 'recordAttemptOutcome').mockImplementation(function (attemptId, facts) {
+      if (attemptId.includes('-baseline-') && interruptions < 2) {
+        interruptions++
+        this.database.prepare('UPDATE attempts SET process_tree_quiescent = 1 WHERE attempt_id = ?').run(attemptId)
+        throw new Error(`baseline outcome barrier ${interruptions}`)
+      }
+      return original.call(this, attemptId, facts)
+    })
+    try {
+      const first = createCaseController(f, { max_experiments: 1 })
+      await expect(first.run()).rejects.toThrow('baseline outcome barrier 1')
+      const ready = await first.ready
+      await expect(createCaseController(f, { max_experiments: 1 }, ready.runId).run()).rejects.toThrow('baseline outcome barrier 2')
+      fault.mockRestore()
+      const terminal = await createCaseController(f, { max_experiments: 1 }, ready.runId).run()
+      expect(terminal).toMatchObject({ status: 'round-failed', evidence: [{ code: 'recovery-rerun-exhausted' }], counts: { experimentsStarted: 0, experimentsCompleted: 0, attempts: 2 } })
+      expect(terminal).not.toHaveProperty('exit')
+      const tracker = DurableTracker.open(ready.tracker)
+      expect(tracker.getRun(ready.runId)).toMatchObject({ state: 'blocked', blocked_code: 'recovery-rerun-exhausted', terminal_quiescent: 1 })
+      expect(tracker.database.prepare("SELECT state, failure_code FROM experiments WHERE kind = 'baseline'").get()).toEqual({ state: 'crashed', failure_code: 'recovery-rerun-exhausted' })
+      expect(tracker.database.prepare("SELECT a.ordinal, a.process_tree_quiescent, a.exited_at FROM attempts a INNER JOIN experiments e ON e.run_id = a.run_id AND e.experiment_id = a.experiment_id WHERE a.run_id = ? AND e.kind = 'baseline' ORDER BY a.ordinal").all(ready.runId)).toEqual([
+        { ordinal: 1, process_tree_quiescent: 1, exited_at: null },
+        { ordinal: 2, process_tree_quiescent: 1, exited_at: null },
+      ])
+      tracker.close()
+      expect(await createCaseController(f, { max_experiments: 1 }, ready.runId).run()).toEqual(terminal)
+      expect(f.creates).toHaveLength(0)
+      expect(f.subprocess.evaluatorSpawns).toBe(2)
     } finally { fault.mockRestore(); rmSync(f.root, { recursive: true, force: true }) }
   })
 
@@ -966,7 +1192,171 @@ describe('controller real Git/SQLite outcomes', () => {
 
   it('persists a terminal experiment and artifacts before the next child and releases only after terminal run persistence', async () => {
     const f = controllerFixture([{ stdout: '{"score":10}\n' }, { stdout: '{"score":9}\n' }, { stdout: '{"score":8}\n' }], [(worktree, ordinal) => writeFileSync(join(worktree, 'src', 'code.ts'), `export const n = ${ordinal + 1}\n`), (worktree, ordinal) => writeFileSync(join(worktree, 'src', 'code.ts'), `export const n = ${ordinal + 1}\n`)])
+
     try { const { result, tracker } = await runControllerCase(f, { max_experiments: 2 }); expect(result).toMatchObject({ status: 'budget-limited', counts: { experimentsStarted: 2, experimentsCompleted: 2, attempts: 3 } }); const experiments = tracker.database.prepare("SELECT state FROM experiments WHERE kind='candidate' ORDER BY ordinal").all(); expect(experiments).toEqual([{ state: 'accepted' }, { state: 'accepted' }]); expect(tracker.database.prepare('SELECT released_at FROM active_locks').get()?.['released_at']).not.toBeNull(); expect(f.order.filter(item => item.includes('child'))).toEqual(['child-1-create', 'child-1-dispose-start', 'child-1-dispose-end', 'child-2-create', 'child-2-dispose-start', 'child-2-dispose-end']); tracker.close() } finally { rmSync(f.root, { recursive: true, force: true }) }
+  })
+  it.each(['live', 'crash-resume'] as const)('durably records frozen-file mutation evidence and safely replays after %s evaluation', async mode => {
+    const f = controllerFixture(
+      [
+        { stdout: '{"score":10}\n' },
+        { stdout: '{"score":9}\n', stderr: 'bounded evaluator stderr\n', afterOutcome: worktree => writeFileSync(join(worktree, 'evaluate.mjs'), '// mutated after evaluator outcome\n') },
+      ],
+      [worktree => writeFileSync(join(worktree, 'src', 'code.ts'), 'export const n = 2\n')],
+    )
+    const commitTerminal = DurableTracker.prototype.commitTerminalExperiment
+    let interrupted = false
+    const barrier = mode === 'crash-resume'
+      ? vi.spyOn(DurableTracker.prototype, 'commitTerminalExperiment').mockImplementation(function (experimentId, state, facts, at) {
+          if (experimentId.includes('-candidate-') && !interrupted) { interrupted = true; throw new Error('crash after durable frozen mismatch attempt') }
+          return commitTerminal.call(this, experimentId, state, facts, at)
+        })
+      : undefined
+    try {
+      const controller = createCaseController(f, { max_experiments: 1 })
+      let ready: AutoresearchRunReady
+      let result
+      if (barrier) {
+        await expect(controller.run()).rejects.toThrow('crash after durable frozen mismatch attempt')
+        ready = await controller.ready
+        barrier.mockRestore()
+        const stranded = DurableTracker.openReadOnly(ready.tracker)
+        expect(stranded.database.prepare("SELECT state FROM experiments WHERE kind = 'candidate'").get()).toEqual({ state: 'running' })
+        expect(stranded.database.prepare('SELECT released_at FROM active_locks WHERE run_id = ?').get(ready.runId)).toEqual({ released_at: null })
+        stranded.close()
+        result = await createCaseController(f, { max_experiments: 1 }, ready.runId).run()
+      } else {
+        result = await controller.run()
+        ready = await controller.ready
+      }
+      expect(result).toMatchObject({ status: 'blocked', evidence: [{ code: 'provenance-mismatch' }] })
+      const tracker = DurableTracker.openReadOnly(ready.tracker)
+      const run = tracker.getRun(ready.runId)!
+      const candidate = tracker.database.prepare("SELECT experiment_id, state, failure_code, failure_message FROM experiments WHERE kind = 'candidate'").get()!
+      expect(candidate).toMatchObject({ state: 'policy-violation', failure_code: 'provenance-mismatch' })
+      expect(String(candidate['failure_message'])).toMatch(/frozen .*file|immutable manifest/iu)
+      const attempt = tracker.database.prepare('SELECT attempt_id, exited_at, exit_code, signal, timed_out, process_tree_quiescent, failure_code, failure_message, outcome_json FROM attempts WHERE experiment_id = ?').get(candidate['experiment_id'])!
+      expect(attempt).toMatchObject({ exit_code: 0, signal: null, timed_out: 0, process_tree_quiescent: 1, failure_code: null, failure_message: null })
+      const durableOutcome = JSON.parse(String(attempt['outcome_json']))
+      expect(durableOutcome).toEqual({ kind: 'measured', metric: 9 })
+      expect(tracker.database.prepare('SELECT kind, size_bytes, owner, retention FROM artifacts WHERE attempt_id = ? ORDER BY kind').all(attempt['attempt_id'])).toEqual([
+        { kind: 'stderr', size_bytes: 25, owner: 'evaluator', retention: 'retain' },
+        { kind: 'stdout', size_bytes: 12, owner: 'evaluator', retention: 'retain' },
+      ])
+      const mismatchTransitions = tracker.listTransitions(ready.runId).flatMap(row => {
+        if (row['outcome_json'] === null) return []
+        const outcome = JSON.parse(String(row['outcome_json'])) as { kind?: string; code?: string; evaluatorResult?: unknown; evidence?: Array<{ code: string }> }
+        return outcome.kind === 'frozen-file-policy-mismatch' ? [{ kind: outcome.kind, code: outcome.code, evaluatorResult: outcome.evaluatorResult, evidence: outcome.evidence?.map(item => ({ code: item.code })) }] : []
+      })
+      expect(mismatchTransitions).toEqual([{ kind: 'frozen-file-policy-mismatch', code: 'provenance-mismatch', evaluatorResult: durableOutcome, evidence: [{ code: 'provenance-mismatch' }] }])
+      expect(run).toMatchObject({ state: 'blocked', blocked_code: 'provenance-mismatch', terminal_quiescent: 1 })
+      expect(execFileSync('git', ['-C', ready.worktree, 'rev-parse', 'HEAD']).toString().trim()).toBe(run['best_commit'])
+      expect(tracker.database.prepare('SELECT released_at FROM active_locks WHERE run_id = ?').get(ready.runId)?.['released_at']).not.toBeNull()
+      tracker.close()
+      expect(await createCaseController(f, { max_experiments: 1 }, ready.runId).run()).toEqual(result)
+    } finally {
+      barrier?.mockRestore()
+      rmSync(f.root, { recursive: true, force: true })
+    }
+  })
+  it('retains nonterminal ownership when frozen-mismatch persistence itself fails', async () => {
+    const f = controllerFixture(
+      [
+        { stdout: '{"score":10}\n' },
+        { stdout: '{"score":9}\n', edit: worktree => writeFileSync(join(worktree, 'evaluate.mjs'), '// mutated after evaluator spawn\n') },
+      ],
+      [worktree => writeFileSync(join(worktree, 'src', 'code.ts'), 'export const n = 2\n')],
+    )
+    const original = DurableTracker.prototype.recordAttemptOutcome
+    const fault = vi.spyOn(DurableTracker.prototype, 'recordAttemptOutcome').mockImplementation(function (attemptId, checkpoint, at) {
+      if (attemptId.includes('-candidate-')) throw new Error('injected frozen mismatch persistence failure')
+      return original.call(this, attemptId, checkpoint, at)
+    })
+    try {
+      const controller = createCaseController(f, { max_experiments: 1 })
+      await expect(controller.run()).rejects.toThrow('injected frozen mismatch persistence failure')
+      const ready = await controller.ready
+      const tracker = DurableTracker.openReadOnly(ready.tracker)
+      expect(tracker.database.prepare("SELECT state FROM experiments WHERE kind = 'candidate'").get()).toEqual({ state: 'running' })
+      expect(tracker.database.prepare("SELECT exited_at, process_tree_quiescent, outcome_json FROM attempts WHERE experiment_id IN (SELECT experiment_id FROM experiments WHERE kind = 'candidate')").get()).toEqual({ exited_at: null, process_tree_quiescent: null, outcome_json: null })
+      expect(tracker.database.prepare('SELECT COUNT(*) AS n FROM artifacts WHERE experiment_id IN (SELECT experiment_id FROM experiments WHERE kind = ?)').get('candidate')).toEqual({ n: 0 })
+      expect(tracker.database.prepare('SELECT released_at FROM active_locks WHERE run_id = ?').get(ready.runId)).toEqual({ released_at: null })
+      tracker.close()
+    } finally {
+      fault.mockRestore()
+      rmSync(f.root, { recursive: true, force: true })
+    }
+  })
+  it.each(['live', 'resume'] as const)('retains the run lock when frozen evaluator rejection git reconciliation is blocked during %s recovery', async mode => {
+    let armGitFailure = false
+    let gitFailures = 0
+    const { fixture: f } = matrixControllerFixture(
+      [
+        { stdout: '{"score":10}\n' },
+        { stdout: '{"score":9}\n', afterOutcome: worktree => { writeFileSync(join(worktree, 'evaluate.mjs'), '// violated frozen evaluator after outcome\n'); armGitFailure = true } },
+      ],
+      [worktree => writeFileSync(join(worktree, 'src', 'code.ts'), 'export const n = 2\n')],
+      { gitSpawnFailure: spec => armGitFailure && spec.argv.includes('read-tree') && spec.argv.includes('--reset') && gitFailures++ === 0 ? new Error('injected rejected-head git failure') : undefined },
+    )
+    const checkpoint = DurableTracker.prototype.checkpointRun
+    const barrier = mode === 'resume'
+      ? vi.spyOn(DurableTracker.prototype, 'checkpointRun').mockImplementation(function (runId, facts, at) {
+          const intent = facts.intent as { kind?: string; outcome?: { kind?: string; code?: string } } | undefined
+          if (intent?.kind === 'git-reconciliation' && intent.outcome?.kind === 'terminal-block' && intent.outcome.code === 'provenance-mismatch') {
+            checkpoint.call(this, runId, facts, at)
+            throw new Error('frozen rejection crash barrier')
+          }
+          return checkpoint.call(this, runId, facts, at)
+        })
+      : undefined
+    try {
+      const controller = createCaseController(f, { max_experiments: 1 })
+      let ready: AutoresearchRunReady
+      let result
+      if (mode === 'resume') {
+        await expect(controller.run()).rejects.toThrow('frozen rejection crash barrier')
+        ready = await controller.ready
+        const seeded = DurableTracker.open(ready.tracker)
+        const experimentId = String(seeded.database.prepare("SELECT experiment_id FROM experiments WHERE run_id = ? AND kind = 'candidate' ORDER BY ordinal DESC LIMIT 1").get(ready.runId)!['experiment_id'])
+        expect(seeded.database.prepare('SELECT outcome_json, failure_code FROM attempts WHERE run_id = ? AND experiment_id = ? ORDER BY ordinal DESC LIMIT 1').get(ready.runId, experimentId)).toEqual({ outcome_json: JSON.stringify({ kind: 'measured', metric: 9 }), failure_code: null })
+        expect(seeded.database.prepare('SELECT state, failure_code, failure_message FROM experiments WHERE run_id = ? AND experiment_id = ?').get(ready.runId, experimentId)).toMatchObject({ state: 'policy-violation', failure_code: 'provenance-mismatch' })
+        expect(seeded.getRun(ready.runId)).toMatchObject({ state: 'deciding' })
+        const mismatchBarrier = seeded.listTransitions(ready.runId).map(row => row['outcome_json'] === null ? undefined : JSON.parse(String(row['outcome_json']))).find(outcome => outcome?.kind === 'frozen-file-policy-mismatch')
+        expect(mismatchBarrier).toMatchObject({ code: 'provenance-mismatch', evaluatorResult: { kind: 'measured', metric: 9 } })
+        seeded.close()
+        barrier!.mockRestore()
+        result = await createCaseController(f, { max_experiments: 1 }, ready.runId).run()
+      } else {
+        result = await controller.run()
+        ready = await controller.ready
+      }
+      if (result.status !== 'blocked') throw new Error(`expected blocked result, received ${result.status}`)
+      const evidence = result.evidence
+      expect(evidence.map(item => ({ code: item.code, artifacts: item.artifacts }))).toEqual([
+        { code: 'git-command-failed', artifacts: [] },
+        { code: 'git-command-failed', artifacts: [] },
+      ])
+      expect(evidence.map(item => item.message)).toEqual(evidence.map(item => item.message.trim()))
+      expect(evidence.every(item => item.message.length > 0)).toBe(true)
+      expect(decodeRunResult(result, 'minimize')).toEqual(result)
+      expect(gitFailures).toBe(1)
+      const tracker = DurableTracker.openReadOnly(ready.tracker)
+      const candidateAttempt = tracker.database.prepare("SELECT outcome_json, failure_code FROM attempts WHERE run_id = ? AND experiment_id IN (SELECT experiment_id FROM experiments WHERE run_id = ? AND kind = 'candidate') ORDER BY ordinal DESC LIMIT 1").get(ready.runId, ready.runId)
+      expect(candidateAttempt).toEqual({ outcome_json: JSON.stringify({ kind: 'measured', metric: 9 }), failure_code: null })
+      const mismatchTransitions = tracker.listTransitions(ready.runId).flatMap(row => {
+        if (row['outcome_json'] === null) return []
+        const transition = JSON.parse(String(row['outcome_json'])) as { kind?: string; code?: string; evaluatorResult?: unknown }
+        return transition.kind === 'frozen-file-policy-mismatch' ? [{ kind: transition.kind, code: transition.code, evaluatorResult: transition.evaluatorResult }] : []
+      })
+      expect(mismatchTransitions).toEqual([{ kind: 'frozen-file-policy-mismatch', code: 'provenance-mismatch', evaluatorResult: { kind: 'measured', metric: 9 } }])
+      expect(tracker.getRun(ready.runId)).toMatchObject({ state: 'deciding', blocked_code: 'git-reconciliation-failed' })
+      expect(tracker.database.prepare('SELECT released_at FROM active_locks WHERE run_id = ?').get(ready.runId)).toEqual({ released_at: null })
+      const outcome = JSON.parse(String(tracker.listTransitions(ready.runId).at(-1)?.['outcome_json'])) as { kind: string; code: string; head: string }
+      expect(outcome).toMatchObject({ kind: 'git-reconciliation-blocked', code: 'git-command-failed', head: 'uncertain' })
+      tracker.close()
+    } finally {
+      barrier?.mockRestore()
+      rmSync(f.root, { recursive: true, force: true })
+    }
   })
 
   it('durably retains the terminal lock when proposal disposal leaves child ownership uncertain', async () => {
@@ -1156,7 +1546,7 @@ describe('controller real Git/SQLite outcomes', () => {
   })
 
   it('treats forbidden child edits as a host policy failure while a child blocker claim remains non-authoritative', async () => {
-    const f = controllerFixture([{ stdout: '{"score":10}\n' }], [(worktree) => writeFileSync(join(worktree, 'package.json'), '{}\n')])
+    const f = controllerFixture([{ stdout: '{"score":10}\n' }], [(worktree) => writeFileSync(join(worktree, 'package.json'), '{}\n')], {}, { blockerClaim: 'the child claims this policy edit is required' })
     try { const { result, tracker } = await runControllerCase(f, { mutable_globs: ['**'], max_experiments: 1 }); expect(result).toMatchObject({ status: 'round-failed' }); expect(String((result as { reason: string }).reason)).toMatch(/forbidden|protected|policy/iu); expect(tracker.database.prepare("SELECT COUNT(*) AS n FROM experiments WHERE kind='candidate'").get()?.['n']).toBe(0); const outcomes = tracker.listTransitions(String((result as { runId: string }).runId)).map(row => String(row['outcome_json'])); expect(outcomes.some(value => value.includes('child-blocker-claim') && value.includes('false'))).toBe(true); tracker.close() } finally { rmSync(f.root, { recursive: true, force: true }) }
   })
 })
