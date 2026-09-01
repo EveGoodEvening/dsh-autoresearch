@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { SubprocessHandle, SubprocessOutcome, SubprocessOutputRead, SubprocessOutputReader, SubprocessSpawnSpec } from '@deepseek-ai/dsh-subprocess'
-import { captureFrozenFileAttempt, createEvaluatorBoundary, deriveRegistrationManifest, freezeEvaluatorProvenance, parseFinalLineMetric, recomputeRegistrationManifest, revalidateFrozenFileAttempt, runEvaluator } from '../src/evaluator.ts'
+import { captureFrozenFileAttempt, createEvaluatorBoundary, deriveRegistrationManifest, freezeEvaluatorProvenance, FrozenEvaluatorBoundaryError, parseFinalLineMetric, recomputeRegistrationManifest, revalidateFrozenFileAttempt, runEvaluator } from '../src/evaluator.ts'
 import type { EvaluatorPersistence } from '../src/evaluator.ts'
 import { EvaluatorArtifactWriter } from '../src/evaluator-artifacts.ts'
 import { StateLayout } from '../src/state-layout.ts'
@@ -207,9 +207,9 @@ describe('activated frozen registration files', () => {
     expect(Object.values(manifest).every(value => /^[0-9a-f]{64}$/u.test(value))).toBe(true)
     expect(recomputeRegistrationManifest(paths.root, manifest)).toEqual(manifest)
     writeFileSync(join(paths.root, 'data', 'train.json'), '{"rows":2}\n')
-    expect(() => recomputeRegistrationManifest(paths.root, manifest)).toThrow(/run-creation manifest/)
+    expect(() => recomputeRegistrationManifest(paths.root, manifest)).toThrow(FrozenEvaluatorBoundaryError)
     rmSync(join(paths.root, 'data', 'train.json'))
-    expect(() => recomputeRegistrationManifest(paths.root, manifest)).toThrow()
+    expect(() => recomputeRegistrationManifest(paths.root, manifest)).toThrow(FrozenEvaluatorBoundaryError)
   })
 
   it('rejects symlinks and detects attempt-local inode swaps even when bytes are unchanged', () => {
@@ -217,9 +217,11 @@ describe('activated frozen registration files', () => {
     const attempt = captureFrozenFileAttempt(paths.root, manifest)
     const dataset = join(paths.root, 'data', 'train.json'); renameSync(dataset, `${dataset}.old`); writeFileSync(dataset, '{"rows":1}\n')
     expect(() => revalidateFrozenFileAttempt(paths.root, attempt)).toThrow(/device\/inode/)
+    expect(() => revalidateFrozenFileAttempt(paths.root, attempt)).toThrow(FrozenEvaluatorBoundaryError)
 
     rmSync(dataset); symlinkSync(`${dataset}.old`, dataset)
     expect(() => captureFrozenFileAttempt(paths.root, manifest)).toThrow(/symbolic link/)
+    expect(() => captureFrozenFileAttempt(paths.root, manifest)).toThrow(FrozenEvaluatorBoundaryError)
   })
 
   it('never combines digest and inode from different descriptors during replacement', () => {
@@ -234,11 +236,27 @@ describe('activated frozen registration files', () => {
     } catch (caught) {
       error = caught
     }
-    expect(error).toBeInstanceOf(TypeError)
+    expect(error).toBeInstanceOf(FrozenEvaluatorBoundaryError)
     expect([
       'frozen registration file changed while it was read',
       'frozen registration file changed during evaluator startup',
     ]).toContain((error as TypeError).message)
+  })
+
+  it.each(['EMFILE', 'EIO'] as const)('propagates operational %s failures without classifying them as frozen drift', code => {
+    const paths = fixture(); const manifest = deriveRegistrationManifest(paths.root, registration(paths.root))
+    const operational = Object.assign(new Error(`${code}: injected filesystem failure`), { code })
+    let caught: unknown
+    try { captureFrozenFileAttempt(paths.root, manifest, { afterOpen() { throw operational } }) }
+    catch (error) { caught = error }
+    expect(caught).toBe(operational)
+    expect(caught).not.toBeInstanceOf(FrozenEvaluatorBoundaryError)
+  })
+
+  it('does not convert hook validation failures even when their code resembles filesystem drift', () => {
+    const paths = fixture(); const manifest = deriveRegistrationManifest(paths.root, registration(paths.root))
+    const hookFailure = Object.assign(new TypeError('hook rejected capture'), { code: 'ENOENT' })
+    expect(() => captureFrozenFileAttempt(paths.root, manifest, { afterOpen() { throw hookFailure } })).toThrow(hookFailure)
   })
 
   it('normalizes only algorithm-qualified external dataset identity without creating local manifest paths', () => {
@@ -544,8 +562,22 @@ describe('host-owned evaluator execution', () => {
       return handle
     }
     const result = await runEvaluator(setup.value)
-    expect(result).toMatchObject({ kind: 'failed', code: 'spawn', exit: { processTreeQuiescent: true } })
+    expect(result).toMatchObject({
+      kind: 'failed',
+      code: 'frozen-boundary',
+      message: 'evaluator cwd changed during evaluator startup',
+      exit: { providerPid: expect.any(Number), processTreeQuiescent: true },
+    })
     expect(setup.runtime.terminated).toBe(1)
+    expect(setup.runtime.waited).toBe(1)
+    expect(setup.value.persistence.events).toEqual(['intent', 'observed', 'outcome'])
+    expect(setup.value.persistence.observed).toEqual({ providerPid: result.exit.providerPid, spawnedAt: result.exit.spawnedAt })
+    expect(setup.value.persistence.outcome?.[0]).toMatchObject({
+      kind: 'failed',
+      code: 'frozen-boundary',
+      message: 'evaluator cwd changed during evaluator startup',
+      exit: { providerPid: result.exit.providerPid, processTreeQuiescent: true },
+    })
   })
 
   it('binds cwd and argv to the frozen normalized policy and immutable controller worktree identity', async () => {
@@ -619,11 +651,13 @@ describe('host-owned evaluator execution', () => {
     const spillResult = await runEvaluator(spilled.value)
     expect(spillResult.artifacts.map(item => readFileSync(spilled.artifactWriter.internalPath(item.kind), 'utf8')).join('\n')).not.toContain(secret)
 
-    const throwing = options(fakeRuntime(), { environment: { ORDINARY: secret } })
+    const throwingRuntime = fakeRuntime()
+    const throwing = options(throwingRuntime, { environment: { ORDINARY: secret } })
     throwing.value.persistence.persistSpawnObserved = () => { throw new Error(secret) }
-    const throwingResult = await runEvaluator(throwing.value)
-    expect(throwingResult).toMatchObject({ kind: 'failed', code: 'spawn', message: 'evaluator provider spawn failed' })
-    expect(JSON.stringify(throwingResult)).not.toContain(secret)
+    await expect(runEvaluator(throwing.value)).rejects.toThrow('[REDACTED]')
+    expect(throwingRuntime.terminated).toBe(1)
+    expect(throwingRuntime.waited).toBe(1)
+    expect(throwing.value.persistence.outcome).toBeUndefined()
     const outcomeThrowing = options(fakeRuntime(), { environment: { ORDINARY: secret } })
     outcomeThrowing.value.persistence.persistAttemptOutcome = () => { throw new Error(secret) }
     await expect(runEvaluator(outcomeThrowing.value)).rejects.toThrow('[REDACTED]')
@@ -727,7 +761,7 @@ describe('host-owned evaluator execution', () => {
     expect(readFileSync(writer.internalPath('stdout'), 'utf8')).toBe('ok')
   })
 
-  it('terminates and persists failure when a declared file is replaced during spawn', async () => {
+  it('durably owns a post-spawn frozen-boundary failure through quiescence and finalized artifacts', async () => {
     const setup = options()
     const originalSpawn = setup.runtime.runtime.spawn
     setup.runtime.runtime.spawn = spec => {
@@ -738,11 +772,16 @@ describe('host-owned evaluator execution', () => {
       return handle
     }
     const result = await runEvaluator(setup.value)
-    expect(result).toMatchObject({ kind: 'failed', code: 'spawn', exit: { processTreeQuiescent: true } })
+    expect(result).toMatchObject({ kind: 'failed', code: 'frozen-boundary', exit: { providerPid: expect.any(Number), spawnedAt: expect.any(String), exitedAt: expect.any(String), processTreeQuiescent: true, cancelled: false, timedOut: false } })
+    expect(setup.runtime.spec).toBeDefined()
     expect(setup.runtime.terminated).toBe(1)
     expect(setup.runtime.waited).toBe(1)
-    expect(setup.value.persistence.events).toEqual(['intent', 'outcome'])
-    expect(setup.value.persistence.outcome?.[0]).toMatchObject({ kind: 'failed', code: 'spawn', exit: { failureCode: 'spawn', processTreeQuiescent: true } })
+    expect(setup.value.persistence.events).toEqual(['intent', 'observed', 'outcome'])
+    expect(setup.value.persistence.observed).toEqual({ providerPid: result.exit.providerPid, spawnedAt: result.exit.spawnedAt })
+    expect(setup.value.persistence.outcome?.[0]).toMatchObject({ kind: 'failed', code: 'frozen-boundary', exit: { providerPid: result.exit.providerPid, processTreeQuiescent: true } })
+    expect(setup.value.persistence.outcome?.[1]).toEqual(result.artifacts)
+    expect(result.artifacts.map(item => item.kind).sort()).toEqual(['stderr', 'stdout'])
+    expect(result.artifacts.every(item => item.sizeBytes <= (item.kind === 'stdout' ? 128 : 64))).toBe(true)
   })
 
   it('writes artifacts exclusively under an owner-only StateLayout capability', async () => {

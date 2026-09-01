@@ -1521,11 +1521,11 @@ describe('controller real Git/SQLite outcomes', () => {
 
     try { const { result, tracker } = await runControllerCase(f, { max_experiments: 2 }); expect(result).toMatchObject({ status: 'budget-limited', counts: { experimentsStarted: 2, experimentsCompleted: 2, attempts: 3 } }); const experiments = tracker.database.prepare("SELECT state FROM experiments WHERE kind='candidate' ORDER BY ordinal").all(); expect(experiments).toEqual([{ state: 'accepted' }, { state: 'accepted' }]); expect(tracker.database.prepare('SELECT released_at FROM active_locks').get()?.['released_at']).not.toBeNull(); expect(f.order.filter(item => item.includes('child'))).toEqual(['child-1-create', 'child-1-dispose-start', 'child-1-dispose-end', 'child-2-create', 'child-2-dispose-start', 'child-2-dispose-end']); tracker.close() } finally { rmSync(f.root, { recursive: true, force: true }) }
   })
-  it.each(['live', 'crash-resume'] as const)('durably records frozen-file mutation evidence and safely replays after %s evaluation', async mode => {
+  it.each(['live', 'crash-resume'] as const)('durably records frozen-file disappearance evidence and safely replays after %s evaluation', async mode => {
     const f = controllerFixture(
       [
         { stdout: '{"score":10}\n' },
-        { stdout: '{"score":9}\n', stderr: 'bounded evaluator stderr\n', afterOutcome: worktree => writeFileSync(join(worktree, 'evaluate.mjs'), '// mutated after evaluator outcome\n') },
+        { stdout: '{"score":9}\n', stderr: 'bounded evaluator stderr\n', afterOutcome: worktree => rmSync(join(worktree, 'evaluate.mjs')) },
       ],
       [worktree => writeFileSync(join(worktree, 'src', 'code.ts'), 'export const n = 2\n')],
     )
@@ -1559,7 +1559,7 @@ describe('controller real Git/SQLite outcomes', () => {
       const run = tracker.getRun(ready.runId)!
       const candidate = tracker.database.prepare("SELECT experiment_id, state, failure_code, failure_message FROM experiments WHERE kind = 'candidate'").get()!
       expect(candidate).toMatchObject({ state: 'policy-violation', failure_code: 'provenance-mismatch' })
-      expect(String(candidate['failure_message'])).toMatch(/frozen .*file|immutable manifest/iu)
+      expect(String(candidate['failure_message'])).toMatch(/ENOENT|frozen .*file|immutable manifest/iu)
       const attempt = tracker.database.prepare('SELECT attempt_id, exited_at, exit_code, signal, timed_out, process_tree_quiescent, failure_code, failure_message, outcome_json FROM attempts WHERE experiment_id = ?').get(candidate['experiment_id'])!
       expect(attempt).toMatchObject({ exit_code: 0, signal: null, timed_out: 0, process_tree_quiescent: 1, failure_code: null, failure_message: null })
       const durableOutcome = JSON.parse(String(attempt['outcome_json']))
@@ -1588,7 +1588,7 @@ describe('controller real Git/SQLite outcomes', () => {
     const f = controllerFixture(
       [
         { stdout: '{"score":10}\n' },
-        { stdout: '{"score":9}\n', edit: worktree => writeFileSync(join(worktree, 'evaluate.mjs'), '// mutated after evaluator spawn\n') },
+        { stdout: '{"score":9}\n', afterOutcome: worktree => writeFileSync(join(worktree, 'evaluate.mjs'), '// mutated after evaluator outcome\n') },
       ],
       [worktree => writeFileSync(join(worktree, 'src', 'code.ts'), 'export const n = 2\n')],
     )

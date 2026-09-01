@@ -8,6 +8,10 @@ import { EvaluatorArtifactWriter, normalizeRedactionSecrets, type EvaluatorArtif
 
 export const EVALUATOR_PARSER_VERSION = 'final-line-json-v1' as const
 
+export class FrozenEvaluatorBoundaryError extends TypeError {
+  constructor(message: string) { super(message); this.name = 'FrozenEvaluatorBoundaryError' }
+}
+
 export interface EvaluatorProvenanceInput {
   readonly evaluation: EvaluatorArgv
   readonly evaluatorFiles?: readonly string[]
@@ -79,18 +83,18 @@ export function revalidateFrozenFileAttempt(worktree: string, boundary: FrozenFi
   const expectedManifest = normalizeRegistrationManifest(boundary.manifest)
   const expectedPaths = Object.keys(expectedManifest)
   const boundaryPaths = boundary.files.map(file => file.path)
-  if (boundaryPaths.length !== expectedPaths.length || boundaryPaths.some((path, index) => path !== expectedPaths[index])) throw new TypeError('frozen file boundary must contain exactly every manifest path in canonical order')
+  if (boundaryPaths.length !== expectedPaths.length || boundaryPaths.some((path, index) => path !== expectedPaths[index])) throw new FrozenEvaluatorBoundaryError('frozen file boundary must contain exactly every manifest path in canonical order')
   for (const expected of boundary.files) {
-    if (expectedManifest[expected.path] !== expected.sha256) throw new TypeError(`frozen file boundary manifest changed: ${expected.path}`)
+    if (expectedManifest[expected.path] !== expected.sha256) throw new FrozenEvaluatorBoundaryError(`frozen file boundary manifest changed: ${expected.path}`)
     const current = captureFrozenFile(root, expected.path, expected.sha256, hooks)
-    if (current.dev !== expected.dev || current.ino !== expected.ino) throw new TypeError(`frozen file device/inode changed during attempt: ${expected.path}`)
+    if (current.dev !== expected.dev || current.ino !== expected.ino) throw new FrozenEvaluatorBoundaryError(`frozen file device/inode changed during attempt: ${expected.path}`)
   }
 }
 
 export function recomputeRegistrationManifest(worktree: string, manifest: RegistrationManifest): RegistrationManifest {
   const expected = normalizeRegistrationManifest(manifest)
   const recomputed = deriveManifestFromPaths(canonicalWorktree(worktree), Object.keys(expected))
-  if (canonicalJson(recomputed) !== canonicalJson(expected)) throw new TypeError('frozen file content differs from run-creation manifest')
+  if (canonicalJson(recomputed) !== canonicalJson(expected)) throw new FrozenEvaluatorBoundaryError('frozen file content differs from run-creation manifest')
   return Object.freeze(recomputed)
 }
 
@@ -110,17 +114,17 @@ export interface EvaluatorAttemptFacts {
 }
 
 export type EvaluatorFailureCode = 'spawn' | 'timeout' | 'cancelled' | 'exit' | 'signal' | 'output-limit' | 'metric-protocol'
+export type ControllerAttemptFailureCode = 'frozen-boundary'
 export type EvaluatorOutcome =
   | { readonly kind: 'measured'; readonly metric: number; readonly provenanceSha256: string; readonly exit: EvaluatorAttemptFacts }
   | { readonly kind: 'failed'; readonly code: EvaluatorFailureCode; readonly message: string; readonly provenanceSha256: string; readonly exit: EvaluatorAttemptFacts }
-export type EvaluatorResult =
-  | (Extract<EvaluatorOutcome, { kind: 'measured' }> & { readonly artifacts: readonly EvaluatorArtifactInput[] })
-  | (Extract<EvaluatorOutcome, { kind: 'failed' }> & { readonly artifacts: readonly EvaluatorArtifactInput[] })
+export type DurableAttemptOutcome = EvaluatorOutcome | { readonly kind: 'failed'; readonly code: ControllerAttemptFailureCode; readonly message: string; readonly provenanceSha256: string; readonly exit: EvaluatorAttemptFacts }
+export type EvaluatorResult = DurableAttemptOutcome & { readonly artifacts: readonly EvaluatorArtifactInput[] }
 
 export interface EvaluatorPersistence {
   persistSpawnIntent(intent: Readonly<{ argv: readonly string[]; cwd: string; env: Readonly<Record<string, string>>; provenanceSha256: string }>): void
   persistSpawnObserved(facts: Readonly<{ providerPid: number; spawnedAt: string }>): void
-  persistAttemptOutcome(outcome: EvaluatorOutcome, artifacts: readonly EvaluatorArtifactInput[]): void
+  persistAttemptOutcome(outcome: DurableAttemptOutcome, artifacts: readonly EvaluatorArtifactInput[]): void
 }
 
 export interface EvaluatorRunOptions {
@@ -145,7 +149,7 @@ export interface EvaluatorRunOptions {
 
 export function captureEvaluatorWorktreeIdentity(worktree: string): EvaluatorWorktreeIdentity {
   const canonical = canonicalWorktree(worktree)
-  const stat = statSync(canonical)
+  const stat = boundaryFilesystemRead(() => statSync(canonical))
   if (!stat.isDirectory()) throw new TypeError('evaluator worktree must be a directory')
   return Object.freeze({ canonical, dev: stat.dev, ino: stat.ino })
 }
@@ -179,7 +183,7 @@ export function revalidateEvaluatorBoundary(worktree: string, boundary: Evaluato
   const root = assertBoundaryIdentity(worktree, boundary)
   for (const file of boundary.declaredFiles) {
     const current = captureDeclaredFile(root, file.path)
-    if (current.dev !== file.dev || current.ino !== file.ino || current.sha256 !== file.sha256) throw new TypeError(`declared evaluator file changed before spawn: ${file.path}`)
+    if (current.dev !== file.dev || current.ino !== file.ino || current.sha256 !== file.sha256) throw new FrozenEvaluatorBoundaryError(`declared evaluator file changed before spawn: ${file.path}`)
   }
 }
 
@@ -195,7 +199,7 @@ export function freezeEvaluatorProvenanceFromManifest(input: EvaluatorProvenance
   const evaluatorFileHashes: Record<string, string> = Object.create(null) as Record<string, string>
   for (const file of [...(input.evaluatorFiles ?? [])].sort()) {
     const digest = normalizedManifest[file]
-    if (digest === undefined) throw new TypeError(`registration manifest is missing evaluator file: ${file}`)
+    if (digest === undefined) throw new FrozenEvaluatorBoundaryError(`registration manifest is missing evaluator file: ${file}`)
     evaluatorFileHashes[file] = digest
   }
   return buildEvaluatorProvenance(input, evaluatorFileHashes)
@@ -269,7 +273,7 @@ export async function runEvaluator(options: EvaluatorRunOptions): Promise<Evalua
     metricDirection: options.metricDirection,
     policy: { normalizedPolicySha256: options.boundary.normalizedPolicySha256, evaluationSha256: options.boundary.evaluationSha256, policy: options.policy ?? null },
   })
-  const failedOutcome = (code: EvaluatorFailureCode, message: string, facts: EvaluatorAttemptFacts): Extract<EvaluatorOutcome, { kind: 'failed' }> => {
+  const failedOutcome = (code: EvaluatorFailureCode | ControllerAttemptFailureCode, message: string, facts: EvaluatorAttemptFacts): Extract<DurableAttemptOutcome, { kind: 'failed' }> => {
     const safeMessage = redact(message, secrets)
     const exit = deepFreeze(durableSerialize({ ...facts, failureCode: code, failureMessage: safeMessage }, secrets)) as EvaluatorAttemptFacts
     return deepFreeze({ kind: 'failed', code, message: safeMessage, provenanceSha256: provenance.sha256, exit })
@@ -278,7 +282,7 @@ export async function runEvaluator(options: EvaluatorRunOptions): Promise<Evalua
     const exit = deepFreeze(durableSerialize(facts, secrets)) as EvaluatorAttemptFacts
     return deepFreeze({ kind: 'measured', metric, provenanceSha256: provenance.sha256, exit })
   }
-  const persistOutcome = (outcome: EvaluatorOutcome, artifacts: readonly EvaluatorArtifactInput[]): EvaluatorResult => {
+  const persistOutcome = (outcome: DurableAttemptOutcome, artifacts: readonly EvaluatorArtifactInput[]): EvaluatorResult => {
     persistSafely(() => options.persistence.persistAttemptOutcome(outcome, artifacts), secrets)
     return deepFreeze({ ...outcome, artifacts }) as EvaluatorResult
   }
@@ -304,7 +308,8 @@ export async function runEvaluator(options: EvaluatorRunOptions): Promise<Evalua
   let handle: SubprocessHandle | undefined
   let outcome: SubprocessOutcome = { exitCode: null, signal: null }
   let spawnedAt: string | undefined
-  let spawnFailure: unknown
+  let executionFailure: unknown
+  let frozenBoundaryFailure: FrozenEvaluatorBoundaryError | undefined
   let terminationRequested = false
   let terminateOnAbort: (() => void) | undefined
   try {
@@ -318,18 +323,25 @@ export async function runEvaluator(options: EvaluatorRunOptions): Promise<Evalua
         stderr: { maxBytes: options.maxStderrBytes, spill: { maxBytes: options.maxStderrBytes } },
       },
     })
-    assertPathIdentity(root, cwdIdentity, 'evaluator cwd')
-    revalidateEvaluatorBoundary(root, options.boundary)
-    terminateOnAbort = (): void => {
-      if (!terminationRequested) { terminationRequested = true; handle?.terminate() }
-    }
-    controller.signal.addEventListener('abort', terminateOnAbort, { once: true })
-    if (controller.signal.aborted) terminateOnAbort()
     spawnedAt = now().toISOString()
     persistSafely(() => options.persistence.persistSpawnObserved({ providerPid: handle!.pid, spawnedAt: spawnedAt! }), secrets)
-    try { outcome = await handle.done } catch (error) { spawnFailure = error }
+    try {
+      assertPathIdentity(root, cwdIdentity, 'evaluator cwd')
+      revalidateEvaluatorBoundary(root, options.boundary)
+    } catch (error) {
+      if (error instanceof FrozenEvaluatorBoundaryError) frozenBoundaryFailure = error
+      else throw error
+    }
+    if (frozenBoundaryFailure === undefined) {
+      terminateOnAbort = (): void => {
+        if (!terminationRequested) { terminationRequested = true; handle?.terminate() }
+      }
+      controller.signal.addEventListener('abort', terminateOnAbort, { once: true })
+      if (controller.signal.aborted) terminateOnAbort()
+      try { outcome = await handle.done } catch (error) { executionFailure = error }
+    }
   } catch (error) {
-    spawnFailure = error
+    executionFailure = error
   } finally {
     clearTimeout(timeout)
     callerSignal?.removeEventListener('abort', cancel)
@@ -338,7 +350,10 @@ export async function runEvaluator(options: EvaluatorRunOptions): Promise<Evalua
 
   let quiescent = handle === undefined
   if (handle !== undefined) {
-    if ((cause !== undefined || spawnFailure !== undefined) && !terminationRequested) { terminationRequested = true; handle.terminate() }
+    if ((cause !== undefined || executionFailure !== undefined || frozenBoundaryFailure !== undefined) && !terminationRequested) { terminationRequested = true; handle.terminate() }
+    if (frozenBoundaryFailure !== undefined || executionFailure !== undefined) {
+      try { outcome = await handle.done } catch (error) { if (executionFailure === undefined) executionFailure = error }
+    }
     quiescent = await handle.waitForExit()
   }
   const stdoutRead = handle?.collected.stdout?.readFrom(0)
@@ -349,8 +364,10 @@ export async function runEvaluator(options: EvaluatorRunOptions): Promise<Evalua
     exitedAt: now().toISOString(), exitCode: outcome.exitCode, signal: outcome.signal,
     timedOut: cause === 'timeout', cancelled: cause === 'cancelled', processTreeQuiescent: quiescent,
   }
-  let durableOutcome: EvaluatorOutcome
-  if (spawnFailure !== undefined) durableOutcome = failedOutcome('spawn', 'evaluator provider spawn failed', facts)
+  let durableOutcome: DurableAttemptOutcome
+  if (frozenBoundaryFailure !== undefined) durableOutcome = failedOutcome('frozen-boundary', boundedBoundaryMessage(frozenBoundaryFailure), facts)
+  else if (executionFailure !== undefined && handle === undefined) durableOutcome = failedOutcome('spawn', 'evaluator provider spawn failed', facts)
+  else if (executionFailure !== undefined) throw executionFailure
   else if (cause === 'cancelled') durableOutcome = failedOutcome('cancelled', 'evaluator cancelled', facts)
   else if (cause === 'timeout') durableOutcome = failedOutcome('timeout', 'evaluator timed out', facts)
   else if (!quiescent) durableOutcome = failedOutcome('signal', 'evaluator process tree did not become quiescent', facts)
@@ -364,21 +381,26 @@ export async function runEvaluator(options: EvaluatorRunOptions): Promise<Evalua
   return persistOutcome(durableOutcome, artifacts)
 }
 
+function boundedBoundaryMessage(error: FrozenEvaluatorBoundaryError): string {
+  const message = error.message.trim()
+  return (message || 'frozen evaluator boundary changed after provider spawn').slice(0, 4096)
+}
+
 
 function assertBoundaryIdentity(worktree: string, boundary: EvaluatorBoundaryIdentity): string {
   if (!/^[0-9a-f]{64}$/u.test(boundary.normalizedPolicySha256)) throw new TypeError('normalizedPolicySha256 must be a lowercase SHA-256')
   const requested = resolve(worktree)
-  if (requested !== boundary.worktree.canonical) throw new TypeError('evaluator worktree does not match the controller-supplied canonical worktree')
+  if (requested !== boundary.worktree.canonical) throw new FrozenEvaluatorBoundaryError('evaluator worktree does not match the controller-supplied canonical worktree')
   const canonical = canonicalWorktree(requested)
-  const stat = statSync(canonical)
+  const stat = boundaryFilesystemRead(() => statSync(canonical))
   if (canonical !== boundary.worktree.canonical || stat.dev !== boundary.worktree.dev || stat.ino !== boundary.worktree.ino) {
-    throw new TypeError('evaluator worktree identity changed before evaluation')
+    throw new FrozenEvaluatorBoundaryError('evaluator worktree identity changed before evaluation')
   }
   return canonical
 }
 
 function assertNormalizedEvaluation(requested: EvaluatorArgv, capturedDigest: string): void {
-  if (evaluatorEvaluationSha256(requested) !== capturedDigest) throw new TypeError('requested evaluation differs from captured evaluator boundary')
+  if (evaluatorEvaluationSha256(requested) !== capturedDigest) throw new FrozenEvaluatorBoundaryError('requested evaluation differs from captured evaluator boundary')
 }
 
 function persistSafely(action: () => void, secrets: readonly string[]): void {
@@ -389,39 +411,39 @@ interface PathIdentity { readonly canonical: string; readonly dev: number; reado
 interface CapturedFile extends PathIdentity { readonly bytes: Buffer }
 
 function canonicalWorktree(worktree: string): string {
-  return realpathSync(resolve(worktree))
+  return boundaryFilesystemRead(() => realpathSync(resolve(worktree)))
 }
 
 function capturePathIdentity(root: string, path: string, label: string, directory: boolean): PathIdentity {
   const lexical = lexicalContainedPath(root, path, label)
   rejectSymlinkComponents(root, lexical, label)
-  const canonical = realpathSync(lexical)
+  const canonical = boundaryFilesystemRead(() => realpathSync(lexical))
   requireContained(root, canonical, label)
-  const stat = statSync(canonical)
+  const stat = boundaryFilesystemRead(() => statSync(canonical))
   if (directory ? !stat.isDirectory() : !stat.isFile()) throw new TypeError(`${label} must be ${directory ? 'a directory' : 'a regular file'}`)
   return { canonical, dev: stat.dev, ino: stat.ino }
 }
 
 function assertPathIdentity(root: string, expected: PathIdentity, label: string): void {
-  const canonical = realpathSync(expected.canonical)
-  requireContained(root, canonical, label)
-  const stat = statSync(canonical)
-  if (canonical !== expected.canonical || stat.dev !== expected.dev || stat.ino !== expected.ino) throw new TypeError(`${label} changed during evaluator startup`)
+  const canonical = boundaryFilesystemRead(() => realpathSync(expected.canonical))
+  requireRevalidatedContained(root, canonical, label)
+  const stat = boundaryFilesystemRead(() => statSync(canonical))
+  if (canonical !== expected.canonical || stat.dev !== expected.dev || stat.ino !== expected.ino) throw new FrozenEvaluatorBoundaryError(`${label} changed during evaluator startup`)
 }
 
 function captureContainedFile(root: string, path: string, label: string, hooks?: FrozenFileCaptureHooks): CapturedFile {
   const lexical = lexicalContainedPath(root, path, label)
   rejectSymlinkComponents(root, lexical, label)
-  const canonical = realpathSync(lexical)
+  const canonical = boundaryFilesystemRead(() => realpathSync(lexical))
   requireContained(root, canonical, label)
-  const fd = openSync(canonical, constants.O_RDONLY | constants.O_NOFOLLOW)
+  const fd = boundaryFilesystemRead(() => openSync(canonical, constants.O_RDONLY | constants.O_NOFOLLOW))
   try {
-    const opened = fstatSync(fd)
+    const opened = boundaryFilesystemRead(() => fstatSync(fd))
     if (!opened.isFile()) throw new TypeError(`${label} must be a regular file`)
     hooks?.afterOpen?.(canonical)
-    const bytes = readFileSync(fd)
-    const closedOver = fstatSync(fd)
-    if (!closedOver.isFile() || closedOver.dev !== opened.dev || closedOver.ino !== opened.ino || closedOver.size !== opened.size || closedOver.mtimeMs !== opened.mtimeMs || closedOver.ctimeMs !== opened.ctimeMs) throw new TypeError(`${label} changed while it was read`)
+    const bytes = boundaryFilesystemRead(() => readFileSync(fd))
+    const closedOver = boundaryFilesystemRead(() => fstatSync(fd))
+    if (!closedOver.isFile() || closedOver.dev !== opened.dev || closedOver.ino !== opened.ino || closedOver.size !== opened.size || closedOver.mtimeMs !== opened.mtimeMs || closedOver.ctimeMs !== opened.ctimeMs) throw new FrozenEvaluatorBoundaryError(`${label} changed while it was read`)
     const identity = { canonical, dev: opened.dev, ino: opened.ino }
     assertPathIdentity(root, identity, label)
     return { ...identity, bytes }
@@ -444,12 +466,17 @@ function requireContained(root: string, path: string, label: string): void {
   if (rel === '..' || rel.startsWith(`..${sep}`)) throw new TypeError(`${label} escapes the worktree`)
 }
 
+function requireRevalidatedContained(root: string, path: string, label: string): void {
+  const rel = relative(root, path)
+  if (rel === '..' || rel.startsWith(`..${sep}`)) throw new FrozenEvaluatorBoundaryError(`${label} changed during evaluator startup`)
+}
+
 function rejectSymlinkComponents(root: string, target: string, label: string): void {
   const rel = relative(root, target)
   let current = root
   for (const component of rel.split(sep).filter(Boolean)) {
     current = resolve(current, component)
-    if (lstatSync(current).isSymbolicLink()) throw new TypeError(`${label} must not traverse a symbolic link`)
+    if (boundaryFilesystemRead(() => lstatSync(current)).isSymbolicLink()) throw new FrozenEvaluatorBoundaryError(`${label} must not traverse a symbolic link`)
   }
 }
 
@@ -509,7 +536,7 @@ function captureDeclaredFile(root: string, path: string): EvaluatorDeclaredFile 
 function captureFrozenFile(root: string, path: string, expectedSha256: string, hooks?: FrozenFileCaptureHooks): EvaluatorDeclaredFile {
   const captured = captureContainedFile(root, path, 'frozen registration file', hooks)
   const digest = sha256(captured.bytes)
-  if (digest !== expectedSha256) throw new TypeError(`frozen file content differs from run-creation manifest: ${path}`)
+  if (digest !== expectedSha256) throw new FrozenEvaluatorBoundaryError(`frozen file content differs from run-creation manifest: ${path}`)
   return Object.freeze({ path: normalizedRelativePath(root, captured.canonical), sha256: digest, dev: captured.dev, ino: captured.ino })
 }
 
@@ -546,6 +573,20 @@ function secretsOf(environment: Readonly<Record<string, string>> | undefined): r
 function assignDurableKey<T>(target: Record<string, T>, key: string, value: T, label: string): void {
   if (Object.prototype.hasOwnProperty.call(target, key)) throw new TypeError(`${label} aliases another key after secret redaction`)
   target[key] = value
+}
+
+const BOUNDARY_DRIFT_CODES: Readonly<Record<string, true>> = { ENOENT: true, ENOTDIR: true, ELOOP: true, ESTALE: true }
+
+function boundaryFilesystemRead<T>(read: () => T): T {
+  try { return read() }
+  catch (error) {
+    if (isErrnoException(error) && BOUNDARY_DRIFT_CODES[error.code] === true) throw new FrozenEvaluatorBoundaryError(error.message)
+    throw error
+  }
+}
+
+function isErrnoException(error: unknown): error is NodeJS.ErrnoException & { code: string } {
+  return error instanceof Error && typeof (error as NodeJS.ErrnoException).code === 'string'
 }
 
 function deepFreeze<T>(value: T): T {

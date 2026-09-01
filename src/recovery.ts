@@ -4,14 +4,14 @@ import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, rea
 import { join } from 'node:path'
 import type { DurableRegistrationIdentity } from './types.js'
 import { GitBoundaryError, inspectRunGitState, validateCandidate, validateFrozenCandidatePaths, verifyCandidateTree, type CandidateSnapshot, type GitCommandOptions, type RepositoryDiscovery, type RunGitIdentity, type RunGitInspection } from './git.js'
-import type { EvaluatorAttemptFacts, EvaluatorFailureCode } from './evaluator.js'
+import type { ControllerAttemptFailureCode, EvaluatorAttemptFacts, EvaluatorFailureCode } from './evaluator.js'
 import { DurableTracker, type ArtifactRecord, type RecoveryState } from './tracker.js'
 import type { AttemptId, BestResult, BlockerEvidence, DurableRunPolicy, ExperimentId, FullCommitSha, RegistrationBlockEvidence, RunDurableState, RunId } from './types.js'
 import type { SQLOutputValue } from 'node:sqlite'
 
 export type RecoveryBlockCode = 'run-missing' | 'repository-mismatch' | 'start-commit-mismatch' | 'policy-mismatch' | 'provenance-mismatch' | 'lock-mismatch' | 'state-ambiguous' | 'commit-missing' | 'git-external-mutation' | 'protected-change' | 'artifact-incomplete' | 'attempt-uncertain' | 'decision-mismatch' | 'reconciliation-unauthorized' | 'recovery-rerun-exhausted'
 export interface RecoveredExperiment { readonly experimentId: ExperimentId; readonly ordinal: number; readonly kind: 'baseline' | 'candidate'; readonly parentCommit: FullCommitSha; readonly candidateCommit?: FullCommitSha }
-export type RecoveredEvaluation = ({ readonly kind: 'measured'; readonly attemptId: AttemptId; readonly metric: number; readonly provenanceSha256: string; readonly exit: EvaluatorAttemptFacts; readonly artifacts: readonly ArtifactRecord[] } | { readonly kind: 'failed'; readonly attemptId: AttemptId; readonly code: EvaluatorFailureCode; readonly message: string; readonly provenanceSha256: string; readonly exit: EvaluatorAttemptFacts; readonly artifacts: readonly ArtifactRecord[] }) & { readonly policyViolation?: { readonly code: 'provenance-mismatch'; readonly message: string } }
+export type RecoveredEvaluation = ({ readonly kind: 'measured'; readonly attemptId: AttemptId; readonly metric: number; readonly provenanceSha256: string; readonly exit: EvaluatorAttemptFacts; readonly artifacts: readonly ArtifactRecord[] } | { readonly kind: 'failed'; readonly attemptId: AttemptId; readonly code: EvaluatorFailureCode | ControllerAttemptFailureCode; readonly message: string; readonly provenanceSha256: string; readonly exit: EvaluatorAttemptFacts; readonly artifacts: readonly ArtifactRecord[] }) & { readonly policyViolation?: { readonly code: 'provenance-mismatch'; readonly message: string } }
 export interface RecoveryRequest { readonly tracker: DurableTracker; readonly runId: RunId; readonly discovery: RepositoryDiscovery; readonly identity: RunGitIdentity; readonly policy: DurableRunPolicy; readonly policySha256: string; readonly provenanceSha256: string; readonly registration?: DurableRegistrationIdentity; readonly gitExecutable: string; readonly gitOptions: Omit<GitCommandOptions, 'cwd' | 'signal'>; readonly signal: AbortSignal }
 export type RecoveryDirective =
   | { readonly kind: 'initialize'; readonly runId: RunId; readonly startCommit: FullCommitSha; readonly reuseLock: boolean }
@@ -28,12 +28,12 @@ export type RecoveryDirective =
 const SHA = /^[0-9a-f]{40}$/u
 const HASH = /^[0-9a-f]{64}$/u
 const TERMINAL: Readonly<Record<RunDurableState, boolean>> = { initializing: false, 'baseline-running': false, ready: false, 'candidate-prepared': false, 'candidate-running': false, deciding: false, completed: true, 'baseline-blocked': true, blocked: true, 'round-failed': true, cancelled: true }
-const FAILURE_CODES: Readonly<Record<EvaluatorFailureCode, true>> = { spawn: true, timeout: true, cancelled: true, exit: true, signal: true, 'output-limit': true, 'metric-protocol': true }
+const FAILURE_CODES: Readonly<Record<EvaluatorFailureCode | ControllerAttemptFailureCode, true>> = { spawn: true, timeout: true, cancelled: true, exit: true, signal: true, 'output-limit': true, 'metric-protocol': true, 'frozen-boundary': true }
 const CONTINUABLE_FAILURE_CODES: Readonly<Record<Exclude<EvaluatorFailureCode, 'cancelled' | 'spawn'>, true>> = { timeout: true, exit: true, signal: true, 'output-limit': true, 'metric-protocol': true }
 
 type Row = Record<string, SQLOutputValue>
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === 'object' && value !== null && !Array.isArray(value) }
-type RecoveredAttemptResult = { readonly kind: 'measured'; readonly metric: number } | { readonly kind: 'failed'; readonly code: EvaluatorFailureCode; readonly message: string }
+type RecoveredAttemptResult = { readonly kind: 'measured'; readonly metric: number } | { readonly kind: 'failed'; readonly code: EvaluatorFailureCode | ControllerAttemptFailureCode; readonly message: string }
 class RecoveryEvidenceError extends Error {
   constructor(readonly code: RecoveryBlockCode, message: string) { super(message); this.name = 'RecoveryEvidenceError' }
 }
@@ -294,7 +294,7 @@ function isContinuableCandidateFailure(evaluation: Extract<RecoveredEvaluation, 
   switch (evaluation.code) {
     case 'spawn': return evaluation.exit.providerPid === undefined && evaluation.exit.spawnedAt === undefined
     case 'exit': case 'signal': case 'timeout': case 'output-limit': case 'metric-protocol': return CONTINUABLE_FAILURE_CODES[evaluation.code]
-    case 'cancelled': return false
+    case 'cancelled': case 'frozen-boundary': return false
   }
 }
 
@@ -401,7 +401,7 @@ function decodeAttemptResult(row: Row, attemptId: string): RecoveredAttemptResul
   if (result.kind === 'failed') {
     if (keys !== 'code,kind,message' || typeof result.code !== 'string' || !Object.hasOwn(FAILURE_CODES, result.code) || typeof result.message !== 'string' || !result.message.trim()) throw new RecoveryEvidenceError('state-ambiguous', `attempt ${attemptId} has a malformed failed outcome`)
     if (text(row['failure_code']) !== result.code || text(row['failure_message']) !== result.message) throw new RecoveryEvidenceError('state-ambiguous', `attempt ${attemptId} failure facts differ from its authoritative outcome`)
-    return { kind: 'failed', code: result.code as EvaluatorFailureCode, message: result.message }
+    return { kind: 'failed', code: result.code as EvaluatorFailureCode | ControllerAttemptFailureCode, message: result.message }
   }
   throw new RecoveryEvidenceError('state-ambiguous', `attempt ${attemptId} has an unknown authoritative outcome kind`)
 }

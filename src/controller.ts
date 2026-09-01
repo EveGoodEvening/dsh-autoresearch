@@ -5,7 +5,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { requestProposal, ProposalAgentError, type ProposalHistoryEntry } from './agent.js'
 import { normalizeRunPolicy, type HostEvaluatorRegistration, type ResolvedConfig } from './config.js'
 import { createEvaluatorArtifactWriterFactory } from './evaluator-artifacts.js'
-import { captureFrozenFileAttempt, createEvaluatorBoundary, evaluatorEvaluationSha256, freezeEvaluatorProvenanceFromManifest, recomputeRegistrationManifest, revalidateEvaluatorBoundary, revalidateFrozenFileAttempt, runEvaluator, type FrozenEvaluatorProvenance } from './evaluator.js'
+import { captureFrozenFileAttempt, createEvaluatorBoundary, evaluatorEvaluationSha256, freezeEvaluatorProvenanceFromManifest, FrozenEvaluatorBoundaryError, recomputeRegistrationManifest, revalidateEvaluatorBoundary, revalidateFrozenFileAttempt, runEvaluator, type FrozenEvaluatorProvenance } from './evaluator.js'
 import {
   acquireControllerClaim, acquireRunLock, allocateRunWorktree, checkoutCandidateForEvaluation, commitCandidate, currentControllerProcessIdentity, deriveRegistrationManifestAtStartCommit, discoverRepository, durableGitIdentity,
   GitBoundaryError, heartbeatControllerClaim, makeRunGitIdentity, reconcileAcceptedHead, reconcileRejectedHead, recoverTerminalRunLock, recoverTerminalRunLockUnderControllerClaim, releaseControllerClaim, rollbackRunActivationAuthority,
@@ -194,8 +194,9 @@ export class AutoresearchRunController {
             try {
               expectedProvenance = freezeEvaluatorProvenanceFromManifest(provenanceInput(policy, acceptedPolicySha256, evaluatorEvaluationSha256(policy.evaluation), current), classification.identity.manifest)
             } catch (error) {
+              if (!(error instanceof FrozenEvaluatorBoundaryError)) throw error
               tracker = preflight
-              return { runId, policy, discovery: resumeDiscovery, identity, tracker, gitExecutable, policySha256: acceptedPolicySha256, provenanceSha256, gitOptions, registration: classification.identity, preclaimBlock: { code: 'provenance-mismatch', message: error instanceof Error ? error.message : 'durable evaluator provenance cannot be reconstructed' } }
+              return { runId, policy, discovery: resumeDiscovery, identity, tracker, gitExecutable, policySha256: acceptedPolicySha256, provenanceSha256, gitOptions, registration: classification.identity, preclaimBlock: { code: 'provenance-mismatch', message: error.message } }
             }
           }
           const identityBlock = validateReadOnlyResumeIdentity(existing, discovery, identity, policy, acceptedPolicySha256, expectedProvenance, terminal)
@@ -390,11 +391,11 @@ export class AutoresearchRunController {
         if (runtime.policy.target !== undefined && isTargetReached(runtime.policy.metricDirection, directive.best.metric, runtime.policy.target)) return this.complete(runtime, 'target-reached', directive.best)
         if (directive.nextOrdinal > runtime.policy.maxExperiments) return this.complete(runtime, 'budget-limited', directive.best)
         await restoreAcceptedWorktree(this.ctx, runtime.gitExecutable, runtime.identity.worktree, runtime.identity, directive.restoreCommit, { ...runtime.gitOptions, signal: this.aborter.signal })
-        try {
-          if (!runtime.registration) throw new TypeError('durable evaluator registration is unavailable')
-          recomputeRegistrationManifest(runtime.identity.worktree, runtime.registration.manifest)
-        } catch (error) {
-          return this.block(runtime, { kind: 'blocked', runId: runtime.runId, code: 'provenance-mismatch', evidence: [{ code: 'evaluator-registration-mismatch', message: error instanceof Error ? error.message : 'frozen evaluator registration could not be revalidated', artifacts: [] }], lock: 'release-after-persist' })
+        if (!runtime.registration) throw new Error('durable evaluator registration is unavailable')
+        try { recomputeRegistrationManifest(runtime.identity.worktree, runtime.registration.manifest) }
+        catch (error) {
+          if (!(error instanceof FrozenEvaluatorBoundaryError)) throw error
+          return this.block(runtime, { kind: 'blocked', runId: runtime.runId, code: 'provenance-mismatch', evidence: [{ code: 'evaluator-registration-mismatch', message: error.message, artifacts: [] }], lock: 'release-after-persist' })
         }
         await this.propose(runtime, directive.best, directive.nextOrdinal)
         this.assertClaim(runtime); directive = await reconcileRecovery(this.ctx, { ...runtime, signal: this.aborter.signal }); continue
@@ -471,7 +472,8 @@ export class AutoresearchRunController {
         const artifacts = outputArtifacts.map(item => artifact(r, experiment.experimentId, attemptId, item))
         const attemptResult = outcome.kind === 'measured' ? { kind: 'measured' as const, metric: outcome.metric } : { kind: 'failed' as const, code: outcome.code, message: outcome.message }
         let mismatchMessage: string | undefined
-        try { revalidateFrozenFileAttempt(r.identity.worktree, frozenFiles) }
+        if (outcome.kind === 'failed' && outcome.code === 'frozen-boundary') mismatchMessage = boundedMismatchMessage(outcome.message)
+        else try { revalidateFrozenFileAttempt(r.identity.worktree, frozenFiles) }
         catch (error) {
           if (!isFrozenEvaluatorViolation(error)) throw error
           mismatchMessage = boundedMismatchMessage(error)
@@ -503,6 +505,7 @@ export class AutoresearchRunController {
 
   private async finalizeEvaluation(r: Runtime, experiment: RecoveredExperiment, evaluation: RecoveredEvaluation): Promise<void> {
     if (evaluation.provenanceSha256 !== r.provenanceSha256) return this.failEvaluation(r, experiment, evaluation, 'provenance-mismatch', 'evaluator provenance changed')
+    if (evaluation.policyViolation?.code === 'provenance-mismatch') return this.finalizeFrozenMismatch(r, experiment, evaluation, evaluation.policyViolation.message)
     if (evaluation.kind === 'failed') return this.failEvaluation(r, experiment, evaluation, evaluation.code, evaluation.message)
     if (experiment.kind === 'baseline') {
       const best = { metric: evaluation.metric, commit: experiment.parentCommit, experimentId: experiment.experimentId }
@@ -678,7 +681,7 @@ function sort(value: unknown): unknown { if (Array.isArray(value)) return value.
 function normalizedReason(value: string): string { const text = value.trim().replace(/[\0\r\n]+/gu, ' '); return text || 'cancelled' }
 function parseJson(value: unknown): unknown { if (typeof value !== 'string') return undefined; try { return JSON.parse(value) } catch { return undefined } }
 function artifact(r: Runtime, experimentId: string, attemptId: string, item: { kind: string; location: string; sizeBytes: number; sha256: string; truncated: boolean }): ArtifactRecord { return { artifactId: `${attemptId}-${item.kind}`, runId: r.runId, experimentId, attemptId, kind: item.kind, location: item.location, sizeBytes: item.sizeBytes, sha256: item.sha256, owner: 'evaluator', retention: 'retain', metadata: { truncated: item.truncated } } }
-function isFrozenEvaluatorViolation(error: unknown): boolean { const message = error instanceof Error ? error.message : String(error); return /frozen (?:evaluator )?file|registration manifest|immutable manifest/iu.test(message) }
+function isFrozenEvaluatorViolation(error: unknown): error is FrozenEvaluatorBoundaryError { return error instanceof FrozenEvaluatorBoundaryError }
 function boundedMismatchMessage(error: unknown): string { const message = (error instanceof Error ? error.message : String(error)).trim(); return (message || 'frozen evaluator files differ from the immutable manifest').slice(0, 4096) }
 function experimentFacts(evaluation: RecoveredEvaluation, extra: Record<string, unknown>) { return { ...extra, exitCode: evaluation.exit.exitCode, signal: evaluation.exit.signal, timedOut: evaluation.exit.timedOut } as never }
 function optionalBest(tracker: DurableTracker, runId: string): BestResult | undefined { const row = tracker.getRun(runId); return row?.['best_metric'] === null || row?.['best_metric'] === undefined ? undefined : { metric: Number(row['best_metric']), commit: String(row['best_commit']), experimentId: String(row['best_experiment_id']) } }
