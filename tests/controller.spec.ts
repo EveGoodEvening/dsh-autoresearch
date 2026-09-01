@@ -1,9 +1,9 @@
 import { createHash } from 'node:crypto'
 import { execFileSync, spawn } from 'node:child_process'
 import { DatabaseSync } from 'node:sqlite'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentHandle, CreateAgentOptions } from '@deepseek-ai/dsh-agent'
 import type { JobSnapshot } from '@deepseek-ai/dsh-jobs'
@@ -18,7 +18,7 @@ import { acquireControllerClaim, currentControllerProcessIdentity, GitBoundaryEr
 import { DurableTracker, TRACKER_SCHEMA_VERSION } from '../src/tracker.ts'
 import { sweepRepositoryRetention } from '../src/retention.ts'
 import { evaluatorEvaluationSha256, freezeEvaluatorProvenanceFromManifest } from '../src/evaluator.ts'
-import { decodeRunResult, EVALUATOR_CONTRACT_GENERATION } from '../src/types.ts'
+import { decodeRunResult, EVALUATOR_CONTRACT_GENERATION, type RunDurableState } from '../src/types.ts'
 const evaluatorRegistration = { id: 'judge', command: 'fake-evaluator', args: [], metricName: 'score', metricDirection: 'minimize' as const, metricParserVersion: 'final-line-json-v1' as const, evaluatorFiles: ['evaluate.mjs'] }
 const DOWNGRADE_RESEARCH_MEMORY = 'DROP TRIGGER experiments_annotation_immutable; ALTER TABLE experiments DROP COLUMN host_facts_json; ALTER TABLE experiments DROP COLUMN annotation_json;'
 const input = {
@@ -159,6 +159,111 @@ describe('exclusive autoresearch controller contract', () => {
       expect(tracker.getRun('run')?.['state']).toBe('candidate-prepared')
       expect(tracker.database.prepare('SELECT state FROM experiments WHERE experiment_id = ?').get('candidate-1')?.['state']).toBe('baseline-pending')
       expect(() => tracker.prepareCandidate({ experimentId: 'candidate-2', runId: 'run', ordinal: 2, kind: 'candidate', parentCommit: sha, command: 'node', args: [], annotation: { trust: 'untrusted-child-annotation', hypothesis: 'test hypothesis', intendedEdits: ['src/code.ts'], implementationSummary: 'test summary' } }, {})).toThrow(/ready run/)
+      tracker.close()
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  })
+  const cancellationPath: Readonly<Record<Exclude<RunDurableState, 'completed' | 'baseline-blocked' | 'blocked' | 'round-failed' | 'cancelled'>, readonly RunDurableState[]>> = {
+    initializing: [],
+    'baseline-running': ['baseline-running'],
+    ready: ['baseline-running', 'ready'],
+    'candidate-prepared': ['baseline-running', 'ready', 'candidate-prepared'],
+    'candidate-running': ['baseline-running', 'ready', 'candidate-prepared', 'candidate-running'],
+    deciding: ['baseline-running', 'ready', 'candidate-prepared', 'candidate-running', 'deciding'],
+  }
+  it.each(Object.keys(cancellationPath) as Array<keyof typeof cancellationPath>)('derives cancelled lastState only after auditing the complete canonical %s lineage', origin => {
+    const root = mkdtempSync(join(tmpdir(), 'autoresearch-cancellation-origin-'))
+    try {
+      const tracker = DurableTracker.open(join(root, 'tracker.sqlite')); const sha = 'a'.repeat(40)
+      tracker.createRun({ runId: 'run', repositoryId: 'repo', repository: '/repo', gitCommonDir: '/repo/.git', callerCwd: '/repo', startCommit: sha, runTag: 'tag', branch: 'autoresearch/tag-run', worktree: '/worktree', policy: {}, policySha256: 'b'.repeat(64), provenance: {}, provenanceSha256: 'c'.repeat(64) })
+      for (const state of cancellationPath[origin]) tracker.transitionRun('run', state)
+      tracker.transitionRun('run', 'cancelled', { terminalReason: 'operator stop', quiescent: true })
+      expect(tracker.cancellationOrigin('run')).toBe(origin)
+      tracker.close()
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  })
+
+  it('derives cancelled lastState across canonical interleaved experiment and attempt transitions', () => {
+    const root = mkdtempSync(join(tmpdir(), 'autoresearch-cancellation-interleaved-'))
+    try {
+      const tracker = DurableTracker.open(join(root, 'tracker.sqlite')); const sha = 'a'.repeat(40)
+      tracker.createRun({ runId: 'run', repositoryId: 'repo', repository: '/repo', gitCommonDir: '/repo/.git', callerCwd: '/repo', startCommit: sha, runTag: 'tag', branch: 'autoresearch/tag-run', worktree: '/worktree', policy: {}, policySha256: 'b'.repeat(64), provenance: {}, provenanceSha256: 'c'.repeat(64) })
+      tracker.transitionRun('run', 'baseline-running')
+      tracker.createExperiment({ experimentId: 'baseline', runId: 'run', ordinal: 0, kind: 'baseline', parentCommit: sha, command: 'node', args: [] })
+      tracker.transitionExperiment('baseline', 'running')
+      tracker.createAttemptIntent({ attemptId: 'attempt-1', runId: 'run', experimentId: 'baseline', ordinal: 1 }, { kind: 'spawn' })
+      tracker.recordAttemptOutcome('attempt-1', { facts: { exitedAt: 'now', exitCode: 0, signal: null, timedOut: false, processTreeQuiescent: true }, artifacts: [], result: { kind: 'measured', metric: 1 } })
+      tracker.transitionExperiment('baseline', 'accepted', { metric: 1, decision: 'accept' })
+      tracker.transitionRun('run', 'cancelled', { terminalReason: 'operator stop', quiescent: true })
+      expect(tracker.listTransitions('run').map(row => [row['sequence'], row['scope'], row['experiment_id']])).toEqual([
+        [1, 'run', null],
+        [2, 'run', null],
+        [3, 'experiment', 'baseline'],
+        [4, 'experiment', 'baseline'],
+        [5, 'run', 'baseline'],
+        [6, 'experiment', 'baseline'],
+        [7, 'run', null],
+      ])
+      expect(tracker.cancellationOrigin('run')).toBe('baseline-running')
+      tracker.close()
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  })
+
+  it.each(['deleted-interleaved-row', 'starts-above-one', 'post-cancellation-row'] as const)('rejects globally incomplete cancellation history when it %s', fault => {
+    const root = mkdtempSync(join(tmpdir(), 'autoresearch-cancellation-global-history-'))
+    try {
+      const tracker = DurableTracker.open(join(root, 'tracker.sqlite')); const sha = 'a'.repeat(40)
+      tracker.createRun({ runId: 'run', repositoryId: 'repo', repository: '/repo', gitCommonDir: '/repo/.git', callerCwd: '/repo', startCommit: sha, runTag: 'tag', branch: 'autoresearch/tag-run', worktree: '/worktree', policy: {}, policySha256: 'b'.repeat(64), provenance: {}, provenanceSha256: 'c'.repeat(64) })
+      tracker.transitionRun('run', 'baseline-running')
+      tracker.createExperiment({ experimentId: 'baseline', runId: 'run', ordinal: 0, kind: 'baseline', parentCommit: sha, command: 'node', args: [] })
+      tracker.transitionExperiment('baseline', 'running')
+      tracker.createAttemptIntent({ attemptId: 'attempt-1', runId: 'run', experimentId: 'baseline', ordinal: 1 }, { kind: 'spawn' })
+      tracker.recordAttemptOutcome('attempt-1', { facts: { exitedAt: 'now', exitCode: 0, signal: null, timedOut: false, processTreeQuiescent: true }, artifacts: [], result: { kind: 'measured', metric: 1 } })
+      tracker.transitionExperiment('baseline', 'accepted', { metric: 1, decision: 'accept' })
+      tracker.transitionRun('run', 'cancelled', { terminalReason: 'operator stop', quiescent: true })
+      if (fault === 'deleted-interleaved-row') tracker.database.prepare("DELETE FROM transitions WHERE transition_id = (SELECT transition_id FROM transitions WHERE run_id = 'run' AND scope = 'experiment' ORDER BY sequence LIMIT 1)").run()
+      else if (fault === 'starts-above-one') tracker.database.prepare("UPDATE transitions SET sequence = sequence + 100, transition_id = run_id || ':' || (sequence + 100) WHERE run_id = 'run'").run()
+      else {
+        const final = tracker.listTransitions('run').at(-1)!
+        const sequence = Number(final['sequence']) + 1
+        tracker.database.prepare("INSERT INTO transitions (transition_id, run_id, experiment_id, sequence, scope, from_state, to_state, intent_json, outcome_json, created_at) VALUES (?, 'run', 'baseline', ?, 'experiment', 'running', 'running', NULL, NULL, ?)").run(`run:${sequence}`, sequence, final['created_at'])
+      }
+      expect(() => tracker.cancellationOrigin('run')).toThrow()
+      tracker.close()
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  })
+
+  it.each((Object.keys(cancellationPath) as Array<keyof typeof cancellationPath>).filter(origin => origin !== 'initializing').flatMap(origin => ['missing-creation', 'malformed-creation', 'duplicate-creation', 'gap', 'disconnected', 'impossible-edge', 'noncanonical-id'].map(fault => [origin, fault] as const)))('rejects %s cancellation lineage with %s corruption', (origin, fault) => {
+    const root = mkdtempSync(join(tmpdir(), 'autoresearch-cancellation-corruption-'))
+    try {
+      const tracker = DurableTracker.open(join(root, 'tracker.sqlite')); const sha = 'a'.repeat(40)
+      tracker.createRun({ runId: 'run', repositoryId: 'repo', repository: '/repo/.git', gitCommonDir: '/repo/.git', callerCwd: '/repo', startCommit: sha, runTag: 'tag', branch: 'autoresearch/tag-run', worktree: '/worktree', policy: {}, policySha256: 'b'.repeat(64), provenance: {}, provenanceSha256: 'c'.repeat(64) })
+      for (const state of cancellationPath[origin]) tracker.transitionRun('run', state)
+      tracker.transitionRun('run', 'cancelled', { terminalReason: 'operator stop', quiescent: true })
+      const creation = tracker.database.prepare("SELECT * FROM transitions WHERE run_id = 'run' AND sequence = 1").get()!
+      const final = tracker.database.prepare("SELECT * FROM transitions WHERE run_id = 'run' AND to_state = 'cancelled'").get()!
+      if (fault === 'missing-creation') tracker.database.prepare('DELETE FROM transitions WHERE transition_id = ?').run(creation['transition_id'])
+      else if (fault === 'malformed-creation') tracker.database.prepare("UPDATE transitions SET intent_json = '{' WHERE transition_id = ?").run(creation['transition_id'])
+      else if (fault === 'duplicate-creation') tracker.database.prepare("INSERT INTO transitions (transition_id, run_id, experiment_id, sequence, scope, from_state, to_state, intent_json, outcome_json, created_at) VALUES ('run:99', 'run', NULL, 99, 'run', NULL, 'initializing', '{\"kind\":\"create-run\"}', NULL, ?)").run(final['created_at'])
+      else if (fault === 'gap') tracker.database.prepare('DELETE FROM transitions WHERE sequence = 2 AND run_id = ?').run('run')
+      else if (fault === 'disconnected') tracker.database.prepare("UPDATE transitions SET from_state = 'initializing' WHERE transition_id = ?").run(final['transition_id'])
+      else if (fault === 'impossible-edge') tracker.database.prepare("UPDATE transitions SET to_state = 'candidate-running' WHERE sequence = 2 AND run_id = ?").run('run')
+      else tracker.database.prepare("UPDATE transitions SET transition_id = 'forged' WHERE transition_id = ?").run(final['transition_id'])
+      expect(() => tracker.cancellationOrigin('run')).toThrow()
+      tracker.close()
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  })
+  it.each(['missing', 'duplicate', 'malformed', 'ambiguous'] as const)('rejects %s durable cancellation transition evidence instead of guessing lastState', fault => {
+    const root = mkdtempSync(join(tmpdir(), 'autoresearch-cancellation-final-corruption-'))
+    try {
+      const tracker = DurableTracker.open(join(root, 'tracker.sqlite')); const sha = 'a'.repeat(40)
+      tracker.createRun({ runId: 'run', repositoryId: 'repo', repository: '/repo/.git', gitCommonDir: '/repo/.git', callerCwd: '/repo', startCommit: sha, runTag: 'tag', branch: 'autoresearch/tag-run', worktree: '/worktree', policy: {}, policySha256: 'b'.repeat(64), provenance: {}, provenanceSha256: 'c'.repeat(64) })
+      tracker.transitionRun('run', 'cancelled', { terminalReason: 'operator stop', quiescent: true })
+      const transition = tracker.database.prepare("SELECT * FROM transitions WHERE run_id = ? AND scope = 'run' AND to_state = 'cancelled'").get('run')!
+      if (fault === 'missing') tracker.database.prepare('DELETE FROM transitions WHERE transition_id = ?').run(transition['transition_id'])
+      else if (fault === 'duplicate') tracker.database.prepare("INSERT INTO transitions (transition_id, run_id, experiment_id, sequence, scope, from_state, to_state, intent_json, outcome_json, created_at) VALUES (?, 'run', NULL, ?, 'run', 'ready', 'cancelled', NULL, NULL, ?)").run('run:3', Number(transition['sequence']) + 1, transition['created_at'])
+      else if (fault === 'malformed') tracker.database.prepare("UPDATE transitions SET from_state = 'cancelled' WHERE transition_id = ?").run(transition['transition_id'])
+      else tracker.database.prepare("INSERT INTO transitions (transition_id, run_id, experiment_id, sequence, scope, from_state, to_state, intent_json, outcome_json, created_at) VALUES (?, 'run', NULL, ?, 'run', 'cancelled', 'ready', NULL, NULL, ?)").run('run:3', Number(transition['sequence']) + 1, transition['created_at'])
+      expect(() => tracker.cancellationOrigin('run')).toThrow()
       tracker.close()
     } finally { rmSync(root, { recursive: true, force: true }) }
   })
@@ -497,6 +602,32 @@ describe('controller real Git/SQLite outcomes', () => {
       expect(migrated.database.prepare("SELECT name FROM sqlite_schema WHERE type = 'trigger' AND name = 'run_registrations_presence_monotonic'").get()).toEqual({ name: 'run_registrations_presence_monotonic' })
       migrated.close()
       expect(f.subprocess.evaluatorSpawns).toBe(1)
+    } finally { rmSync(f.root, { recursive: true, force: true }) }
+  })
+
+  it('migrates a supported v7 registered cancelled tracker before canonical cancellation lineage revalidation', async () => {
+    const f = controllerFixture([])
+    try {
+      const controller = createCaseController(f)
+      const prepared = await controller.prepare('cancelled-v7-migration')
+      controller.cancel('operator stop')
+      const cancelled = await controller.run()
+      await controller.dispose()
+      expect(cancelled).toMatchObject({ status: 'cancelled', lastState: 'initializing' })
+      const tracker = DurableTracker.open(prepared.tracker)
+      tracker.database.exec(`
+        ${DOWNGRADE_RESEARCH_MEMORY}
+        DROP TRIGGER run_registrations_presence_monotonic;
+        UPDATE schema_metadata SET version = 7 WHERE singleton = 1;
+      `)
+      tracker.close()
+
+      const replay = await createCaseController(f, {}, prepared.runId).run()
+      expect(replay).toEqual(cancelled)
+      const migrated = DurableTracker.openReadOnly(prepared.tracker)
+      expect(migrated.schemaVersion()).toBe(TRACKER_SCHEMA_VERSION)
+      migrated.close()
+      expect(f.subprocess.evaluatorSpawns).toBe(0)
     } finally { rmSync(f.root, { recursive: true, force: true }) }
   })
 
@@ -895,12 +1026,95 @@ describe('controller real Git/SQLite outcomes', () => {
       expect(f.creates).toHaveLength(0)
       expect(f.subprocess.specs).toHaveLength(subprocessCount)
       tracker.close()
+      const fresh = await controller.run()
+      expect(fresh).toMatchObject({ status: 'cancelled', lastState: 'initializing', reason: 'held initialization stop', quiescent: true })
+      const evaluatorSpawns = f.subprocess.evaluatorSpawns
+      const childCount = f.creates.length
+      const resumed = await createCaseController(f, {}, prepared.runId).run()
+      expect(resumed).toEqual(fresh)
+      expect(f.subprocess.evaluatorSpawns).toBe(evaluatorSpawns)
+      expect(f.creates).toHaveLength(childCount)
+      const released = DurableTracker.open(prepared.tracker)
+      expect(released.database.prepare('SELECT released_at FROM active_locks WHERE run_id = ?').get(prepared.runId)?.['released_at']).not.toBeNull()
+      expect(released.database.prepare('SELECT COUNT(*) AS count FROM attempts WHERE run_id = ?').get(prepared.runId)?.['count']).toBe(0)
+      expect(released.database.prepare("SELECT COUNT(*) AS count FROM experiments WHERE run_id = ? AND kind = 'candidate'").get(prepared.runId)?.['count']).toBe(0)
+      released.close()
       await controller.dispose()
       expect(close).toHaveBeenCalled()
     } finally {
       close.mockRestore()
       rmSync(f.root, { recursive: true, force: true })
     }
+  })
+
+  it.each(['missing-cancellation', 'duplicate-cancellation', 'malformed-cancellation', 'missing-creation', 'malformed-creation', 'duplicate-creation'] as const)('read-only blocks initializing cancellation with %s evidence before claim, recovery, retention, mutation, or spawn', async fault => {
+    const f = controllerFixture([])
+    try {
+      const controller = new AutoresearchRunController(f.ctx, { config: resolveConfig({ stateRoot: '.autoresearch-test', cleanupWorktreesOnSuccess: false, retainWorktrees: true, exportTsv: false, evaluatorRegistrations: [evaluatorRegistration] }), input: { ...input, repository: f.root }, parent: f.parent, signal: new AbortController().signal })
+      const prepared = await controller.prepare(`corrupt-${fault}`)
+      controller.cancel('terminal preflight corruption')
+      await controller.run()
+      await controller.dispose()
+      const corrupt = DurableTracker.open(prepared.tracker)
+      const cancelled = corrupt.database.prepare("SELECT * FROM transitions WHERE run_id = ? AND scope = 'run' AND to_state = 'cancelled'").get(prepared.runId)!
+      if (fault === 'missing-cancellation') corrupt.database.prepare('DELETE FROM transitions WHERE transition_id = ?').run(cancelled['transition_id'])
+      else if (fault === 'duplicate-cancellation') corrupt.database.prepare("INSERT INTO transitions (transition_id, run_id, experiment_id, sequence, scope, from_state, to_state, intent_json, outcome_json, created_at) VALUES (?, ?, NULL, ?, 'run', 'initializing', 'cancelled', NULL, NULL, ?)").run(`duplicate-${fault}`, prepared.runId, Number(cancelled['sequence']) + 1, cancelled['created_at'])
+      else if (fault === 'malformed-cancellation') corrupt.database.prepare("UPDATE transitions SET from_state = 'cancelled' WHERE transition_id = ?").run(cancelled['transition_id'])
+      else if (fault === 'missing-creation') corrupt.database.prepare("DELETE FROM transitions WHERE run_id = ? AND scope = 'run' AND from_state IS NULL AND to_state = 'initializing'").run(prepared.runId)
+      else if (fault === 'malformed-creation') corrupt.database.prepare("UPDATE transitions SET from_state = 'cancelled' WHERE run_id = ? AND scope = 'run' AND from_state IS NULL AND to_state = 'initializing'").run(prepared.runId)
+      else corrupt.database.prepare("UPDATE transitions SET from_state = NULL, intent_json = (SELECT intent_json FROM transitions WHERE run_id = ? AND scope = 'run' AND from_state IS NULL AND to_state = 'initializing') WHERE transition_id = (SELECT transition_id FROM transitions WHERE run_id = ? AND scope = 'run' AND from_state = 'initializing' AND to_state = 'initializing' ORDER BY sequence LIMIT 1)").run(prepared.runId, prepared.runId)
+      corrupt.close()
+
+      const authorityPath = join(f.root, '.git', 'dsh-autoresearch-locks.sqlite')
+      const durableBefore = readFileSync(prepared.tracker)
+      const walBefore = existsSync(`${prepared.tracker}-wal`) ? readFileSync(`${prepared.tracker}-wal`) : null
+      const sidecarsBefore = [`${prepared.tracker}-wal`, `${prepared.tracker}-shm`].map(existsSync)
+      const authorityBefore = readFileSync(authorityPath)
+      const artifactRoot = join(dirname(prepared.tracker), 'artifacts')
+      const artifactsBefore = existsSync(artifactRoot) ? readdirSync(artifactRoot, { recursive: true }).map(String).sort() : []
+      const evaluatorSpawns = f.subprocess.evaluatorSpawns
+      const childCount = f.creates.length
+
+      const resumed = await createCaseController(f, {}, prepared.runId).run()
+      expect(resumed).toMatchObject({ status: 'round-failed', evidence: [expect.objectContaining({ code: 'state-ambiguous' })] })
+      expect('best' in resumed).toBe(false)
+      expect(readFileSync(prepared.tracker)).toEqual(durableBefore)
+      expect(existsSync(`${prepared.tracker}-wal`) ? readFileSync(`${prepared.tracker}-wal`) : null).toEqual(walBefore)
+      expect([`${prepared.tracker}-wal`, `${prepared.tracker}-shm`].map(existsSync)).toEqual(sidecarsBefore)
+      expect(readFileSync(authorityPath)).toEqual(authorityBefore)
+      expect(existsSync(artifactRoot) ? readdirSync(artifactRoot, { recursive: true }).map(String).sort() : []).toEqual(artifactsBefore)
+      expect(f.subprocess.evaluatorSpawns).toBe(evaluatorSpawns)
+      expect(f.creates).toHaveLength(childCount)
+    } finally { rmSync(f.root, { recursive: true, force: true }) }
+  })
+
+  it.each(['transition', 'attempt', 'artifact', 'terminal-state', 'terminal-reason', 'terminal-quiescence', 'best-facts'] as const)('rechecks terminal %s evidence after exact claim and performs no release or prune on a preflight race', async kind => {
+    const f = controllerFixture([{ stdout: '{"score":1}\n' }])
+    const seam = vi.spyOn(AutoresearchRunController.prototype, 'terminalResumeClaimAcquiredForTest')
+    try {
+      const first = await runControllerCase(f, { max_experiments: 1, target: 1 })
+      const trackerPath = first.ready.tracker; const runId = first.ready.runId
+      first.tracker.close()
+      let before: { lock: unknown; retention: unknown[] } | undefined
+      seam.mockImplementationOnce(() => {
+        const raced = DurableTracker.open(trackerPath)
+        if (kind === 'transition') raced.database.prepare("UPDATE transitions SET transition_id = 'raced-transition' WHERE run_id = ? AND sequence = (SELECT MAX(sequence) FROM transitions WHERE run_id = ?)").run(runId, runId)
+        else if (kind === 'attempt') raced.database.prepare('UPDATE attempts SET process_tree_quiescent = 0 WHERE run_id = ?').run(runId)
+        else if (kind === 'artifact') raced.database.prepare("UPDATE artifacts SET sha256 = ? WHERE run_id = ? AND kind = 'stdout'").run('0'.repeat(64), runId)
+        else if (kind === 'terminal-state') raced.database.prepare("UPDATE runs SET state = 'blocked' WHERE run_id = ?").run(runId)
+        else if (kind === 'terminal-reason') raced.database.prepare("UPDATE runs SET terminal_reason = 'raced terminal reason' WHERE run_id = ?").run(runId)
+        else if (kind === 'terminal-quiescence') raced.database.prepare('UPDATE runs SET terminal_quiescent = 0 WHERE run_id = ?').run(runId)
+        else raced.database.prepare("UPDATE runs SET best_metric = best_metric + 1, best_commit = ?, best_experiment_id = 'raced-best' WHERE run_id = ?").run('0'.repeat(40), runId)
+        before = { lock: raced.database.prepare('SELECT released_at FROM active_locks WHERE run_id = ?').get(runId), retention: raced.database.prepare('SELECT artifact_id, retention FROM artifacts WHERE run_id = ? ORDER BY artifact_id').all(runId) }
+        raced.close()
+      })
+      const result = await createCaseController(f, {}, runId).run()
+      expect(result).toMatchObject({ status: 'blocked', evidence: [expect.objectContaining({ code: expect.stringMatching(/state-ambiguous|attempt-uncertain|artifact-incomplete/u) })] })
+      const after = DurableTracker.openReadOnly(trackerPath)
+      expect(after.database.prepare('SELECT released_at FROM active_locks WHERE run_id = ?').get(runId)).toEqual(before?.lock)
+      expect(after.database.prepare('SELECT artifact_id, retention FROM artifacts WHERE run_id = ? ORDER BY artifact_id').all(runId)).toEqual(before?.retention)
+      after.close()
+    } finally { seam.mockRestore(); rmSync(f.root, { recursive: true, force: true }) }
   })
 
   it.each([
@@ -1069,6 +1283,118 @@ describe('controller real Git/SQLite outcomes', () => {
       fault.mockRestore()
       rmSync(f.root, { recursive: true, force: true })
     }
+  })
+
+  async function seedTerminalDiscardingFixture(f: ControllerFixture) {
+    const terminal = createCaseController(f, { max_experiments: 1 })
+    await expect(terminal.run()).resolves.toMatchObject({ status: 'budget-limited', counts: { experimentsStarted: 1, experimentsCompleted: 1, attempts: 2 }, best: { metric: 10 } })
+    const ready = await terminal.ready
+    const tracker = DurableTracker.open(ready.tracker)
+    const run = tracker.getRun(ready.runId)!
+    const localLock = tracker.database.prepare('SELECT acquired_at FROM active_locks WHERE run_id = ?').get(ready.runId)!
+    expect(tracker.readRegistration(ready.runId)).not.toBeNull()
+    expect(JSON.parse(String(tracker.database.prepare("SELECT intent_json FROM transitions WHERE run_id = ? AND scope = 'run' AND from_state IS NULL AND to_state = 'initializing'").get(ready.runId)?.['intent_json']))).toMatchObject({ kind: 'create-run', contractGeneration: EVALUATOR_CONTRACT_GENERATION })
+    const experiment = tracker.database.prepare("SELECT experiment_id FROM experiments WHERE run_id = ? AND kind = 'candidate' AND ordinal = 1").get(ready.runId)!
+    const experimentId = String(experiment['experiment_id'])
+    const attempt = tracker.database.prepare('SELECT attempt_id FROM attempts WHERE run_id = ? AND experiment_id = ? AND ordinal = 1').get(ready.runId, experimentId)!
+    const attemptId = String(attempt['attempt_id'])
+    expect(tracker.database.prepare('SELECT COUNT(*) AS n FROM artifacts WHERE run_id = ? AND experiment_id = ? AND attempt_id = ?').get(ready.runId, experimentId, attemptId)).toEqual({ n: 0 })
+    const artifactDir = join(tracker.layout.root, 'artifacts', ready.runId, experimentId, attemptId)
+    mkdirSync(artifactDir, { recursive: true })
+    const emptySha256 = createHash('sha256').update('').digest('hex')
+    const createdAt = new Date().toISOString()
+    tracker.database.exec('BEGIN IMMEDIATE')
+    try {
+      const insert = tracker.database.prepare('INSERT INTO artifacts (artifact_id, run_id, experiment_id, attempt_id, kind, location, size_bytes, sha256, owner, retention, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, 0, ?, \'evaluator\', \'retain\', ?, ?)')
+      for (const kind of ['stderr', 'stdout'] as const) {
+        const path = join(artifactDir, `${kind}.log`)
+        writeFileSync(path, '')
+        chmodSync(path, 0o600)
+        insert.run(`${attemptId}-${kind}`, ready.runId, experimentId, attemptId, kind, `artifact:sha256:${createHash('sha256').update(path).digest('hex')}`, emptySha256, '{"truncated":false}', createdAt)
+      }
+      tracker.database.prepare('UPDATE active_locks SET released_at = NULL WHERE run_id = ?').run(ready.runId)
+      tracker.database.exec('COMMIT')
+    } catch (error) {
+      tracker.database.exec('ROLLBACK')
+      tracker.close()
+      throw error
+    }
+    const crash = vi.spyOn(DurableTracker.prototype, 'artifactDiscardMarkedForTest').mockImplementation(() => { throw new Error('terminal artifact discard crash') })
+    try {
+      expect(() => tracker.discardProvenNoProcessCandidateArtifacts(attemptId)).toThrow('terminal artifact discard crash')
+    } finally {
+      crash.mockRestore()
+      tracker.close()
+    }
+    const authority = new DatabaseSync(join(f.root, '.git', 'dsh-autoresearch-locks.sqlite'))
+    authority.prepare('INSERT OR REPLACE INTO active_locks (repository_id, run_tag, run_id, acquired_at) VALUES (?, ?, ?, ?)').run(run['repository_id'], run['run_tag'], ready.runId, localLock['acquired_at'])
+    authority.prepare('DELETE FROM controller_claims WHERE run_id = ?').run(ready.runId)
+    expect(authority.prepare('SELECT repository_id, run_tag, run_id FROM active_locks WHERE run_id = ?').get(ready.runId)).toMatchObject({ run_id: ready.runId })
+    expect(authority.prepare('SELECT * FROM controller_claims WHERE run_id = ?').all(ready.runId)).toEqual([])
+    authority.close()
+    return { ready, experimentId, attemptId }
+  }
+
+  it('recovers a terminal crash at the durable discarding mark before releasing or retaining the run', async () => {
+    const { fixture: f } = matrixControllerFixture(
+      [{ stdout: '{"score":10}\n' }, { spawnError: new Error('provider refused spawn') }],
+      [worktree => writeFileSync(join(worktree, 'src', 'code.ts'), 'export const n = 2\n')],
+    )
+    try {
+      const { ready, experimentId, attemptId } = await seedTerminalDiscardingFixture(f)
+      const before = DurableTracker.openReadOnly(ready.tracker)
+      expect(before.database.prepare("SELECT retention FROM artifacts WHERE run_id = ? AND experiment_id = ? AND attempt_id = ? ORDER BY kind").all(ready.runId, experimentId, attemptId)).toEqual([{ retention: 'discarding' }, { retention: 'discarding' }])
+      const baselineArtifacts = before.database.prepare("SELECT artifact_id FROM artifacts WHERE run_id = ? AND experiment_id LIKE '%-baseline' ORDER BY artifact_id").all(ready.runId)
+      expect(baselineArtifacts).toHaveLength(2)
+      expect(before.database.prepare('SELECT released_at FROM active_locks WHERE run_id = ?').get(ready.runId)).toEqual({ released_at: null })
+      before.close()
+      const authority = new DatabaseSync(join(f.root, '.git', 'dsh-autoresearch-locks.sqlite'))
+      expect(authority.prepare('SELECT repository_id, run_tag, run_id FROM active_locks WHERE run_id = ?').get(ready.runId)).toMatchObject({ run_id: ready.runId })
+      expect(authority.prepare('SELECT * FROM controller_claims WHERE run_id = ?').all(ready.runId)).toEqual([])
+      const resumed = await createCaseController(f, { max_experiments: 1 }, ready.runId).run()
+      expect(resumed).toMatchObject({ status: 'budget-limited', artifacts: baselineArtifacts.map(row => expect.objectContaining({ artifactId: row['artifact_id'] })) })
+      expect(await createCaseController(f, { max_experiments: 1 }, ready.runId).run()).toEqual(resumed)
+      const after = DurableTracker.openReadOnly(ready.tracker)
+      expect(after.database.prepare('SELECT artifact_id FROM artifacts WHERE run_id = ? ORDER BY artifact_id').all(ready.runId)).toEqual(baselineArtifacts)
+      expect(after.database.prepare('SELECT * FROM artifacts WHERE run_id = ? AND experiment_id = ? AND attempt_id = ?').all(ready.runId, experimentId, attemptId)).toEqual([])
+      expect(after.database.prepare('SELECT released_at FROM active_locks WHERE run_id = ?').get(ready.runId)?.['released_at']).not.toBeNull()
+      expect(authority.prepare('SELECT * FROM active_locks WHERE run_id = ?').all(ready.runId)).toEqual([])
+      expect(authority.prepare('SELECT * FROM controller_claims WHERE run_id = ?').all(ready.runId)).toEqual([])
+      authority.close()
+      after.close()
+    } finally { rmSync(f.root, { recursive: true, force: true }) }
+  })
+
+  it.each(['malformed-pair', 'nonspawn'] as const)('rejects terminal %s discarding evidence read-only without artifact, lock, or retention mutation', async faultKind => {
+    const { fixture: f } = matrixControllerFixture(
+      [{ stdout: '{"score":10}\n' }, { spawnError: new Error('provider refused spawn') }],
+      [worktree => writeFileSync(join(worktree, 'src', 'code.ts'), 'export const n = 2\n')],
+    )
+    try {
+      const { ready, experimentId, attemptId } = await seedTerminalDiscardingFixture(f)
+      const corrupt = DurableTracker.open(ready.tracker)
+      if (faultKind === 'malformed-pair') corrupt.database.prepare("UPDATE artifacts SET owner = 'host' WHERE run_id = ? AND kind = 'stdout'").run(ready.runId)
+      else {
+        const outcome = JSON.stringify({ kind: 'failed', code: 'exit', message: 'evaluator exited with code 9' })
+        seedImmutableEvidence(corrupt.database, ['attempts_immutable_outcome'], () => corrupt.database.prepare("UPDATE attempts SET outcome_json = ?, failure_code = 'exit', failure_message = 'evaluator exited with code 9', exit_code = 9, provider_pid = 1234, spawned_at = created_at WHERE run_id = ? AND experiment_id = ? AND attempt_id = ?").run(outcome, ready.runId, experimentId, attemptId))
+        corrupt.database.prepare("UPDATE experiments SET state = 'crashed', failure_code = 'exit', failure_message = 'evaluator exited with code 9', exit_code = 9, host_facts_json = ? WHERE run_id = ? AND experiment_id = ?").run(JSON.stringify({ failure: { code: 'exit', exitCode: 9 } }), ready.runId, experimentId)
+        expect(corrupt.database.prepare('SELECT outcome_json, failure_code, failure_message, exit_code, signal, timed_out, process_tree_quiescent FROM attempts WHERE run_id = ? AND experiment_id = ? AND attempt_id = ?').get(ready.runId, experimentId, attemptId)).toEqual({ outcome_json: outcome, failure_code: 'exit', failure_message: 'evaluator exited with code 9', exit_code: 9, signal: null, timed_out: 0, process_tree_quiescent: 1 })
+        const experiment = corrupt.database.prepare('SELECT state, failure_code, failure_message, exit_code, signal, timed_out, host_facts_json FROM experiments WHERE run_id = ? AND experiment_id = ?').get(ready.runId, experimentId)!
+        expect(experiment).toMatchObject({ state: 'crashed', failure_code: 'exit', failure_message: 'evaluator exited with code 9', exit_code: 9, signal: null, timed_out: 0 })
+        expect(JSON.parse(String(experiment['host_facts_json']))).toMatchObject({ failure: { code: 'exit', exitCode: 9 } })
+      }
+      corrupt.close()
+      const durableBefore = readFileSync(ready.tracker)
+      const authorityPath = join(f.root, '.git', 'dsh-autoresearch-locks.sqlite')
+      const authorityBefore = readFileSync(authorityPath)
+      const artifactRoot = join(dirname(ready.tracker), 'artifacts')
+      const artifactsBefore = readdirSync(artifactRoot, { recursive: true }).map(String).sort()
+      const resumed = await createCaseController(f, { max_experiments: 1 }, ready.runId).run()
+      expect(resumed).toMatchObject({ status: 'blocked', evidence: [expect.objectContaining({ code: 'artifact-incomplete' })] })
+      expect(readFileSync(ready.tracker)).toEqual(durableBefore)
+      expect(readFileSync(authorityPath)).toEqual(authorityBefore)
+      expect(readdirSync(artifactRoot, { recursive: true }).map(String).sort()).toEqual(artifactsBefore)
+    } finally { rmSync(f.root, { recursive: true, force: true }) }
   })
 
   it('reruns a proven-quiescent candidate evaluation exactly once from its recorded candidate commit', async () => {

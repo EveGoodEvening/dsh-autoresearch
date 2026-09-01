@@ -114,14 +114,19 @@ describe('recovery reconciler', () => {
     f.tracker.close()
   })
 
-  it.each(['blocked', 'round-failed', 'cancelled'] as const)('classifies evaluator-free terminal %s by explicit contract', async state => {
+  it.each([
+    { state: 'blocked' as const, fromState: undefined, lastState: undefined },
+    { state: 'round-failed' as const, fromState: 'baseline-running' as const, lastState: undefined },
+    { state: 'cancelled' as const, fromState: undefined, lastState: 'initializing' as const },
+  ])('classifies evaluator-free terminal $state by explicit contract', async ({ state, fromState, lastState }) => {
     const { tracker, request } = fixture(); createRun(tracker, request)
     tracker.acquireActiveLock(request.runId, request.discovery.repositoryId, request.identity.runTag)
-    if (state === 'round-failed') tracker.transitionRun(request.runId, 'baseline-running')
+    if (fromState) tracker.transitionRun(request.runId, fromState)
     tracker.transitionRun(request.runId, state, { terminalReason: state, blockedCode: state })
-    await expect(reconcileRecovery(unusedContext, request)).resolves.toEqual({ kind: 'terminal', runId: request.runId, state, lock: 'release', artifacts: [] })
+    const terminal = { kind: 'terminal', runId: request.runId, state, ...(lastState ? { lastState } : {}), artifacts: [] }
+    await expect(reconcileRecovery(unusedContext, request)).resolves.toEqual({ ...terminal, lock: 'release' })
     tracker.releaseActiveLock(request.runId)
-    await expect(reconcileRecovery(unusedContext, request)).resolves.toEqual({ kind: 'terminal', runId: request.runId, state, lock: 'already-released', artifacts: [] })
+    await expect(reconcileRecovery(unusedContext, request)).resolves.toEqual({ ...terminal, lock: 'already-released' })
     tracker.close()
   })
 

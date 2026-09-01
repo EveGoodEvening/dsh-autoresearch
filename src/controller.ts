@@ -67,6 +67,8 @@ export class AutoresearchRunController {
   }
 
   setJobId(jobId: string): void { if (this.preparePromise || this.runPromise) throw new Error('job id must be assigned before controller preparation'); if (this.jobId !== undefined) throw new Error('job id is already assigned'); this.jobId = normalizedReason(jobId) }
+  /** Test-only seam after writable identity revalidation and controller claim, before terminal evidence recheck. */
+  terminalResumeClaimAcquiredForTest(): void {}
   prepare(jobId?: string): Promise<AutoresearchRunReady> {
     if (jobId !== undefined) {
       if (this.jobId === undefined) this.jobId = normalizedReason(jobId)
@@ -201,6 +203,18 @@ export class AutoresearchRunController {
             tracker = preflight
             return { runId, policy, discovery: resumeDiscovery, identity, tracker, gitExecutable, policySha256: acceptedPolicySha256, provenanceSha256, gitOptions, registration: classification.identity, preclaimBlock: identityBlock }
           }
+          if (terminal) {
+            const terminalPreflight = await reconcileRecovery(this.ctx, { runId, policy, discovery: resumeDiscovery, identity, tracker: preflight, gitExecutable, policySha256: acceptedPolicySha256, provenanceSha256, gitOptions, registration: classification.identity, signal: this.aborter.signal })
+            if (terminalPreflight.kind === 'blocked') {
+              tracker = preflight
+              return { runId, policy, discovery: resumeDiscovery, identity, tracker, gitExecutable, policySha256: acceptedPolicySha256, provenanceSha256, gitOptions, registration: classification.identity, preclaimBlock: { code: terminalPreflight.code, message: terminalPreflight.evidence[0]?.message ?? 'terminal evidence is invalid' } }
+            }
+            if (terminalPreflight.kind !== 'terminal') {
+              tracker = preflight
+              return { runId, policy, discovery: resumeDiscovery, identity, tracker, gitExecutable, policySha256: acceptedPolicySha256, provenanceSha256, gitOptions, registration: classification.identity, preclaimBlock: { code: 'state-ambiguous', message: `terminal preflight returned ${terminalPreflight.kind}` } }
+            }
+          }
+          const acceptedTerminalEvidence = terminal ? captureTerminalResumeEvidence(preflight, runId) : undefined
           const acceptedIdentity = captureAcceptedResumeIdentity(preflight, runId)
           preflight.close()
           preflightAccepted = true
@@ -223,7 +237,23 @@ export class AutoresearchRunController {
               return runtime
             }
             claimed = { runId, ownerId: claimOwner }
+            this.terminalResumeClaimAcquiredForTest()
+            const terminalEvidenceChanged = acceptedTerminalEvidence !== captureTerminalResumeEvidence(tracker, runId)
+            if (terminalEvidenceChanged) {
+              const runtime = { runId, policy, discovery: resumeDiscovery, identity, tracker, gitExecutable, policySha256: acceptedPolicySha256, provenanceSha256, gitOptions, claimOwner, claimProcess, registration: writableRegistration.identity, preclaimBlock: { code: 'state-ambiguous', message: 'terminal run, transition, attempt, experiment, artifact, or cancellation-origin evidence changed after preflight' } }
+              this.runtime = runtime; tracker = undefined
+              return runtime
+            }
             tracker.resumeOwnedArtifactDiscards(runId)
+            const terminalFinal = await reconcileRecovery(this.ctx, { runId, policy, discovery: resumeDiscovery, identity, tracker, gitExecutable, policySha256: acceptedPolicySha256, provenanceSha256, gitOptions, registration: writableRegistration.identity, signal: this.aborter.signal })
+            if (terminalFinal.kind !== 'terminal') {
+              const preclaimBlock = terminalFinal.kind === 'blocked'
+                ? { code: terminalFinal.code, message: terminalFinal.evidence[0]?.message ?? 'terminal evidence is invalid after artifact discard recovery' }
+                : { code: 'state-ambiguous', message: `terminal reconciliation after artifact discard recovery returned ${terminalFinal.kind}` }
+              const runtime = { runId, policy, discovery: resumeDiscovery, identity, tracker, gitExecutable, policySha256: acceptedPolicySha256, provenanceSha256, gitOptions, claimOwner, claimProcess, registration: writableRegistration.identity, preclaimBlock }
+              this.runtime = runtime; tracker = undefined
+              return runtime
+            }
             recoverTerminalRunLockUnderControllerClaim(tracker, runId, claimOwner, claimProcess)
             applyRunRetention(tracker, runId, this.options.config)
             sweepRepositoryRetention(resumeDiscovery.gitCommonDir, this.options.config.stateRoot, this.options.config, runId)
@@ -578,8 +608,8 @@ export class AutoresearchRunController {
     const row = r.tracker.getRun(r.runId)
     if (this.quiescenceFailure) return this.block(r, { kind: 'blocked', runId: r.runId, code: 'attempt-uncertain', evidence: [{ code: this.quiescenceFailure.code, message: this.quiescenceFailure.message, artifacts: [] }], lock: 'retain' })
     if (!row) throw new Error(this.cancelReason)
-    const lastState = String(row['state']) as RunDurableState
-    if (['completed','baseline-blocked','blocked','round-failed','cancelled'].includes(lastState)) {
+    const state = String(row['state']) as RunDurableState
+    if (['completed','baseline-blocked','blocked','round-failed','cancelled'].includes(state)) {
       const directive = await reconcileRecovery(this.ctx, { ...r, signal: new AbortController().signal })
       if (directive.kind === 'blocked') return this.block(r, directive)
       if (directive.kind === 'terminal') return this.returnTerminal(r, directive)
@@ -591,7 +621,10 @@ export class AutoresearchRunController {
     if (unresolved && ['baseline-pending','running'].includes(String(unresolved['state']))) r.tracker.commitTerminalExperiment(String(unresolved['experiment_id']), 'cancelled', { failureCode: 'cancelled', failureMessage: this.cancelReason })
     if (best) await restoreAcceptedWorktree(this.ctx, r.gitExecutable, r.identity.worktree, r.identity, best.commit, r.gitOptions)
     r.tracker.transitionRun(r.runId, 'cancelled', { terminalReason: this.cancelReason, quiescent: true, ...(best ? { best } : {}) })
-    return this.finish(r, { status: 'cancelled', lastState, reason: this.cancelReason, quiescent: true, ...(best ? { best } : {}) })
+    const directive = await reconcileRecovery(this.ctx, { ...r, signal: new AbortController().signal })
+    if (directive.kind === 'blocked') return this.block(r, directive)
+    if (directive.kind !== 'terminal' || directive.state !== 'cancelled') throw new Error(`durable cancellation reconciliation returned ${directive.kind}`)
+    return this.returnTerminal(r, directive)
   }
 
   private async returnTerminal(r: Runtime, directive: Extract<RecoveryDirective, { kind: 'terminal' }>): Promise<AutoresearchRunResult> {
@@ -602,7 +635,7 @@ export class AutoresearchRunController {
     let value: Record<string, unknown>
     if (directive.state === 'completed') value = { ...facts, status: r.policy.target !== undefined && best && isTargetReached(r.policy.metricDirection, best.metric, r.policy.target) ? 'target-reached' : 'budget-limited', ...(r.policy.target !== undefined && best && isTargetReached(r.policy.metricDirection, best.metric, r.policy.target) ? { target: r.policy.target } : {}), best }
     else if (directive.state === 'baseline-blocked') value = baselineBlocked(r, validatedArtifacts)
-    else if (directive.state === 'cancelled') value = { ...facts, status: 'cancelled', lastState: 'initializing', reason: String(row['terminal_reason'] ?? 'cancelled'), quiescent: true, ...(best ? { best } : {}) }
+    else if (directive.state === 'cancelled') value = cancelledResult(r, directive.lastState, validatedArtifacts)
     else if (directive.state === 'blocked' && best) value = { ...facts, status: 'blocked', best, evidence: evidenceFromRun(row) }
     else value = { ...facts, status: 'round-failed', reason: String(row['terminal_reason'] ?? directive.state), evidence: evidenceFromRun(row), ...(best ? { best } : {}) }
     return this.finish(r, value, directive.lock !== 'retain')
@@ -656,7 +689,7 @@ function counts(tracker: DurableTracker, runId: string): ResultCounts { const ca
 interface PublicArtifact { readonly artifactId: string; readonly kind: string; readonly location: string; readonly sizeBytes: number; readonly sha256: string }
 function publicArtifact(row: Pick<ArtifactRecord, 'artifactId' | 'kind' | 'location' | 'sizeBytes' | 'sha256'>): PublicArtifact { return { artifactId: row.artifactId, kind: row.kind, location: row.location, sizeBytes: row.sizeBytes, sha256: row.sha256 } }
 function artifacts(tracker: DurableTracker, runId: string) { return (tracker.database.prepare(`SELECT a.artifact_id, a.kind, a.location, a.size_bytes, a.sha256 FROM artifacts a LEFT JOIN experiments e ON e.run_id = a.run_id AND e.experiment_id = a.experiment_id LEFT JOIN attempts t ON t.run_id = a.run_id AND t.attempt_id = a.attempt_id WHERE a.run_id = ? ORDER BY COALESCE(e.ordinal, -1), COALESCE(t.ordinal, -1), a.kind, a.artifact_id`).all(runId) as Record<string, unknown>[]).map(row => ({ artifactId: String(row['artifact_id']), kind: String(row['kind']), location: String(row['location']), sizeBytes: Number(row['size_bytes']), sha256: String(row['sha256']) })) }
-function common(r: Runtime, validatedArtifacts = artifacts(r.tracker, r.runId)) { return { runId: r.runId, tracker: r.tracker.path, counts: counts(r.tracker, r.runId), artifacts: validatedArtifacts } }
+function common(r: Runtime, validatedArtifacts: readonly PublicArtifact[] = artifacts(r.tracker, r.runId)) { return { runId: r.runId, tracker: r.tracker.path, counts: counts(r.tracker, r.runId), artifacts: validatedArtifacts } }
 function errorEvidence(error: unknown): { code: string; message: string } { return { code: error instanceof ProposalAgentError ? error.code : String((error as { code?: unknown }).code ?? 'round-failed'), message: error instanceof Error ? error.message : String(error) } }
 function evidenceFromRun(row: Record<string, unknown>): BlockerEvidence[] { return [{ code: String(row['blocked_code'] ?? 'terminal'), message: String(row['terminal_reason'] ?? 'run terminated'), artifacts: [] }] }
 function baselineBlocked(r: Runtime, refs: PublicArtifact[]): Record<string, unknown> {
@@ -677,6 +710,16 @@ function captureAcceptedResumeIdentity(tracker: DurableTracker, runId: string): 
 function revalidateAcceptedResumeIdentity(tracker: DurableTracker, runId: string, accepted: string): void {
   if (tracker.schemaVersion() !== TRACKER_SCHEMA_VERSION) throw new Error('writable resume tracker did not reach the canonical current schema')
   if (captureAcceptedResumeIdentity(tracker, runId) !== accepted) throw new Error('durable resume identity changed between read-only classification and writable open')
+}
+function captureTerminalResumeEvidence(tracker: DurableTracker, runId: string): string {
+  const run = tracker.getRun(runId)
+  if (!run) throw new Error('terminal resume evidence requires a durable run')
+  const transitions = tracker.database.prepare('SELECT * FROM transitions WHERE run_id = ? ORDER BY sequence').all(runId)
+  const experiments = tracker.database.prepare('SELECT * FROM experiments WHERE run_id = ? ORDER BY ordinal, experiment_id').all(runId).map(experiment => ({ annotation_json: null, host_facts_json: null, ...experiment }))
+  const attempts = tracker.database.prepare('SELECT * FROM attempts WHERE run_id = ? ORDER BY experiment_id, ordinal, attempt_id').all(runId)
+  const artifacts = tracker.database.prepare('SELECT * FROM artifacts WHERE run_id = ? ORDER BY experiment_id, attempt_id, kind, artifact_id').all(runId)
+  const cancellationOrigin = run['state'] === 'cancelled' ? tracker.cancellationOrigin(runId) : undefined
+  return JSON.stringify({ run, transitions, experiments, attempts, artifacts, ...(cancellationOrigin === undefined ? {} : { cancellationOrigin }) })
 }
 function validateReadOnlyResumeIdentity(row: Record<string, unknown>, discovery: RepositoryDiscovery, identity: RunGitIdentity, policy: DurableRunPolicy, policySha256: string, expectedProvenance?: FrozenEvaluatorProvenance, policyAlreadyRedacted = false): { code: string; message: string } | undefined {
   if (String(row['policy_json']) !== (policyAlreadyRedacted ? serializeRedactedDurablePolicy(policy) : serializeDurablePolicy(policy))) return { code: 'policy-mismatch', message: 'durable policy bytes differ from the accepted policy identity' }
@@ -727,8 +770,14 @@ function readonlyTerminalReplay(r: Runtime, directive: Extract<RecoveryDirective
   let value: Record<string, unknown>
   if (state === 'completed') value = { ...common(r, refs), status: r.policy.target !== undefined && best && isTargetReached(r.policy.metricDirection, best.metric, r.policy.target) ? 'target-reached' : 'budget-limited', ...(r.policy.target !== undefined && best && isTargetReached(r.policy.metricDirection, best.metric, r.policy.target) ? { target: r.policy.target } : {}), best }
   else if (state === 'baseline-blocked') value = baselineBlocked(r, refs)
-  else if (state === 'cancelled') value = { ...common(r, refs), status: 'cancelled', lastState: 'initializing', reason: String(row['terminal_reason'] ?? 'cancelled'), quiescent: true, ...(best ? { best } : {}) }
+  else if (state === 'cancelled' && directive.state === 'cancelled') value = cancelledResult(r, directive.lastState, refs)
   else if (state === 'blocked' && best) value = { ...common(r, refs), status: 'blocked', best, evidence: evidenceFromRun(row) }
   else value = { ...common(r, refs), status: 'round-failed', reason: String(row['terminal_reason'] ?? state), evidence: evidenceFromRun(row), ...(best ? { best } : {}) }
   return decodeRunResult(value, r.policy.metricDirection)
+}
+
+function cancelledResult(r: Runtime, lastState: Exclude<RunDurableState, 'cancelled'>, artifacts: readonly PublicArtifact[]): Record<string, unknown> {
+  const row = r.tracker.getRun(r.runId)!
+  const best = optionalBest(r.tracker, r.runId)
+  return { ...common(r, artifacts), status: 'cancelled', lastState, reason: String(row['terminal_reason'] ?? 'cancelled'), quiescent: true, ...(best ? { best } : {}) }
 }

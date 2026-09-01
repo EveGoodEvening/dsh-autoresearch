@@ -22,7 +22,8 @@ export type RecoveryDirective =
   | { readonly kind: 'finalize-evaluation'; readonly runId: RunId; readonly experiment: RecoveredExperiment; readonly evaluation: RecoveredEvaluation }
   | { readonly kind: 'reconcile-candidate'; readonly runId: RunId; readonly experiment: RecoveredExperiment; readonly candidateCommit: FullCommitSha; readonly expectedAcceptedCommit: FullCommitSha; readonly outcome: ({ readonly kind: 'accept' | 'reject'; readonly metric: number } | { readonly kind: 'continue-failure'; readonly terminalExperimentState: 'crashed' | 'timed-out'; readonly code: 'spawn' | 'exit' | 'signal' | 'timeout' | 'output-limit' | 'metric-protocol' } | { readonly kind: 'terminal-block'; readonly code: 'provenance-mismatch' | 'recovery-rerun-exhausted'; readonly message: string } | { readonly kind: 'cancel'; readonly terminalExperimentState: 'cancelled' }) }
   | { readonly kind: 'blocked'; readonly runId: RunId; readonly code: RecoveryBlockCode; readonly evidence: readonly BlockerEvidence[]; readonly lock: 'retain' | 'release-after-persist' }
-  | { readonly kind: 'terminal'; readonly runId: RunId; readonly state: 'completed' | 'baseline-blocked' | 'blocked' | 'round-failed' | 'cancelled'; readonly lock: 'release' | 'retain' | 'already-released'; readonly artifacts: readonly ArtifactRecord[] }
+  | { readonly kind: 'terminal'; readonly runId: RunId; readonly state: 'completed' | 'baseline-blocked' | 'blocked' | 'round-failed'; readonly lock: 'release' | 'retain' | 'already-released'; readonly artifacts: readonly ArtifactRecord[] }
+  | { readonly kind: 'terminal'; readonly runId: RunId; readonly state: 'cancelled'; readonly lastState: Exclude<RunDurableState, 'cancelled'>; readonly lock: 'release' | 'retain' | 'already-released'; readonly artifacts: readonly ArtifactRecord[] }
 
 const SHA = /^[0-9a-f]{40}$/u
 const HASH = /^[0-9a-f]{64}$/u
@@ -178,9 +179,14 @@ function reconstructEvaluation(request: RecoveryRequest, experiment: RecoveredEx
   if (provenanceSha256 !== request.provenanceSha256) throw new RecoveryEvidenceError('provenance-mismatch', 'attempt spawn provenance differs from the durable run provenance')
   const result = decodeAttemptResult(attempt, attemptId)
   if (experiment.kind === 'candidate' && result.kind === 'failed' && result.code === 'spawn' && exit.providerPid === undefined && exit.spawnedAt === undefined && exit.processTreeQuiescent) {
-    request.tracker.discardProvenNoProcessCandidateArtifacts(attemptId)
     const remaining = request.tracker.database.prepare('SELECT 1 FROM artifacts WHERE run_id = ? AND experiment_id = ? AND attempt_id = ? LIMIT 1').get(request.runId, experiment.experimentId, attemptId)
-    if (remaining) throw new RecoveryEvidenceError('artifact-incomplete', 'proven-no-process candidate spawn failure retained evaluator artifacts')
+    if (remaining && allowPruned) {
+      request.tracker.validateProvenNoProcessCandidateArtifactDiscard(attemptId)
+      return { ...result, attemptId, provenanceSha256, exit, artifacts: [] }
+    }
+    if (remaining) request.tracker.discardProvenNoProcessCandidateArtifacts(attemptId)
+    const retained = request.tracker.database.prepare('SELECT 1 FROM artifacts WHERE run_id = ? AND experiment_id = ? AND attempt_id = ? LIMIT 1').get(request.runId, experiment.experimentId, attemptId)
+    if (retained) throw new RecoveryEvidenceError('artifact-incomplete', 'proven-no-process candidate spawn failure retained evaluator artifacts')
     return { ...result, attemptId, provenanceSha256, exit, artifacts: [] }
   }
   const artifacts = request.tracker.database.prepare('SELECT * FROM artifacts WHERE run_id = ? AND experiment_id = ? AND attempt_id = ? ORDER BY kind').all(request.runId, experiment.experimentId, attemptId) as Row[]
@@ -191,7 +197,7 @@ function reconstructEvaluation(request: RecoveryRequest, experiment: RecoveredEx
     const kind = text(row['kind'])
     if (text(row['artifact_id']) !== `${attemptId}-${kind}` || text(row['run_id']) !== request.runId || text(row['experiment_id']) !== experiment.experimentId || text(row['attempt_id']) !== attemptId) throw new RecoveryEvidenceError('artifact-incomplete', `artifact ${kind} has noncanonical attempt-scoped identity`)
     const retention = text(row['retention'])
-    if (text(row['owner']) !== 'evaluator' || retention !== 'retain' && (!allowPruned || retention !== 'pruned')) throw new RecoveryEvidenceError('artifact-incomplete', `artifact ${kind} has noncanonical owner or retention`)
+    if (text(row['owner']) !== 'evaluator' || retention !== 'retain' && (!allowPruned || retention !== 'pruned' && retention !== 'pruning')) throw new RecoveryEvidenceError('artifact-incomplete', `artifact ${kind} has noncanonical owner or retention`)
     const path = join(request.tracker.layout.root, 'artifacts', request.runId, experiment.experimentId, attemptId, `${kind}.log`)
     const location = `artifact:sha256:${createHash('sha256').update(path).digest('hex')}`
     const sizeBytes = integer(row['size_bytes'])
@@ -296,13 +302,21 @@ function terminalDirective(request: RecoveryRequest, state: RunDurableState, rec
   const terminal = state as 'completed' | 'baseline-blocked' | 'blocked' | 'round-failed' | 'cancelled'
   const evidence = validateTerminalEvidence(request, terminal)
   if (evidence instanceof RecoveryEvidenceError) return blocked(request, evidence.code, evidence.message, 'retain')
+  let lastState: Exclude<RunDurableState, 'cancelled'> | undefined
+  if (terminal === 'cancelled') {
+    try { lastState = request.tracker.cancellationOrigin(request.runId) }
+    catch (error) { return blocked(request, 'state-ambiguous', error instanceof Error ? error.message : 'cancelled run transition evidence is invalid', 'retain') }
+  }
   const releasable = recovery.run['terminal_quiescent'] === 1 && recovery.processDisposition === 'quiescent'
   const lock = !releasable ? 'retain' : recovery.activeLock ? 'release' : 'already-released'
-  return { kind: 'terminal', runId: request.runId, state: terminal, lock, artifacts: evidence }
+  return terminal === 'cancelled'
+    ? { kind: 'terminal', runId: request.runId, state: terminal, lastState: lastState!, lock, artifacts: evidence }
+    : { kind: 'terminal', runId: request.runId, state: terminal, lock, artifacts: evidence }
 }
 
 function validateTerminalEvidence(request: RecoveryRequest, state: 'completed' | 'baseline-blocked' | 'blocked' | 'round-failed' | 'cancelled'): readonly ArtifactRecord[] | RecoveryEvidenceError {
   const experiments = request.tracker.database.prepare('SELECT * FROM experiments WHERE run_id = ? ORDER BY ordinal').all(request.runId) as Row[]
+  const discardingAttemptIds = new Set<string>()
   const attempts = request.tracker.database.prepare('SELECT a.* FROM attempts a JOIN experiments e ON e.run_id = a.run_id AND e.experiment_id = a.experiment_id WHERE a.run_id = ? ORDER BY e.ordinal, a.ordinal, a.attempt_id').all(request.runId) as Row[]
   const decoded: ArtifactRecord[] = []
   const validatedAttemptIds = new Set<string>()
@@ -322,9 +336,11 @@ function validateTerminalEvidence(request: RecoveryRequest, state: 'completed' |
       if (!evaluation) throw new RecoveryEvidenceError('attempt-uncertain', `attempt ${attemptId} has no durable outcome`)
       decoded.push(...evaluation.artifacts)
       validatedAttemptIds.add(attemptId)
+      if (evaluation.artifacts.length === 0 && request.tracker.database.prepare("SELECT 1 FROM artifacts WHERE run_id = ? AND attempt_id = ? AND retention = 'discarding' LIMIT 1").get(request.runId, attemptId)) discardingAttemptIds.add(attemptId)
     }
     const allArtifacts = request.tracker.database.prepare('SELECT attempt_id FROM artifacts WHERE run_id = ?').all(request.runId) as Row[]
-    if (allArtifacts.length !== decoded.length || allArtifacts.some(row => !validatedAttemptIds.has(text(row['attempt_id'])))) throw new RecoveryEvidenceError('artifact-incomplete', 'terminal run contains unexpected or non-evaluator artifact rows')
+    const retainedArtifacts = allArtifacts.filter(row => !discardingAttemptIds.has(text(row['attempt_id'])))
+    if (retainedArtifacts.length !== decoded.length || allArtifacts.some(row => !validatedAttemptIds.has(text(row['attempt_id'])))) throw new RecoveryEvidenceError('artifact-incomplete', 'terminal run contains unexpected or non-evaluator artifact rows')
     const evaluatedExperiments = new Set((request.tracker.database.prepare("SELECT DISTINCT experiment_id FROM transitions WHERE run_id = ? AND scope = 'experiment' AND from_state = 'running' AND to_state NOT IN ('running','baseline-pending')").all(request.runId) as Row[]).map(row => text(row['experiment_id'])))
     for (const experimentId of evaluatedExperiments) {
       const latest = attempts.filter(row => text(row['experiment_id']) === experimentId).at(-1)

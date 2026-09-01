@@ -346,25 +346,34 @@ export class DurableTracker {
   }
   discardProvenNoProcessCandidateArtifacts(attemptId: string): void {
     const artifacts = this.transaction(() => {
-      const attempt = this.database.prepare(`SELECT a.*, e.kind AS experiment_kind FROM attempts a JOIN experiments e ON e.run_id = a.run_id AND e.experiment_id = a.experiment_id WHERE a.attempt_id = ?`).get(attemptId)
-      if (!attempt) throw new TrackerTransitionError(`unknown attempt ${attemptId}`)
-      const outcome = attempt['outcome_json'] === null ? undefined : parseJson(attempt['outcome_json'], 'attempt outcome') as { kind?: unknown; code?: unknown }
-      if (attempt['experiment_kind'] !== 'candidate' || outcome?.kind !== 'failed' || outcome.code !== 'spawn' || attempt['failure_code'] !== 'spawn' || attempt['failure_message'] === null || attempt['exited_at'] === null || attempt['process_tree_quiescent'] !== 1 || attempt['provider_pid'] !== null || attempt['spawned_at'] !== null) throw new TrackerTransitionError('artifact discard requires complete proven-no-process candidate spawn failure evidence')
-      const runId = requiredSqlInputValue(attempt['run_id'], 'attempts.run_id')
-      const experimentId = requiredSqlInputValue(attempt['experiment_id'], 'attempts.experiment_id')
-      const rows = this.database.prepare('SELECT * FROM artifacts WHERE run_id = ? AND experiment_id = ? AND attempt_id = ? ORDER BY kind').all(runId, experimentId, attemptId) as Record<string, SQLOutputValue>[]
-      if (rows.length === 0) return []
-      if (rows.length !== 2 || rows.map(row => String(row['kind'])).join(',') !== 'stderr,stdout' || rows.some(row => !['retain', 'discarding'].includes(String(row['retention'])))) throw new TrackerTransitionError('spawn failure artifact discard requires the canonical evaluator artifact pair')
-      const selected = rows.map(row => {
-        const artifact = prunableArtifact(row, this.layout.root, String(runId))
-        if (artifact.sizeBytes !== 0) throw new TrackerTransitionError('spawn failure artifact discard requires empty evaluator artifacts')
-        return artifact
-      })
-      this.database.prepare("UPDATE artifacts SET retention = 'discarding' WHERE run_id = ? AND experiment_id = ? AND attempt_id = ? AND retention = 'retain'").run(runId, experimentId, attemptId)
+      const selected = this.provenNoProcessCandidateArtifacts(attemptId, ['retain', 'discarding'])
+      if (selected.length === 0) return selected
+      const first = selected[0]!
+      this.database.prepare("UPDATE artifacts SET retention = 'discarding' WHERE artifact_id IN (?, ?) AND retention = 'retain'").run(first.artifactId, selected[1]!.artifactId)
       return selected
     })
     this.artifactDiscardMarkedForTest()
     this.completeArtifactDiscard(artifacts)
+  }
+  validateProvenNoProcessCandidateArtifactDiscard(attemptId: string): void {
+    const artifacts = this.provenNoProcessCandidateArtifacts(attemptId, ['discarding'])
+    for (const artifact of artifacts) validateArtifactContent(artifact)
+  }
+  private provenNoProcessCandidateArtifacts(attemptId: string, acceptedRetentions: readonly string[]): readonly PrunableArtifact[] {
+    const attempt = this.database.prepare(`SELECT a.*, e.kind AS experiment_kind FROM attempts a JOIN experiments e ON e.run_id = a.run_id AND e.experiment_id = a.experiment_id WHERE a.attempt_id = ?`).get(attemptId)
+    if (!attempt) throw new TrackerTransitionError(`unknown attempt ${attemptId}`)
+    const outcome = attempt['outcome_json'] === null ? undefined : parseJson(attempt['outcome_json'], 'attempt outcome') as { kind?: unknown; code?: unknown }
+    if (attempt['experiment_kind'] !== 'candidate' || outcome?.kind !== 'failed' || outcome.code !== 'spawn' || attempt['failure_code'] !== 'spawn' || attempt['failure_message'] === null || attempt['exited_at'] === null || attempt['process_tree_quiescent'] !== 1 || attempt['provider_pid'] !== null || attempt['spawned_at'] !== null) throw new TrackerTransitionError('artifact discard requires complete proven-no-process candidate spawn failure evidence')
+    const runId = requiredSqlInputValue(attempt['run_id'], 'attempts.run_id')
+    const experimentId = requiredSqlInputValue(attempt['experiment_id'], 'attempts.experiment_id')
+    const rows = this.database.prepare('SELECT * FROM artifacts WHERE run_id = ? AND experiment_id = ? AND attempt_id = ? ORDER BY kind').all(runId, experimentId, attemptId) as Record<string, SQLOutputValue>[]
+    if (rows.length === 0) return []
+    if (rows.length !== 2 || rows.map(row => String(row['kind'])).join(',') !== 'stderr,stdout' || rows.some(row => !acceptedRetentions.includes(String(row['retention'])))) throw new TrackerTransitionError('spawn failure artifact discard requires the canonical evaluator artifact pair')
+    return rows.map(row => {
+      const artifact = prunableArtifact(row, this.layout.root, String(runId))
+      if (artifact.sizeBytes !== 0 || artifact.sha256 !== createHash('sha256').update('').digest('hex')) throw new TrackerTransitionError('spawn failure artifact discard requires empty evaluator artifacts')
+      return artifact
+    })
   }
   resumeOwnedArtifactDiscards(runId: string): void {
     const rows = this.database.prepare("SELECT DISTINCT attempt_id FROM artifacts WHERE run_id = ? AND retention = 'discarding' ORDER BY attempt_id").all(runId) as Record<string, SQLOutputValue>[]
@@ -458,6 +467,57 @@ export class DurableTracker {
 
   getRun(runId: string): Record<string, SQLOutputValue> | undefined { return this.database.prepare('SELECT * FROM runs WHERE run_id = ?').get(runId) }
   listTransitions(runId: string): Record<string, SQLOutputValue>[] { return this.database.prepare('SELECT * FROM transitions WHERE run_id = ? ORDER BY sequence').all(runId) }
+  cancellationOrigin(runId: string): Exclude<RunDurableState, 'cancelled'> {
+    const run = this.requireRun(runId)
+    if (run['state'] !== 'cancelled') throw new TrackerTransitionError('cancellation origin requires a cancelled durable run')
+    const transitions = this.database.prepare('SELECT * FROM transitions WHERE run_id = ? ORDER BY sequence').all(runId)
+    if (transitions.length < 2) throw new TrackerTransitionError('cancelled run requires a complete durable transition lineage')
+
+    let previousSequence = 0
+    for (const transition of transitions) {
+      const sequence = Number(transition['sequence'])
+      if (!Number.isSafeInteger(sequence) || sequence !== previousSequence + 1 || transition['run_id'] !== runId || transition['transition_id'] !== `${runId}:${sequence}`) throw new TrackerTransitionError('cancelled run transition lineage has a noncanonical global sequence or identity')
+      previousSequence = sequence
+    }
+
+    const lineage = transitions.filter(transition => transition['scope'] === 'run')
+    if (lineage.length < 2) throw new TrackerTransitionError('cancelled run requires a complete durable run-transition lineage')
+    let state: RunDurableState | null = null
+    let cancellationOrigin: Exclude<RunDurableState, 'cancelled'> | undefined
+    let creationCount = 0
+    let cancellationCount = 0
+    const ownedExperiment = this.database.prepare('SELECT 1 FROM experiments WHERE experiment_id = ? AND run_id = ?')
+    for (let index = 0; index < lineage.length; index += 1) {
+      const transition = lineage[index]!
+      if (transition['run_id'] !== runId || transition['scope'] !== 'run') throw new TrackerTransitionError('cancelled run transition lineage has noncanonical scope or ownership')
+      const experimentId = transition['experiment_id'] === null ? undefined : String(transition['experiment_id'])
+      if (experimentId !== undefined && ownedExperiment.get(experimentId, runId) === undefined) throw new TrackerTransitionError('cancelled run transition lineage has noncanonical scope or ownership')
+      const from = transition['from_state'] === null ? null : String(transition['from_state']) as RunDurableState
+      const to = String(transition['to_state']) as RunDurableState
+      if (!(to in RUN_TRANSITIONS) || from !== null && !(from in RUN_TRANSITIONS)) throw new TrackerTransitionError('cancelled run transition lineage contains an unknown state')
+      if (index === 0) {
+        creationCount += Number(from === null && to === 'initializing')
+        if (from !== null || to !== 'initializing' || experimentId !== undefined) throw new TrackerTransitionError('cancelled run transition lineage must begin with its canonical creation row')
+        let intent: unknown
+        try { intent = transition['intent_json'] === null ? undefined : JSON.parse(String(transition['intent_json'])) } catch { throw new TrackerTransitionError('cancelled run creation transition is malformed') }
+        const creationIntent = intent as Record<string, unknown> | undefined
+        if (!creationIntent || typeof creationIntent !== 'object' || Array.isArray(creationIntent) || creationIntent['kind'] !== 'create-run' || Object.keys(creationIntent).some(key => key !== 'kind' && key !== 'contractGeneration') || (creationIntent['contractGeneration'] !== undefined && creationIntent['contractGeneration'] !== EVALUATOR_CONTRACT_GENERATION)) throw new TrackerTransitionError('cancelled run creation transition is malformed')
+      } else {
+        if (from === null && to === 'initializing') creationCount += 1
+        if (from !== state) throw new TrackerTransitionError('cancelled run transition lineage is disconnected')
+        if (from !== to && !RUN_TRANSITIONS[from!].includes(to)) throw new TrackerTransitionError(`cancelled run transition lineage contains impossible edge ${from}-${to}`)
+      }
+      if (to === 'cancelled') {
+        cancellationCount += 1
+        if (transition !== transitions.at(-1) || from === null || from === 'cancelled') throw new TrackerTransitionError('cancelled run requires exactly one final global transition to cancelled')
+        cancellationOrigin = from as Exclude<RunDurableState, 'cancelled'>
+      }
+      state = to
+    }
+    if (creationCount !== 1) throw new TrackerTransitionError(`cancelled run requires exactly one canonical creation transition; found ${creationCount}`)
+    if (cancellationCount !== 1 || state !== 'cancelled' || cancellationOrigin === undefined) throw new TrackerTransitionError(`cancelled run requires exactly one final transition to cancelled; found ${cancellationCount}`)
+    return cancellationOrigin
+  }
   recoveryState(runId: string): RecoveryState {
     const run = this.requireRun(runId); const unresolvedExperiment = this.database.prepare(`SELECT * FROM experiments WHERE run_id = ? AND state IN ('baseline-pending','running') ORDER BY ordinal DESC LIMIT 1`).get(runId)
     const unresolvedAttempt = unresolvedExperiment ? this.database.prepare('SELECT * FROM attempts WHERE experiment_id = ? ORDER BY ordinal DESC LIMIT 1').get(requiredSqlInputValue(unresolvedExperiment['experiment_id'], 'experiments.experiment_id')) : undefined
@@ -754,6 +814,21 @@ function prunableArtifact(row: Record<string, SQLOutputValue>, root: string, run
   if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata) || Object.keys(metadata).length !== 1 || typeof (metadata as Record<string, unknown>).truncated !== 'boolean') throw new TrackerTransitionError(`artifact ${artifactId} has noncanonical metadata`)
   return { artifactId, kind, path, sizeBytes, sha256 }
 }
+function validateArtifactContent(artifact: PrunableArtifact): void {
+  const info = optionalLstat(artifact.path)
+  if (!info) return
+  validateOwnerFile(artifact.path, info)
+  const fd = openSync(artifact.path, constants.O_RDONLY | constants.O_NOFOLLOW)
+  try {
+    const opened = fstatSync(fd)
+    if (!opened.isFile() || opened.dev !== info.dev || opened.ino !== info.ino || opened.size !== info.size) throw new TrackerTransitionError(`artifact identity changed before discard recovery: ${artifact.path}`)
+    const bytes = readFileSync(fd)
+    const after = fstatSync(fd)
+    if (after.dev !== opened.dev || after.ino !== opened.ino || after.size !== opened.size) throw new TrackerTransitionError(`artifact identity changed during discard recovery: ${artifact.path}`)
+    if (bytes.length !== artifact.sizeBytes || createHash('sha256').update(bytes).digest('hex') !== artifact.sha256) throw new TrackerTransitionError(`artifact content does not match durable discard evidence: ${artifact.path}`)
+  } finally { closeSync(fd) }
+}
+
 
 function failedAttempt(value: unknown): boolean {
   if (value === null || value === undefined) return false
