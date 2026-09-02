@@ -16,8 +16,9 @@ import {
 import { classifyDurableRegistration, reconcileRecovery, type RecoveredEvaluation, type RecoveredExperiment, type RecoveryDirective } from './recovery.js'
 import { DurableTracker, TRACKER_SCHEMA_VERSION, serializeDurablePolicy, serializeRedactedDurablePolicy, type ArtifactRecord, type HostFailureFacts } from './tracker.js'
 import { applyRunRetention, sweepRepositoryRetention } from './retention.js'
+import { StateLayout } from './state-layout.js'
 import {
-  decodeRunResult, isTargetReached, registrationFingerprint, type ActivationAutoresearchToolInput, type AutoresearchRunResult,
+  decodeRunResult, durableRunId, isTargetReached, registrationFingerprint, type ActivationAutoresearchToolInput, type AutoresearchRunResult,
   type BestResult, type BlockerEvidence, type DurableRegistrationIdentity, type DurableRunPolicy, type ExperimentDurableState,
   type NormalizedRunPolicy, type ResultCounts, type RunDurableState, type RunId,
 } from './types.js'
@@ -34,6 +35,22 @@ interface Runtime {
   readonly registration?: DurableRegistrationIdentity; readonly legacy?: 'terminal' | 'nonterminal'; readonly readonlyTerminal?: true; readonly preclaimBlock?: { code: string; message: string }
 }
 const CONTROLLER_LEASE_MS = 30_000
+export function validateAutoresearchRequest(config: ResolvedConfig, input: ActivationAutoresearchToolInput): HostEvaluatorRegistration | undefined {
+  if ('resume_run_id' in input) {
+    durableRunId(input.resume_run_id)
+    return undefined
+  }
+  return config.evaluatorRegistry.resolve(input.evaluator_id)
+}
+
+function trackerPathForRun(discovery: RepositoryDiscovery, stateRoot: string, runId: string, existing: boolean): string {
+  durableRunId(runId, 'runId')
+  const state = existing ? StateLayout.inspect(join(discovery.gitCommonDir, stateRoot)) : StateLayout.open(join(discovery.gitCommonDir, stateRoot))
+  const runs = existing ? state.inspectDirectory('runs') : state.openDirectory('runs')
+  const run = existing ? runs.inspectDirectory(runId) : runs.openDirectory(runId)
+  return existing ? run.inspectFile('tracker.sqlite') : run.resolve('tracker.sqlite')
+}
+
 export async function preflightAutoresearchRepository(ctx: Context, options: Pick<AutoresearchRunControllerOptions, 'config' | 'input' | 'parent' | 'signal'>): Promise<AcceptedRepositoryPreflight> {
   const callerCwd = String(options.parent.session.header.cwd)
   const timeoutMs = options.input.timeout_ms ?? options.config.defaultTimeoutMs
@@ -151,8 +168,7 @@ export class AutoresearchRunController {
     try {
       const resumeRunId = 'resume_run_id' in this.options.input ? this.options.input.resume_run_id : undefined
       const isResume = resumeRunId !== undefined
-      const selected = 'evaluator_id' in this.options.input ? this.options.config.evaluatorRegistry.resolve(this.options.input.evaluator_id) : undefined
-      if (!isResume && selected === undefined) throw new TypeError('new autoresearch runs require a known evaluator_id')
+      const selected = validateAutoresearchRequest(this.options.config, this.options.input)
       const repositoryPreflight = this.options.repositoryPreflight ?? await preflightAutoresearchRepository(this.ctx, {
         config: this.options.config,
         input: this.options.input,
@@ -163,7 +179,7 @@ export class AutoresearchRunController {
       let discovery = repositoryPreflight.discovery
       const runId = resumeRunId ?? randomUUID()
       if (!isResume) sweepRepositoryRetention(discovery.gitCommonDir, this.options.config.stateRoot, this.options.config, runId)
-      const trackerPath = join(discovery.gitCommonDir, this.options.config.stateRoot, 'runs', runId, 'tracker.sqlite')
+      const trackerPath = trackerPathForRun(discovery, this.options.config.stateRoot, runId, isResume)
       if (isResume) {
         const preflight = DurableTracker.openReadOnly(trackerPath)
         let preflightAccepted = false

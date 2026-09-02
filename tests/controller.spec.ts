@@ -58,6 +58,45 @@ describe('exclusive autoresearch controller contract', () => {
     expect(resolveExecutable).not.toHaveBeenCalled()
   })
 
+  it.each(['../escape', '/absolute', 'nested/component', 'nested\\component'])(
+    'rejects unsafe resume id %s before Git discovery, tracker access, or retention',
+    async resumeRunId => {
+      const resolveExecutable = vi.fn()
+      const trackerOpen = vi.spyOn(DurableTracker, 'openReadOnly')
+      const ctx = { subprocess: { resolveExecutable } } as unknown as Context
+      const controller = new AutoresearchRunController(ctx, { config: controllerConfig(), input: { ...input, run_tag: undefined, evaluator_id: undefined, resume_run_id: resumeRunId } as never, parent: parent(), signal: new AbortController().signal })
+      await expect(controller.run()).rejects.toThrow(/canonical UUID v4/)
+      expect(resolveExecutable).not.toHaveBeenCalled()
+      expect(trackerOpen).not.toHaveBeenCalled()
+      trackerOpen.mockRestore()
+    },
+  )
+
+  it('rejects a symlinked canonical resume directory before tracker snapshot access', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'autoresearch-resume-layout-'))
+    const outside = mkdtempSync(join(tmpdir(), 'autoresearch-resume-outside-'))
+    const runId = '00000000-0000-4000-8000-000000000000'
+    const stateRoot = join(root, '.git', 'state')
+    mkdirSync(join(stateRoot, 'runs'), { recursive: true, mode: 0o700 })
+    symlinkSync(outside, join(stateRoot, 'runs', runId), 'dir')
+    const trackerOpen = vi.spyOn(DurableTracker, 'openReadOnly')
+    const discovery = { repository: root, callerCwd: root, gitCommonDir: join(root, '.git'), repositoryId: 'repo', startCommit: 'a'.repeat(40) }
+    const controller = new AutoresearchRunController({} as Context, {
+      config: resolveConfig({ stateRoot: 'state', evaluatorRegistrations: [evaluatorRegistration] }),
+      input: { repository: root, resume_run_id: runId, objective: input.objective, mutable_globs: input.mutable_globs, mode: 'foreground' },
+      parent: parent(), signal: new AbortController().signal,
+      repositoryPreflight: { discovery, gitExecutable: 'git', gitOptions: { timeoutMs: 1_000, graceMs: 10, maxStdoutBytes: 1_000, maxStderrBytes: 1_000 } },
+    })
+    try {
+      await expect(controller.run()).rejects.toThrow(/unsafe state directory/)
+      expect(trackerOpen).not.toHaveBeenCalled()
+    } finally {
+      trackerOpen.mockRestore()
+      rmSync(root, { recursive: true, force: true })
+      rmSync(outside, { recursive: true, force: true })
+    }
+  })
+
   it('promptly aborts cancellation while pre-tracker executable discovery is held open', async () => {
     let entered!: () => void
     const discoveryEntered = new Promise<void>(resolve => { entered = resolve })

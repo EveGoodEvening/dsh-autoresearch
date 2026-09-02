@@ -299,8 +299,10 @@ describe('configuration and policy normalization', () => {
     const common = { objective: 'improve', mutable_globs: ['src/**'] }
     expect(decodeActivationToolInput({ ...common, run_tag: 'new', evaluator_id: 'judge' })).toMatchObject({ evaluator_id: 'judge' })
     expect(() => decodeActivationToolInput({ ...common, run_tag: 'new' })).toThrow(/evaluator_id/)
-    expect(decodeActivationToolInput({ ...common, resume_run_id: 'run-1' })).not.toHaveProperty('evaluator_id')
-    for (const evaluatorId of ['matching', 'mismatching', 'unknown']) expect(() => decodeActivationToolInput({ ...common, resume_run_id: 'run-1', evaluator_id: evaluatorId })).toThrow(/unknown key "evaluator_id"/)
+    const durableRunId = '00000000-0000-4000-8000-000000000000'
+    expect(decodeActivationToolInput({ ...common, resume_run_id: durableRunId })).not.toHaveProperty('evaluator_id')
+    for (const evaluatorId of ['matching', 'mismatching', 'unknown']) expect(() => decodeActivationToolInput({ ...common, resume_run_id: durableRunId, evaluator_id: evaluatorId })).toThrow(/unknown key "evaluator_id"/)
+    for (const unsafe of ['run-1', '../escape', '/absolute', 'nested/component', 'nested\\component', '00000000-0000-4000-0000-000000000000']) expect(() => decodeActivationToolInput({ ...common, resume_run_id: unsafe })).toThrow(/canonical UUID v4/)
     for (const key of ['evaluation', 'metric_name', 'metric_direction', 'environment', 'provenance', 'exceptional_allowlists']) expect(() => decodeActivationToolInput({ ...common, run_tag: 'new', evaluator_id: 'judge', [key]: {} })).toThrow(new RegExp(`unknown key "${key}"`))
     expect(JSON.stringify(ACTIVATION_AUTORESEARCH_TOOL_SCHEMA)).not.toMatch(/evaluation|metric_name|metric_direction|environment|provenance|exceptional_allowlists/)
   })

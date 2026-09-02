@@ -32,6 +32,8 @@ const state = vi.hoisted(() => ({
 
 vi.mock('../src/controller.js', () => ({
   preflightAutoresearchRepository: state.preflight,
+  validateAutoresearchRequest: (config: { evaluatorRegistry: { resolve(id: string): unknown } }, input: { resume_run_id?: string; evaluator_id?: string }) =>
+    'resume_run_id' in input ? undefined : config.evaluatorRegistry.resolve(input.evaluator_id ?? ''),
   AutoresearchRunController: class {
     readonly ready = Promise.resolve({ runId: 'run-1', tracker: '/tracker.sqlite', branch: 'autoresearch/run-1', worktree: '/worktree' })
     readonly prepare = vi.fn(async (_jobId: string) => ({ runId: 'run-1', tracker: '/tracker.sqlite', branch: 'autoresearch/run-1', worktree: '/worktree' }))
@@ -177,6 +179,33 @@ describe('autoresearch production wiring', () => {
     state.preflight.mockRejectedValueOnce(new Error('repository target rejected'))
     const test = harness()
     await expect(test.tool.execute(input, execution())).rejects.toThrow('repository target rejected')
+    expect(test.job).toBeUndefined()
+    expect(state.controllers).toHaveLength(0)
+  })
+
+  it('rejects an unknown background evaluator before repository preflight or job registration', async () => {
+    const test = harness()
+    await expect(test.tool.execute({ ...input, evaluator_id: 'unknown' }, execution())).rejects.toThrow('unknown evaluator registration id "unknown"')
+    expect(state.preflight).not.toHaveBeenCalled()
+    expect(test.job).toBeUndefined()
+    expect(state.controllers).toHaveLength(0)
+  })
+
+  it.each(['../escape', '/absolute', 'nested/component', 'nested\\component', '00000000-0000-4000-0000-000000000000/child'])(
+    'rejects unsafe resume id %s before repository preflight or job registration',
+    async resumeRunId => {
+      const test = harness()
+      await expect(test.tool.execute({ objective: input.objective, mutable_globs: input.mutable_globs, resume_run_id: resumeRunId }, execution())).rejects.toThrow(/canonical UUID v4/)
+      expect(state.preflight).not.toHaveBeenCalled()
+      expect(test.job).toBeUndefined()
+      expect(state.controllers).toHaveLength(0)
+    },
+  )
+
+  it('rejects an unsafe foreground resume id before controller construction or repository preflight', async () => {
+    const test = harness()
+    await expect(test.tool.execute({ objective: input.objective, mutable_globs: input.mutable_globs, resume_run_id: '../escape', mode: 'foreground' }, execution())).rejects.toThrow(/canonical UUID v4/)
+    expect(state.preflight).not.toHaveBeenCalled()
     expect(test.job).toBeUndefined()
     expect(state.controllers).toHaveLength(0)
   })

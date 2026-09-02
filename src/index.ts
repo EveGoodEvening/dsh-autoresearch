@@ -6,7 +6,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolCallView } from '@deepseek-ai/dsh-tools'
 import { Config, resolveConfig } from './config.js'
 import type { Config as AutoresearchConfig } from './config.js'
-import { AutoresearchRunController, preflightAutoresearchRepository } from './controller.js'
+import { AutoresearchRunController, preflightAutoresearchRepository, validateAutoresearchRequest } from './controller.js'
 import { renderToolResult } from './render.js'
 import {
   ACTIVATION_AUTORESEARCH_TOOL_SCHEMA,
@@ -103,6 +103,7 @@ export function apply(ctx: Context, config: AutoresearchConfig = {}): void {
       const parent = exec.agent
       if (parent === undefined) throw new Error('autoresearch requires the exact calling agent in exec.agent')
       const input = decodeActivationToolInput(args) as ActivationAutoresearchToolInput
+      validateAutoresearchRequest(resolved, input)
       if ((input.mode ?? 'background') === 'foreground') {
         const controller = new AutoresearchRunController(ctx, { config: resolved, input, parent, signal: exec.signal })
         active.add(controller)

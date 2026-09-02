@@ -30,12 +30,33 @@ export class StateLayout {
     return new StateLayout(realpathSync(absolute))
   }
 
+  /** Open or create a trusted directory beneath this layout without weakening containment checks. */
+  openDirectory(relativePath: string): StateLayout {
+    const destination = this.containedDestination(relativePath)
+    this.ensureParents(dirname(destination))
+    if (!exists(destination)) mkdirSync(destination, { mode: 0o700 })
+    this.verifyNode(destination, true)
+    chmodSync(destination, 0o700)
+    return new StateLayout(realpathSync(destination))
+  }
+
+  /** Traverse an existing trusted directory beneath this layout without changing the filesystem. */
+  inspectDirectory(relativePath: string): StateLayout {
+    const destination = this.containedDestination(relativePath)
+    this.verifyDirectories(destination)
+    return new StateLayout(realpathSync(destination))
+  }
+
+  /** Verify an existing trusted file beneath this layout without changing the filesystem. */
+  inspectFile(relativePath: string): string {
+    const destination = this.containedDestination(relativePath)
+    this.verifyDirectories(dirname(destination))
+    this.verifyNode(destination, false)
+    return destination
+  }
 
   resolve(relativePath: string, kind: 'file' | 'directory' = 'file'): string {
-    if (isAbsolute(relativePath) || relativePath.split(/[\\/]/u).some((part) => part === '..')) throw new StateLayoutError('state path must be relative and contained')
-    const destination = resolve(this.root, relativePath)
-    const rel = relative(this.root, destination)
-    if (rel === '..' || rel.startsWith(`..${sep}`)) throw new StateLayoutError('state path escapes state root')
+    const destination = this.containedDestination(relativePath)
     this.ensureParents(dirname(destination))
     if (kind === 'directory') {
       mkdirSync(destination, { mode: 0o700 })
@@ -71,6 +92,14 @@ export class StateLayout {
     chmodSync(path, 0o600)
   }
 
+  private containedDestination(relativePath: string): string {
+    if (isAbsolute(relativePath) || relativePath.split(/[\\/]/u).some((part) => part === '..')) throw new StateLayoutError('state path must be relative and contained')
+    const destination = resolve(this.root, relativePath)
+    const rel = relative(this.root, destination)
+    if (rel === '..' || rel.startsWith(`..${sep}`)) throw new StateLayoutError('state path escapes state root')
+    return destination
+  }
+
   private ensureParents(directory: string): void {
     const rel = relative(this.root, directory)
     let current = this.root
@@ -79,6 +108,15 @@ export class StateLayout {
       if (!exists(current)) mkdirSync(current, { mode: 0o700 })
       this.verifyNode(current, true)
       chmodSync(current, 0o700)
+    }
+  }
+
+  private verifyDirectories(directory: string): void {
+    const rel = relative(this.root, directory)
+    let current = this.root
+    for (const part of rel === '' ? [] : rel.split(sep)) {
+      current = resolve(current, part)
+      this.verifyNode(current, true)
     }
   }
 

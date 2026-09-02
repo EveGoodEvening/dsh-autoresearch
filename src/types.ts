@@ -10,6 +10,14 @@ export type ArtifactId = string
 export type TransitionId = string
 export type FullCommitSha = string
 export const EVALUATOR_CONTRACT_GENERATION = 'host-registration-v1' as const
+const DURABLE_RUN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u
+
+export function durableRunId(value: unknown, label = 'resume_run_id'): RunId {
+  const normalized = text(value, label)
+  if (!DURABLE_RUN_ID.test(normalized)) throw new TypeError(`${label} must be a canonical UUID v4 durable run id`)
+  return normalized
+}
+
 export type EvaluatorContractGeneration = typeof EVALUATOR_CONTRACT_GENERATION
 export type AlgorithmQualifiedDigest = `sha256:${string}`
 export type RegistrationManifest = Readonly<Record<string, string>>
@@ -253,7 +261,7 @@ export function decodeActivationToolInput(value: unknown): ActivationAutoresearc
     ...(source['mode'] === undefined ? {} : { mode: activationMode(source['mode']) }),
   }
   const decoded: ActivationAutoresearchToolInput = hasResume
-    ? { ...common, resume_run_id: text(source['resume_run_id'], 'resume_run_id') }
+    ? { ...common, resume_run_id: durableRunId(source['resume_run_id']) }
     : { ...common, run_tag: activationRunTag(source['run_tag']), evaluator_id: text(source['evaluator_id'], 'evaluator_id') }
   return deepFreezeActivation(decoded)
 }
