@@ -111,11 +111,14 @@ describe('host-owned Git boundary', () => {
     const metadataDiscoveryStart = f.subprocess.specs.length
     await expect(discoverContainedRepository(f.ctx, 'git', metadataTarget, commandOptions)).rejects.toMatchObject({ code: 'repository-target-nested' })
     expect(f.subprocess.specs.slice(metadataDiscoveryStart).every(spec => spec.cwd === f.root)).toBe(true)
-    const linked = join(dirname(f.root), `${basename(f.root)}-linked`); roots.push(linked); execFileSync('git', ['-C', f.root, 'worktree', 'add', '--detach', linked])
-    const linkedTarget = await canonicalizeRepositoryTarget(f.root, linked)
-    const linkedDiscoveryStart = f.subprocess.specs.length
-    await expect(discoverContainedRepository(f.ctx, 'git', linkedTarget, commandOptions)).rejects.toMatchObject({ code: 'repository-target-outside-parent' })
-    expect(f.subprocess.specs.slice(linkedDiscoveryStart).every(spec => spec.cwd === f.root)).toBe(true)
+    const linked = join(f.root, 'linked-worktree'); execFileSync('git', ['-C', f.root, 'worktree', 'add', '--detach', linked])
+    const linkedSubdirectory = join(linked, 'src')
+    for (const linkedPath of [linked, linkedSubdirectory]) {
+      const linkedTarget = await canonicalizeRepositoryTarget(f.root, linkedPath)
+      const linkedDiscoveryStart = f.subprocess.specs.length
+      await expect(discoverContainedRepository(f.ctx, 'git', linkedTarget, commandOptions)).rejects.toMatchObject({ code: 'repository-target-nested' })
+      expect(f.subprocess.specs.slice(linkedDiscoveryStart).every(spec => spec.cwd === f.root)).toBe(true)
+    }
   })
 
   it('resolves the configured executable through the provider and makes host controls non-overridable', async () => {

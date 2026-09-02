@@ -185,28 +185,29 @@ describe('real Loader/profile production composition', () => {
     } finally { await parent.dispose() }
   }, 30_000)
 
-  it.each(['foreground', 'background'] as const)('rejects %s cross-repository and symlink-alias targets without target-side state', async mode => {
+  it.each(['foreground', 'background'] as const)('rejects %s external, symlink, nested, and linked-worktree targets without registering a job or creating target-side state', async mode => {
     const harness = await composeHarness(); active.push(harness)
     const ownerRoot = join(harness.root, 'owner'); const externalRoot = join(harness.root, 'external'); await mkdir(ownerRoot); await mkdir(externalRoot)
     const ownerRepository = await repository(ownerRoot)
     const externalRepository = await repository(externalRoot)
     const alias = join(ownerRepository, 'external-alias'); await symlink(externalRepository, alias)
+    const nested = join(ownerRepository, 'nested'); await mkdir(nested); await run('git', ['init', '-q', nested])
+    const linked = join(ownerRepository, 'linked-worktree'); await run('git', ['-C', ownerRepository, 'worktree', 'add', '--detach', linked])
     const parent = await parentAgent(harness, ownerRepository, `containment-${mode}`)
+    const targets = [
+      { path: externalRepository, message: 'Repository target is outside the parent Agent repository workspace' },
+      { path: alias, message: 'Repository target is outside the parent Agent repository workspace' },
+      { path: nested, message: 'Repository target crosses Git metadata, a nested repository, or a linked-worktree boundary' },
+      { path: linked, message: 'Repository target crosses Git metadata, a nested repository, or a linked-worktree boundary' },
+    ]
     try {
-      for (const target of [externalRepository, alias]) {
-        const result = await execute(harness, 'autoresearch', request(target, mode), parent.agent)
-        if (mode === 'foreground') {
-          expect(result.isError).toBe(true)
-          expect(result.error).toMatchObject({
-            message: 'Repository target is outside the parent Agent repository workspace',
-          })
-        } else {
-          expect(result.isError).toBe(false)
-          const output = await execute(harness, 'job_output', { job_id: stringProperty(result.value, 'jobId'), wait: true, timeout_ms: 20_000 }, parent.agent)
-          expect(output.isError).toBe(false)
-          expect(stringProperty(output.value, 'text')).toMatch(/outside the parent Agent repository workspace/)
-        }
-        expect(persistedBackgroundJobIds(externalRepository)).toEqual([])
+      for (const target of targets) {
+        const jobsBefore = harness.ctx.jobs.list(parent.agent).map(job => job.id)
+        const result = await execute(harness, 'autoresearch', request(target.path, mode), parent.agent)
+        expect(result.isError).toBe(true)
+        expect(result.error).toMatchObject({ message: target.message })
+        expect(harness.ctx.jobs.list(parent.agent).map(job => job.id)).toEqual(jobsBefore)
+        expect(persistedBackgroundJobIds(target.path)).toEqual([])
       }
     } finally { await parent.dispose() }
   }, 30_000)

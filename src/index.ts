@@ -6,7 +6,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolCallView } from '@deepseek-ai/dsh-tools'
 import { Config, resolveConfig } from './config.js'
 import type { Config as AutoresearchConfig } from './config.js'
-import { AutoresearchRunController } from './controller.js'
+import { AutoresearchRunController, preflightAutoresearchRepository } from './controller.js'
 import { renderToolResult } from './render.js'
 import {
   ACTIVATION_AUTORESEARCH_TOOL_SCHEMA,
@@ -124,6 +124,8 @@ export function apply(ctx: Context, config: AutoresearchConfig = {}): void {
       let cancellationApplied = false
       let cancelReason = 'autoresearch job killed'
 
+      const repositoryPreflight = await preflightAutoresearchRepository(ctx, { config: resolved, input, parent, signal: exec.signal })
+
       try {
         const id = ctx.jobs.start({
           kind: 'autoresearch',
@@ -131,7 +133,7 @@ export function apply(ctx: Context, config: AutoresearchConfig = {}): void {
           owner: parent as Agent,
           outputLimitBytes: resolved.maxResultChars,
           run: () => {
-            controller = new AutoresearchRunController(ctx, { config: resolved, input, parent, signal: new AbortController().signal })
+            controller = new AutoresearchRunController(ctx, { config: resolved, input, parent, signal: new AbortController().signal, repositoryPreflight })
             active.add(controller)
             const done = (async (): Promise<JobOutcome> => {
               try {

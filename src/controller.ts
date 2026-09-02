@@ -23,7 +23,8 @@ import {
 } from './types.js'
 
 export interface AutoresearchRunReady { readonly runId: RunId; readonly tracker: string; readonly branch: string; readonly worktree: string }
-export interface AutoresearchRunControllerOptions { readonly config: ResolvedConfig; readonly input: ActivationAutoresearchToolInput; readonly parent: Agent; readonly signal: AbortSignal; readonly jobId?: string }
+export interface AcceptedRepositoryPreflight { readonly discovery: RepositoryDiscovery; readonly gitExecutable: string; readonly gitOptions: Omit<GitCommandOptions, 'cwd' | 'signal'> }
+export interface AutoresearchRunControllerOptions { readonly config: ResolvedConfig; readonly input: ActivationAutoresearchToolInput; readonly parent: Agent; readonly signal: AbortSignal; readonly repositoryPreflight?: AcceptedRepositoryPreflight; readonly jobId?: string }
 
 interface Runtime {
   readonly runId: string; readonly policy: DurableRunPolicy; readonly discovery: RepositoryDiscovery
@@ -33,6 +34,17 @@ interface Runtime {
   readonly registration?: DurableRegistrationIdentity; readonly legacy?: 'terminal' | 'nonterminal'; readonly readonlyTerminal?: true; readonly preclaimBlock?: { code: string; message: string }
 }
 const CONTROLLER_LEASE_MS = 30_000
+export async function preflightAutoresearchRepository(ctx: Context, options: Pick<AutoresearchRunControllerOptions, 'config' | 'input' | 'parent' | 'signal'>): Promise<AcceptedRepositoryPreflight> {
+  const callerCwd = String(options.parent.session.header.cwd)
+  const timeoutMs = options.input.timeout_ms ?? options.config.defaultTimeoutMs
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > options.config.maxTimeoutMs) throw new TypeError('timeout_ms exceeds deployment maximum')
+  const gitOptions = { timeoutMs, graceMs: options.config.terminationGraceMs, maxStdoutBytes: options.config.maxStdoutBytes, maxStderrBytes: options.config.maxStderrBytes }
+  const requestedTarget = await canonicalizeRepositoryTarget(callerCwd, options.input.repository)
+  const gitExecutable = await resolveGitExecutable(ctx, options.config.gitExecutable, options.signal)
+  const discovery = await discoverContainedRepository(ctx, gitExecutable, requestedTarget, { ...gitOptions, signal: options.signal })
+  return { discovery, gitExecutable, gitOptions }
+}
+
 const CONTROLLER_HEARTBEAT_MS = 5_000
 
 
@@ -137,17 +149,18 @@ export class AutoresearchRunController {
     let allocated: { discovery: RepositoryDiscovery; identity: RunGitIdentity; gitExecutable: string; gitOptions: Omit<GitCommandOptions, 'cwd' | 'signal'> } | undefined
     let registeredRunPendingActivation: string | undefined
     try {
-      const callerCwd = String(this.options.parent.session.header.cwd)
       const resumeRunId = 'resume_run_id' in this.options.input ? this.options.input.resume_run_id : undefined
       const isResume = resumeRunId !== undefined
       const selected = 'evaluator_id' in this.options.input ? this.options.config.evaluatorRegistry.resolve(this.options.input.evaluator_id) : undefined
       if (!isResume && selected === undefined) throw new TypeError('new autoresearch runs require a known evaluator_id')
-      const provisionalTimeout = this.options.input.timeout_ms ?? this.options.config.defaultTimeoutMs
-      if (!Number.isSafeInteger(provisionalTimeout) || provisionalTimeout < 1 || provisionalTimeout > this.options.config.maxTimeoutMs) throw new TypeError('timeout_ms exceeds deployment maximum')
-      const gitOptions = { timeoutMs: provisionalTimeout, graceMs: this.options.config.terminationGraceMs, maxStdoutBytes: this.options.config.maxStdoutBytes, maxStderrBytes: this.options.config.maxStderrBytes }
-      const requestedTarget = await canonicalizeRepositoryTarget(callerCwd, this.options.input.repository)
-      const gitExecutable = await resolveGitExecutable(this.ctx, this.options.config.gitExecutable, this.aborter.signal)
-      let discovery = await discoverContainedRepository(this.ctx, gitExecutable, requestedTarget, { ...gitOptions, signal: this.aborter.signal })
+      const repositoryPreflight = this.options.repositoryPreflight ?? await preflightAutoresearchRepository(this.ctx, {
+        config: this.options.config,
+        input: this.options.input,
+        parent: this.options.parent,
+        signal: this.aborter.signal,
+      })
+      const { gitExecutable, gitOptions } = repositoryPreflight
+      let discovery = repositoryPreflight.discovery
       const runId = resumeRunId ?? randomUUID()
       if (!isResume) sweepRepositoryRetention(discovery.gitCommonDir, this.options.config.stateRoot, this.options.config, runId)
       const trackerPath = join(discovery.gitCommonDir, this.options.config.stateRoot, 'runs', runId, 'tracker.sqlite')
@@ -190,7 +203,7 @@ export class AutoresearchRunController {
           let acceptedPolicySha256 = policySha256
           let expectedProvenance: FrozenEvaluatorProvenance | undefined
           if (!terminal) {
-            policy = canonicalPolicy(normalizeRunPolicy(this.options.input, this.options.config, callerCwd, current), resumeDiscovery.repository, String(existing['run_tag']))
+            policy = canonicalPolicy(normalizeRunPolicy(this.options.input, this.options.config, resumeDiscovery.callerCwd, current), resumeDiscovery.repository, String(existing['run_tag']))
             acceptedPolicySha256 = hash(policy)
             try {
               expectedProvenance = freezeEvaluatorProvenanceFromManifest(provenanceInput(policy, acceptedPolicySha256, evaluatorEvaluationSha256(policy.evaluation), current), classification.identity.manifest)
@@ -278,7 +291,7 @@ export class AutoresearchRunController {
       }
       tracker = DurableTracker.open(trackerPath)
       const registration = selected!
-      const normalized = normalizeRunPolicy(this.options.input, this.options.config, callerCwd, registration)
+      const normalized = normalizeRunPolicy(this.options.input, this.options.config, discovery.callerCwd, registration)
       const runTag = normalized.runTag!
       const policy = canonicalPolicy(normalized, discovery.repository, runTag)
       const policySha256 = hash(policy)

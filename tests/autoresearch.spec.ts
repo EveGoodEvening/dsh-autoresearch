@@ -14,6 +14,11 @@ const state = vi.hoisted(() => ({
     constructorSignal: AbortSignal
     parent: unknown
   }>,
+  preflight: vi.fn(async () => ({
+    discovery: { callerCwd: '/repo', repository: '/repo', gitCommonDir: '/repo/.git', startCommit: 'a'.repeat(40) },
+    gitExecutable: '/usr/bin/git',
+    gitOptions: { timeoutMs: 60_000, graceMs: 1_000, maxStdoutBytes: 1_000_000, maxStderrBytes: 1_000_000 },
+  })),
   releaseTool: vi.fn(),
   releasePrompt: vi.fn(),
   startError: undefined as Error | undefined,
@@ -26,6 +31,7 @@ const state = vi.hoisted(() => ({
 }))
 
 vi.mock('../src/controller.js', () => ({
+  preflightAutoresearchRepository: state.preflight,
   AutoresearchRunController: class {
     readonly ready = Promise.resolve({ runId: 'run-1', tracker: '/tracker.sqlite', branch: 'autoresearch/run-1', worktree: '/worktree' })
     readonly prepare = vi.fn(async (_jobId: string) => ({ runId: 'run-1', tracker: '/tracker.sqlite', branch: 'autoresearch/run-1', worktree: '/worktree' }))
@@ -85,6 +91,7 @@ const execution = (signal = new AbortController().signal) => ({ agent: parent, s
 beforeEach(() => {
   state.controllers.length = 0
   state.runResult = { status: 'budget-limited', runId: 'run-1', tracker: '/tracker.sqlite', counts: { experimentsStarted: 0, experimentsCompleted: 0, attempts: 1 }, artifacts: [], best: { metric: 1, commit: 'a'.repeat(40), experimentId: 'baseline' } }
+  state.preflight.mockClear()
   state.releaseTool.mockClear()
   state.releasePrompt.mockClear()
   state.startError = undefined
@@ -139,8 +146,11 @@ describe('autoresearch production wiring', () => {
   })
 
   it('durably binds the owner job before releasing controller execution and preserves agent identity', async () => {
+    const signal = new AbortController().signal
     const test = harness()
-    const result = await test.tool.execute(input, execution())
+    const result = await test.tool.execute(input, execution(signal))
+    expect(state.preflight).toHaveBeenCalledOnce()
+    expect(state.preflight).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ input, parent, signal }))
     expect(test.job).toMatchObject({ kind: 'autoresearch', owner: parent })
     expect(state.controllers[0]?.parent).toBe(parent)
     expect(state.controllers[0]?.prepare).toHaveBeenCalledWith('autoresearch-1')
@@ -161,6 +171,14 @@ describe('autoresearch production wiring', () => {
     const test = harness()
     await test.tool.execute(input, execution())
     await expect(test.hooks?.done).resolves.toMatchObject({ status: expected, detail: status })
+  })
+
+  it('does not register a background job when repository preflight rejects the target', async () => {
+    state.preflight.mockRejectedValueOnce(new Error('repository target rejected'))
+    const test = harness()
+    await expect(test.tool.execute(input, execution())).rejects.toThrow('repository target rejected')
+    expect(test.job).toBeUndefined()
+    expect(state.controllers).toHaveLength(0)
   })
 
   it('keeps the background run independent from the outer tool signal', async () => {
