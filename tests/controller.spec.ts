@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { execFileSync, spawn } from 'node:child_process'
 import { DatabaseSync } from 'node:sqlite'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
@@ -498,6 +498,11 @@ const externalDataset = (digestCharacter: string, identity = 'benchmark-2026-01'
   digest: `sha256:${digestCharacter.repeat(64)}`,
   identity,
 })
+
+const localDatasetRegistration: EvaluatorRegistrationConfig = {
+  ...evaluatorRegistration,
+  dataset: { kind: 'local', files: ['datasets/train.jsonl'], identity: 'training-split' },
+}
 
 const registrationDriftCases: readonly RegistrationDriftCase[] = [
   ['command', evaluatorRegistration, { ...evaluatorRegistration, command: 'fake-evaluator-v2' }],
@@ -1676,6 +1681,132 @@ describe('controller real Git/SQLite outcomes', () => {
 
     try { const { result, tracker } = await runControllerCase(f, { max_experiments: 2 }); expect(result).toMatchObject({ status: 'budget-limited', counts: { experimentsStarted: 2, experimentsCompleted: 2, attempts: 3 } }); const experiments = tracker.database.prepare("SELECT state FROM experiments WHERE kind='candidate' ORDER BY ordinal").all(); expect(experiments).toEqual([{ state: 'accepted' }, { state: 'accepted' }]); expect(tracker.database.prepare('SELECT released_at FROM active_locks').get()?.['released_at']).not.toBeNull(); expect(f.order.filter(item => item.includes('child'))).toEqual(['child-1-create', 'child-1-dispose-start', 'child-1-dispose-end', 'child-2-create', 'child-2-dispose-start', 'child-2-dispose-end']); tracker.close() } finally { rmSync(f.root, { recursive: true, force: true }) }
   })
+  it('blocks a dataset replacement after outer validation and before provider spawn with durable typed evidence', async () => {
+    const f = controllerFixture([{ stdout: '{"score":10}\n' }, { stdout: '{"score":9}\n' }], [worktree => writeFileSync(join(worktree, 'src', 'code.ts'), 'export const n = 2\n')])
+    const createIntent = DurableTracker.prototype.createAttemptIntent
+    let replaced = false
+    const seam = vi.spyOn(DurableTracker.prototype, 'createAttemptIntent').mockImplementation(function (identity, intent) {
+      const result = createIntent.call(this, identity, intent)
+      if (identity.experimentId.includes('-candidate-') && !replaced) {
+        replaced = true
+        const worktree = f.subprocess.specs.find(spec => spec.argv[0] === 'fake-evaluator')?.cwd
+        if (worktree === undefined) throw new Error('baseline evaluator worktree is unavailable')
+        const dataset = join(worktree, 'datasets', 'train.jsonl')
+        renameSync(dataset, `${dataset}.original`)
+        writeFileSync(dataset, '{"score":999}\n')
+      }
+      return result
+    })
+    try {
+      const { result, ready, tracker } = await runControllerCase(f, { max_experiments: 1 }, { evaluatorRegistrations: [localDatasetRegistration] })
+      expect(result).toMatchObject({ status: 'blocked', evidence: [{ code: 'provenance-mismatch' }] })
+      expect(f.subprocess.evaluatorSpawns).toBe(1)
+      const candidate = tracker.database.prepare("SELECT experiment_id, state, failure_code FROM experiments WHERE kind = 'candidate'").get()!
+      expect(candidate).toMatchObject({ state: 'policy-violation', failure_code: 'provenance-mismatch' })
+      const attempt = tracker.database.prepare('SELECT provider_pid, spawned_at, failure_code, outcome_json, process_tree_quiescent FROM attempts WHERE experiment_id = ?').get(candidate['experiment_id'])!
+      expect(attempt).toMatchObject({ provider_pid: null, spawned_at: null, failure_code: 'frozen-boundary', process_tree_quiescent: 1 })
+      expect(JSON.parse(String(attempt['outcome_json']))).toMatchObject({ kind: 'failed', code: 'frozen-boundary' })
+      expect(tracker.database.prepare('SELECT released_at FROM active_locks WHERE run_id = ?').get(ready.runId)?.['released_at']).not.toBeNull()
+      expect(controllerClaims(String(tracker.getRun(ready.runId)?.['git_common_dir']), ready.runId)).toEqual([])
+      tracker.close()
+    } finally { seam.mockRestore(); rmSync(f.root, { recursive: true, force: true }) }
+  })
+
+  it('preserves an accepted candidate and blocks its next resumed evaluation when the local dataset is replaced', async () => {
+    const f = controllerFixture([{ stdout: '{"score":10}\n' }, { stdout: '{"score":9}\n' }, { stdout: '{"score":8}\n' }], [
+      worktree => writeFileSync(join(worktree, 'src', 'code.ts'), 'export const n = 2\n'),
+      worktree => writeFileSync(join(worktree, 'src', 'code.ts'), 'export const n = 3\n'),
+    ])
+    const transition = DurableTracker.prototype.transitionRun
+    let interrupted = false
+    const barrier = vi.spyOn(DurableTracker.prototype, 'transitionRun').mockImplementation(function (runId, state, facts, at) {
+      const result = transition.call(this, runId, state, facts, at)
+      if (!interrupted && state === 'ready' && (facts?.outcome as { kind?: string; decision?: string } | undefined)?.kind === 'reconciled') { interrupted = true; throw new Error('accepted candidate resume barrier') }
+      return result
+    })
+    try {
+      const first = createCaseController(f, { max_experiments: 2 }, undefined, { evaluatorRegistrations: [localDatasetRegistration] })
+      await expect(first.run()).rejects.toThrow('accepted candidate resume barrier')
+      const ready = await first.ready
+      barrier.mockRestore()
+      const before = DurableTracker.openReadOnly(ready.tracker)
+      const accepted = before.database.prepare("SELECT candidate_commit FROM experiments WHERE kind = 'candidate' AND state = 'accepted'").get()!
+      const acceptedCommit = String(accepted['candidate_commit'])
+      before.close()
+      const createIntent = DurableTracker.prototype.createAttemptIntent
+      let replaced = false
+      const replacement = vi.spyOn(DurableTracker.prototype, 'createAttemptIntent').mockImplementation(function (identity, intent) {
+        const result = createIntent.call(this, identity, intent)
+        if (identity.experimentId.includes('-candidate-') && !replaced) {
+          replaced = true
+          const dataset = join(ready.worktree, 'datasets', 'train.jsonl')
+          renameSync(dataset, `${dataset}.original`)
+          writeFileSync(dataset, '{"score":999}\n')
+        }
+        return result
+      })
+
+      const resumed = await createCaseController(f, { max_experiments: 2 }, ready.runId, { evaluatorRegistrations: [localDatasetRegistration] }).run()
+
+      expect(resumed).toMatchObject({ status: 'blocked', best: { commit: acceptedCommit }, evidence: [{ code: 'provenance-mismatch' }] })
+      expect(f.subprocess.evaluatorSpawns).toBe(2)
+      const tracker = DurableTracker.openReadOnly(ready.tracker)
+      expect(tracker.database.prepare("SELECT state, decision FROM experiments WHERE candidate_commit = ?").get(acceptedCommit)).toEqual({ state: 'accepted', decision: 'accept' })
+      const blockedCandidate = tracker.database.prepare("SELECT experiment_id, state, failure_code FROM experiments WHERE kind = 'candidate' AND candidate_commit <> ?").get(acceptedCommit)!
+      expect(blockedCandidate).toMatchObject({ state: 'policy-violation', failure_code: 'provenance-mismatch' })
+      expect(tracker.database.prepare('SELECT provider_pid, failure_code, process_tree_quiescent FROM attempts WHERE experiment_id = ?').get(blockedCandidate['experiment_id'])).toEqual({ provider_pid: null, failure_code: 'frozen-boundary', process_tree_quiescent: 1 })
+      expect(execFileSync('git', ['-C', ready.worktree, 'rev-parse', 'HEAD']).toString().trim()).toBe(acceptedCommit)
+      expect(tracker.database.prepare('SELECT released_at FROM active_locks WHERE run_id = ?').get(ready.runId)?.['released_at']).not.toBeNull()
+      expect(controllerClaims(String(tracker.getRun(ready.runId)?.['git_common_dir']), ready.runId)).toEqual([])
+      replacement.mockRestore()
+      tracker.close()
+    } finally { barrier.mockRestore(); vi.restoreAllMocks(); rmSync(f.root, { recursive: true, force: true }) }
+  })
+
+  it('blocks a proven-quiescent recovery rerun before another spawn when its local dataset is removed', async () => {
+    const f = controllerFixture([{ stdout: '{"score":10}\n' }, { stdout: '{"score":9}\n' }, { stdout: '{"score":8}\n' }], [worktree => writeFileSync(join(worktree, 'src', 'code.ts'), 'export const n = 2\n')])
+    const record = DurableTracker.prototype.recordAttemptOutcome
+    let interrupted = false
+    const barrier = vi.spyOn(DurableTracker.prototype, 'recordAttemptOutcome').mockImplementation(function (attemptId, facts) {
+      if (attemptId.includes('-candidate-') && !interrupted) {
+        interrupted = true
+        this.database.prepare('UPDATE attempts SET process_tree_quiescent = 1 WHERE attempt_id = ?').run(attemptId)
+        throw new Error('local dataset recovery barrier')
+      }
+      return record.call(this, attemptId, facts)
+    })
+    try {
+      const first = createCaseController(f, { max_experiments: 1 }, undefined, { evaluatorRegistrations: [localDatasetRegistration] })
+      await expect(first.run()).rejects.toThrow('local dataset recovery barrier')
+      const ready = await first.ready
+      barrier.mockRestore()
+      const createIntent = DurableTracker.prototype.createAttemptIntent
+      let removed = false
+      const removal = vi.spyOn(DurableTracker.prototype, 'createAttemptIntent').mockImplementation(function (identity, intent) {
+        const result = createIntent.call(this, identity, intent)
+        if (identity.experimentId.includes('-candidate-') && !removed) {
+          removed = true
+          rmSync(join(ready.worktree, 'datasets', 'train.jsonl'))
+        }
+        return result
+      })
+
+      const resumed = await createCaseController(f, { max_experiments: 1 }, ready.runId, { evaluatorRegistrations: [localDatasetRegistration] }).run()
+
+      expect(resumed).toMatchObject({ status: 'blocked', evidence: [{ code: 'provenance-mismatch' }] })
+      expect(f.subprocess.evaluatorSpawns).toBe(2)
+      const tracker = DurableTracker.openReadOnly(ready.tracker)
+      const candidate = tracker.database.prepare("SELECT state, failure_code FROM experiments WHERE kind = 'candidate'").get()!
+      expect(candidate).toMatchObject({ state: 'policy-violation', failure_code: 'provenance-mismatch' })
+      expect(tracker.database.prepare("SELECT provider_pid, failure_code, process_tree_quiescent FROM attempts WHERE experiment_id LIKE '%-candidate-%' ORDER BY ordinal DESC LIMIT 1").get()).toEqual({ provider_pid: null, failure_code: 'frozen-boundary', process_tree_quiescent: 1 })
+      expect(tracker.database.prepare("SELECT COUNT(*) AS n FROM attempts WHERE experiment_id LIKE '%-candidate-%'").get()?.['n']).toBe(2)
+      expect(tracker.database.prepare('SELECT released_at FROM active_locks WHERE run_id = ?').get(ready.runId)?.['released_at']).not.toBeNull()
+      expect(controllerClaims(String(tracker.getRun(ready.runId)?.['git_common_dir']), ready.runId)).toEqual([])
+      removal.mockRestore()
+      tracker.close()
+    } finally { barrier.mockRestore(); vi.restoreAllMocks(); rmSync(f.root, { recursive: true, force: true }) }
+  })
+
   it.each(['live', 'crash-resume'] as const)('durably records frozen-file disappearance evidence and safely replays after %s evaluation', async mode => {
     const f = controllerFixture(
       [

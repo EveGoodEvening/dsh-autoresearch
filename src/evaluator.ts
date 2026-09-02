@@ -131,6 +131,7 @@ export interface EvaluatorRunOptions {
   readonly subprocess: { spawn(spec: SubprocessSpawnSpec): SubprocessHandle }
   readonly worktree: string
   readonly boundary: EvaluatorBoundaryIdentity
+  readonly frozenFiles?: FrozenFileAttemptIdentity
   readonly evaluation: EvaluatorArgv
   readonly metricName: string
   readonly metricDirection: 'minimize' | 'maximize'
@@ -185,6 +186,11 @@ export function revalidateEvaluatorBoundary(worktree: string, boundary: Evaluato
     const current = captureDeclaredFile(root, file.path)
     if (current.dev !== file.dev || current.ino !== file.ino || current.sha256 !== file.sha256) throw new FrozenEvaluatorBoundaryError(`declared evaluator file changed before spawn: ${file.path}`)
   }
+}
+
+function revalidateAttemptBoundary(worktree: string, boundary: EvaluatorBoundaryIdentity, frozenFiles?: FrozenFileAttemptIdentity): void {
+  revalidateEvaluatorBoundary(worktree, boundary)
+  if (frozenFiles !== undefined) revalidateFrozenFileAttempt(worktree, frozenFiles)
 }
 
 export function freezeEvaluatorProvenance(worktree: string, input: EvaluatorProvenanceInput): FrozenEvaluatorProvenance {
@@ -314,7 +320,7 @@ export async function runEvaluator(options: EvaluatorRunOptions): Promise<Evalua
   let terminateOnAbort: (() => void) | undefined
   try {
     assertPathIdentity(root, cwdIdentity, 'evaluator cwd')
-    revalidateEvaluatorBoundary(root, options.boundary)
+    revalidateAttemptBoundary(root, options.boundary, options.frozenFiles)
     handle = options.subprocess.spawn({
       argv, cwd, env, signal: controller.signal, graceMs: options.terminationGraceMs,
       stdio: {
@@ -327,7 +333,7 @@ export async function runEvaluator(options: EvaluatorRunOptions): Promise<Evalua
     persistSafely(() => options.persistence.persistSpawnObserved({ providerPid: handle!.pid, spawnedAt: spawnedAt! }), secrets)
     try {
       assertPathIdentity(root, cwdIdentity, 'evaluator cwd')
-      revalidateEvaluatorBoundary(root, options.boundary)
+      revalidateAttemptBoundary(root, options.boundary, options.frozenFiles)
     } catch (error) {
       if (error instanceof FrozenEvaluatorBoundaryError) frozenBoundaryFailure = error
       else throw error
@@ -341,7 +347,8 @@ export async function runEvaluator(options: EvaluatorRunOptions): Promise<Evalua
       try { outcome = await handle.done } catch (error) { executionFailure = error }
     }
   } catch (error) {
-    executionFailure = error
+    if (error instanceof FrozenEvaluatorBoundaryError) frozenBoundaryFailure = error
+    else executionFailure = error
   } finally {
     clearTimeout(timeout)
     callerSignal?.removeEventListener('abort', cancel)

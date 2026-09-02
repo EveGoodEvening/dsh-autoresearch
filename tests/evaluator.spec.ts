@@ -722,6 +722,32 @@ describe('host-owned evaluator execution', () => {
     expect(setup.runtime.spec).toBeUndefined()
   })
 
+  it('durably rejects a declared local-dataset replacement in the final pre-spawn window', async () => {
+    const setup = options()
+    mkdirSync(join(setup.paths.root, 'data'))
+    const dataset = join(setup.paths.root, 'data', 'train.json')
+    writeFileSync(dataset, '{"rows":1}\n')
+    const manifest = deriveRegistrationManifest(setup.paths.root, normalizeEvaluatorRegistration({
+      evaluatorId: 'fixture', command: 'node', args: ['evaluate.mjs'], cwd: 'bench', environment: {}, metricName: 'score', metricDirection: 'minimize',
+      evaluatorFiles: ['bench/evaluate.mjs'], dataset: { kind: 'local', files: ['data/train.json'] },
+    }))
+    setup.value.frozenFiles = captureFrozenFileAttempt(setup.paths.root, manifest)
+    const mint = setup.value.artifactWriterFactory
+    setup.value.artifactWriterFactory = () => {
+      renameSync(dataset, `${dataset}.original`)
+      writeFileSync(dataset, '{"rows":999}\n')
+      return mint()
+    }
+
+    const result = await runEvaluator(setup.value)
+
+    expect(result).toMatchObject({ kind: 'failed', code: 'frozen-boundary', message: expect.stringContaining('data/train.json'), exit: { processTreeQuiescent: true } })
+    expect(result.exit).not.toHaveProperty('providerPid')
+    expect(setup.runtime.spec).toBeUndefined()
+    expect(setup.value.persistence.events).toEqual(['intent', 'outcome'])
+    expect(setup.value.persistence.outcome?.[0]).toMatchObject({ kind: 'failed', code: 'frozen-boundary' })
+  })
+
   it('redacts secret aliases in argv, cwd, nested policy, persistence errors, results, logs, and artifact metadata', async () => {
     const secret = 'secret-cwd-token'
     const paths = fixture()
@@ -782,6 +808,32 @@ describe('host-owned evaluator execution', () => {
     expect(setup.value.persistence.outcome?.[1]).toEqual(result.artifacts)
     expect(result.artifacts.map(item => item.kind).sort()).toEqual(['stderr', 'stdout'])
     expect(result.artifacts.every(item => item.sizeBytes <= (item.kind === 'stdout' ? 128 : 64))).toBe(true)
+  })
+
+  it('terminates a provider when a declared local dataset is inode-swapped during spawn', async () => {
+    const setup = options()
+    mkdirSync(join(setup.paths.root, 'data'))
+    const dataset = join(setup.paths.root, 'data', 'train.json')
+    writeFileSync(dataset, '{"rows":1}\n')
+    const manifest = deriveRegistrationManifest(setup.paths.root, normalizeEvaluatorRegistration({
+      evaluatorId: 'fixture', command: 'node', args: ['evaluate.mjs'], cwd: 'bench', environment: {}, metricName: 'score', metricDirection: 'minimize',
+      evaluatorFiles: ['bench/evaluate.mjs'], dataset: { kind: 'local', files: ['data/train.json'] },
+    }))
+    setup.value.frozenFiles = captureFrozenFileAttempt(setup.paths.root, manifest)
+    const originalSpawn = setup.runtime.runtime.spawn
+    setup.runtime.runtime.spawn = spec => {
+      const handle = originalSpawn(spec)
+      renameSync(dataset, `${dataset}.original`)
+      writeFileSync(dataset, '{"rows":999}\n')
+      return handle
+    }
+
+    const result = await runEvaluator(setup.value)
+
+    expect(result).toMatchObject({ kind: 'failed', code: 'frozen-boundary', message: expect.stringContaining('data/train.json'), exit: { providerPid: 4242, processTreeQuiescent: true } })
+    expect(setup.runtime.terminated).toBe(1)
+    expect(setup.runtime.waited).toBe(1)
+    expect(setup.value.persistence.events).toEqual(['intent', 'observed', 'outcome'])
   })
 
   it('writes artifacts exclusively under an owner-only StateLayout capability', async () => {
