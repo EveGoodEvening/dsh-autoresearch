@@ -183,6 +183,23 @@ describe('autoresearch production wiring', () => {
     expect(state.controllers).toHaveLength(0)
   })
 
+  it('does not register a background job when repository preflight aborts before resolving', async () => {
+    const outer = new AbortController()
+    const cancellation = new Error('tool turn ended during preflight')
+    state.preflight.mockImplementationOnce(async () => {
+      outer.abort(cancellation)
+      return {
+        discovery: { callerCwd: '/repo', repository: '/repo', gitCommonDir: '/repo/.git', startCommit: 'a'.repeat(40) },
+        gitExecutable: '/usr/bin/git',
+        gitOptions: { timeoutMs: 60_000, graceMs: 1_000, maxStdoutBytes: 1_000_000, maxStderrBytes: 1_000_000 },
+      }
+    })
+    const test = harness()
+    await expect(test.tool.execute(input, execution(outer.signal))).rejects.toBe(cancellation)
+    expect(test.job).toBeUndefined()
+    expect(state.controllers).toHaveLength(0)
+  })
+
   it('rejects an unknown background evaluator before repository preflight or job registration', async () => {
     const test = harness()
     await expect(test.tool.execute({ ...input, evaluator_id: 'unknown' }, execution())).rejects.toThrow('unknown evaluator registration id "unknown"')

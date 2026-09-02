@@ -126,6 +126,7 @@ export function apply(ctx: Context, config: AutoresearchConfig = {}): void {
       let cancelReason = 'autoresearch job killed'
 
       const repositoryPreflight = await preflightAutoresearchRepository(ctx, { config: resolved, input, parent, signal: exec.signal })
+      if (exec.signal.aborted) throw exec.signal.reason
 
       try {
         const id = ctx.jobs.start({
