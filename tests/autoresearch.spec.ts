@@ -14,6 +14,9 @@ const state = vi.hoisted(() => ({
     constructorSignal: AbortSignal
     parent: unknown
   }>,
+  preparePromise: undefined as Promise<unknown> | undefined,
+  readyPromise: undefined as Promise<{ runId: string; tracker: string; branch: string; worktree: string }> | undefined,
+  rejectReady: undefined as ((reason?: unknown) => void) | undefined,
   preflight: vi.fn(async () => ({
     discovery: { callerCwd: '/repo', repository: '/repo', gitCommonDir: '/repo/.git', startCommit: 'a'.repeat(40) },
     gitExecutable: '/usr/bin/git',
@@ -35,15 +38,23 @@ vi.mock('../src/controller.js', () => ({
   validateAutoresearchRequest: (config: { evaluatorRegistry: { resolve(id: string): unknown } }, input: { resume_run_id?: string; evaluator_id?: string }) =>
     'resume_run_id' in input ? undefined : config.evaluatorRegistry.resolve(input.evaluator_id ?? ''),
   AutoresearchRunController: class {
-    readonly ready = Promise.resolve({ runId: 'run-1', tracker: '/tracker.sqlite', branch: 'autoresearch/run-1', worktree: '/worktree' })
-    readonly prepare = vi.fn(async (_jobId: string) => ({ runId: 'run-1', tracker: '/tracker.sqlite', branch: 'autoresearch/run-1', worktree: '/worktree' }))
+    readonly ready: Promise<{ runId: string; tracker: string; branch: string; worktree: string }>
+    readonly prepare = vi.fn(async (_jobId: string) => {
+      await state.preparePromise
+      return { runId: 'run-1', tracker: '/tracker.sqlite', branch: 'autoresearch/run-1', worktree: '/worktree' }
+    })
     readonly setJobId = vi.fn()
-    readonly cancel = vi.fn()
+    readonly cancel = vi.fn((value?: string) => state.rejectReady?.(new Error(value)))
     readonly dispose = vi.fn(async () => undefined)
     readonly run = vi.fn(async () => state.runResult)
     readonly constructorSignal: AbortSignal
     readonly parent: unknown
-    constructor(_ctx: unknown, options: { signal: AbortSignal; parent: unknown }) { this.constructorSignal = options.signal; this.parent = options.parent; state.controllers.push(this) }
+    constructor(_ctx: unknown, options: { signal: AbortSignal; parent: unknown }) {
+      this.constructorSignal = options.signal
+      this.parent = options.parent
+      this.ready = state.readyPromise ?? Promise.resolve({ runId: 'run-1', tracker: '/tracker.sqlite', branch: 'autoresearch/run-1', worktree: '/worktree' })
+      state.controllers.push(this)
+    }
   },
 }))
 
@@ -98,6 +109,9 @@ beforeEach(() => {
   state.releasePrompt.mockClear()
   state.startError = undefined
   state.throwAfterRun = false
+  state.preparePromise = undefined
+  state.readyPromise = undefined
+  state.rejectReady = undefined
 })
 
 describe('autoresearch Host authority normalization', () => {
@@ -198,6 +212,51 @@ describe('autoresearch production wiring', () => {
     await expect(test.tool.execute(input, execution(outer.signal))).rejects.toBe(cancellation)
     expect(test.job).toBeUndefined()
     expect(state.controllers).toHaveLength(0)
+  })
+
+  it('does not register a job when the outer signal aborts immediately after preflight', async () => {
+    const outer = new AbortController()
+    const cancellation = new Error('tool turn ended after preflight')
+    state.preflight.mockImplementationOnce(async () => {
+      queueMicrotask(() => outer.abort(cancellation))
+      return {
+        discovery: { callerCwd: '/repo', repository: '/repo', gitCommonDir: '/repo/.git', startCommit: 'a'.repeat(40) },
+        gitExecutable: '/usr/bin/git',
+        gitOptions: { timeoutMs: 60_000, graceMs: 1_000, maxStdoutBytes: 1_000_000, maxStderrBytes: 1_000_000 },
+      }
+    })
+    const test = harness()
+    await expect(test.tool.execute(input, execution(outer.signal))).rejects.toBe(cancellation)
+    expect(test.job).toBeUndefined()
+    expect(state.controllers).toHaveLength(0)
+  })
+
+  it.each(['prepare', 'readiness'] as const)('cancels and settles registration when abort occurs while %s is pending', async stage => {
+    const outer = new AbortController()
+    const cancellation = new Error(`tool turn ended during ${stage}`)
+    let releasePrepare: (() => void) | undefined
+    let releaseReady: (() => void) | undefined
+    if (stage === 'prepare') {
+      const pending = Promise.withResolvers<void>()
+      state.preparePromise = pending.promise
+      releasePrepare = pending.resolve
+    } else {
+      const pending = Promise.withResolvers<{ runId: string; tracker: string; branch: string; worktree: string }>()
+      state.readyPromise = pending.promise
+      state.rejectReady = pending.reject
+      releaseReady = () => pending.resolve({ runId: 'run-1', tracker: '/tracker.sqlite', branch: 'autoresearch/run-1', worktree: '/worktree' })
+    }
+    const test = harness()
+    const result = test.tool.execute(input, execution(outer.signal))
+    await vi.waitFor(() => expect(state.controllers[0]?.prepare).toHaveBeenCalledOnce())
+    if (stage === 'readiness') await vi.waitFor(() => expect(state.controllers[0]?.run).toHaveBeenCalledOnce())
+    outer.abort(cancellation)
+    await expect(result).resolves.toMatchObject({ kind: 'background-start-failed', jobId: 'autoresearch-1', status: 'cancelled', reason: cancellation.message })
+    expect(state.controllers[0]?.cancel).toHaveBeenCalledWith(cancellation.message)
+    await expect(test.hooks?.done).resolves.toMatchObject({ status: 'killed' })
+    expect(state.controllers[0]?.dispose).toHaveBeenCalledOnce()
+    releasePrepare?.()
+    releaseReady?.()
   })
 
   it('rejects an unknown background evaluator before repository preflight or job registration', async () => {

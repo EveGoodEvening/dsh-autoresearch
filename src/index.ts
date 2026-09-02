@@ -126,8 +126,23 @@ export function apply(ctx: Context, config: AutoresearchConfig = {}): void {
       let cancelReason = 'autoresearch job killed'
 
       const repositoryPreflight = await preflightAutoresearchRepository(ctx, { config: resolved, input, parent, signal: exec.signal })
-      if (exec.signal.aborted) throw exec.signal.reason
+      const startupAbort = deferred<never>()
+      const abortStartup = () => {
+        const error = exec.signal.reason ?? new Error('autoresearch startup aborted')
+        cancelled = true
+        cancelReason = reason(error)
+        controller?.cancel(cancelReason)
+        gate.resolve()
+        readiness.resolve(startupFailure(jobId || 'unregistered', error, true))
+        startupAbort.reject(error)
+      }
+      exec.signal.addEventListener('abort', abortStartup, { once: true })
+      if (exec.signal.aborted) abortStartup()
 
+      if (cancelled) {
+        exec.signal.removeEventListener('abort', abortStartup)
+        return await startupAbort.promise as never
+      }
       try {
         const id = ctx.jobs.start({
           kind: 'autoresearch',
@@ -149,7 +164,9 @@ export function apply(ctx: Context, config: AutoresearchConfig = {}): void {
                 } catch (error) {
                   readiness.resolve(startupFailure(jobId, error, cancelled))
                 }
-                return jobOutcome(await running, resolved.maxResultChars)
+                const result = await running
+                if (cancelled) return { status: 'killed', detail: cancelReason, output: JSON.stringify(startupFailure(jobId, cancelReason, true)) }
+                return jobOutcome(result, resolved.maxResultChars)
               } catch (error) {
                 readiness.resolve(startupFailure(jobId || 'unregistered', error, cancelled))
                 const failure = startupFailure(jobId || 'unregistered', error, cancelled)
@@ -184,18 +201,22 @@ export function apply(ctx: Context, config: AutoresearchConfig = {}): void {
           () => setImmediate(() => activeJobs.delete(startedHooks.done)),
         )
         if (!controller) throw new Error('job registry did not start the autoresearch controller')
-        await controller.prepare(jobId)
+        await Promise.race([controller.prepare(jobId), startupAbort.promise])
         registered = true
         gate.resolve()
-        return await readiness.promise as never
+        const result = await Promise.race([readiness.promise, startupAbort.promise])
+        exec.signal.removeEventListener('abort', abortStartup)
+        return result as never
       } catch (error) {
+        exec.signal.removeEventListener('abort', abortStartup)
         cancelled = true
         cancelReason = reason(error)
         controller?.cancel(cancelReason)
         gate.resolve()
         if (hooks) await hooks.done.catch(() => undefined)
         else if (controller) { await controller.dispose(); active.delete(controller) }
-        return startupFailure(jobId || 'unregistered', error, false) as never
+        if (!jobId && exec.signal.aborted && error === exec.signal.reason) throw error
+        return startupFailure(jobId || 'unregistered', error, exec.signal.aborted) as never
       }
     },
     presentCall: args => presentCall(args as unknown as ActivationAutoresearchToolInput),
