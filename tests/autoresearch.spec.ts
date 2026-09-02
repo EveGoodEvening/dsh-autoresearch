@@ -234,17 +234,12 @@ describe('autoresearch production wiring', () => {
   it.each(['prepare', 'readiness'] as const)('cancels and settles registration when abort occurs while %s is pending', async stage => {
     const outer = new AbortController()
     const cancellation = new Error(`tool turn ended during ${stage}`)
-    let releasePrepare: (() => void) | undefined
-    let releaseReady: (() => void) | undefined
     if (stage === 'prepare') {
-      const pending = Promise.withResolvers<void>()
-      state.preparePromise = pending.promise
-      releasePrepare = pending.resolve
+      state.preparePromise = new Promise<void>(() => undefined)
     } else {
       const pending = Promise.withResolvers<{ runId: string; tracker: string; branch: string; worktree: string }>()
       state.readyPromise = pending.promise
       state.rejectReady = pending.reject
-      releaseReady = () => pending.resolve({ runId: 'run-1', tracker: '/tracker.sqlite', branch: 'autoresearch/run-1', worktree: '/worktree' })
     }
     const test = harness()
     const result = test.tool.execute(input, execution(outer.signal))
@@ -255,8 +250,6 @@ describe('autoresearch production wiring', () => {
     expect(state.controllers[0]?.cancel).toHaveBeenCalledWith(cancellation.message)
     await expect(test.hooks?.done).resolves.toMatchObject({ status: 'killed' })
     expect(state.controllers[0]?.dispose).toHaveBeenCalledOnce()
-    releasePrepare?.()
-    releaseReady?.()
   })
 
   it('rejects an unknown background evaluator before repository preflight or job registration', async () => {

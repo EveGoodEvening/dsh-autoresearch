@@ -116,6 +116,20 @@ describe('exclusive autoresearch controller contract', () => {
     expect(create).not.toHaveBeenCalled()
   })
 
+  it('disposes promptly while non-cooperative preparation remains pending', async () => {
+    let entered!: () => void
+    const discoveryEntered = new Promise<void>(resolve => { entered = resolve })
+    const resolveExecutable = vi.fn(() => new Promise<string>(() => { entered() }))
+    const ctx = { subprocess: { resolveExecutable }, agents: { create: vi.fn() } } as unknown as Context
+    const controller = new AutoresearchRunController(ctx, { config: controllerConfig(), input, parent: parent(), signal: new AbortController().signal })
+    const preparing = controller.prepare('job-1')
+    void preparing.catch(() => undefined)
+    await discoveryEntered
+    await controller.dispose()
+    await expect(controller.ready).rejects.toThrow('disposed before start')
+    expect(resolveExecutable).toHaveBeenCalledOnce()
+  })
+
   it('makes cancellation idempotent before initialization and never allocates a child', async () => {
     const resolveExecutable = vi.fn(async () => '/usr/bin/git')
     const create = vi.fn()

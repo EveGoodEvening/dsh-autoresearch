@@ -78,6 +78,7 @@ export class AutoresearchRunController {
   private readySettled = false
   private runtime: Runtime | undefined
   private cancellationRequested = false
+  private disposed = false
   private cancellationPersisted = false
   private quiescenceFailure?: ProposalAgentError
   private claimHeartbeat: NodeJS.Timeout | undefined
@@ -117,19 +118,27 @@ export class AutoresearchRunController {
   }
   async dispose(): Promise<void> {
     this.cancel('controller disposed')
-    if (this.runPromise) await this.runPromise.catch(() => undefined)
-    else if (this.preparePromise) {
-      await this.preparePromise.catch(() => undefined)
-      if (this.runtime) this.releaseClaim(this.runtime)
-      this.runtime?.tracker.close()
-      this.runtime = undefined
-      if (!this.readySettled) { this.readySettled = true; this.rejectReady(new Error('controller disposed before start')) }
-    } else if (!this.readySettled) { this.readySettled = true; this.rejectReady(new Error('controller disposed before start')) }
+    this.disposed = true
+    if (!this.readySettled) { this.readySettled = true; this.rejectReady(new Error('controller disposed before start')) }
+    if (this.runPromise) {
+      await this.runPromise.catch(() => undefined)
+      return
+    }
+    const runtime = this.runtime
+    if (runtime) {
+      this.releaseRuntime(runtime)
+      return
+    }
+    if (this.preparePromise) void this.preparePromise.catch(() => undefined)
   }
 
   private prepareRuntime(): Promise<Runtime> {
     return this.preparePromise ??= this.initialize().then(runtime => {
       this.runtime = runtime
+      if (this.disposed) {
+        this.releaseRuntime(runtime)
+        throw new Error('controller disposed before start')
+      }
       if (this.cancellationRequested) {
         this.persistCancellationIntent()
         if (!this.aborter.signal.aborted) this.aborter.abort(new Error(this.cancelReason))
@@ -362,6 +371,12 @@ export class AutoresearchRunController {
   private releaseClaim(runtime: Runtime): void {
     if (this.claimHeartbeat) { clearInterval(this.claimHeartbeat); this.claimHeartbeat = undefined }
     if (runtime.claimOwner && runtime.claimProcess) releaseControllerClaim(runtime.tracker, runtime.runId, runtime.claimOwner, runtime.claimProcess)
+  }
+  private releaseRuntime(runtime: Runtime): void {
+    if (this.runtime !== runtime) return
+    this.releaseClaim(runtime)
+    runtime.tracker.close()
+    this.runtime = undefined
   }
 
   private persistCancellationIntent(): void {
