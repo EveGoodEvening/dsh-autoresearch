@@ -368,7 +368,10 @@ releaseDescribe('packed release scenarios', () => {
         const durable = inspect(started.tracker, started.runId); const db = new DatabaseSync(started.tracker, { readOnly: true }); const attempts = Number(db.prepare('SELECT COUNT(*) n FROM attempts').get()?.n); const uncertain = Number(db.prepare('SELECT COUNT(*) n FROM attempts WHERE process_tree_quiescent IS NOT 1').get()?.n); db.close(); expect(attempts).toBe(1); expect(uncertain).toBe(0)
         evidence.interruptionResume = { ok: true, runId: started.runId, parentPid: pids.parent, childPid: pids.child, processTreeQuiescent: true, resumedStatus: resumed.run.status, attempts, duplicateCandidate: durable.experiments.filter(row => row.kind === 'candidate').length > 1 }
       } finally { await owner.dispose() }
-    } finally { await harness.dispose().catch(() => undefined) }
+    } finally {
+      await harness.dispose().catch(() => undefined)
+      await rm(marker, { force: true })
+    }
   }, 45_000)
 
   it('blocks a restart with no quiescence proof without signalling or duplicating evaluation', async () => {
