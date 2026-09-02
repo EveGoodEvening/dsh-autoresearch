@@ -18,6 +18,7 @@ const state = vi.hoisted(() => ({
   lifecyclePromise: undefined as Promise<unknown> | undefined,
   readyPromise: undefined as Promise<{ runId: string; tracker: string; branch: string; worktree: string }> | undefined,
   rejectReady: undefined as ((reason?: unknown) => void) | undefined,
+  cancelPreparation: undefined as ((reason?: string) => void) | undefined,
   preflight: vi.fn(async () => ({
     discovery: { callerCwd: '/repo', repository: '/repo', gitCommonDir: '/repo/.git', startCommit: 'a'.repeat(40) },
     gitExecutable: '/usr/bin/git',
@@ -42,8 +43,13 @@ vi.mock('../src/controller.js', () => ({
     readonly ready: Promise<{ runId: string; tracker: string; branch: string; worktree: string }>
     readonly prepare = vi.fn((_jobId: string) => state.lifecyclePromise ?? state.preparePromise ?? Promise.resolve({ runId: 'run-1', tracker: '/tracker.sqlite', branch: 'autoresearch/run-1', worktree: '/worktree' }))
     readonly setJobId = vi.fn()
-    readonly cancel = vi.fn((value?: string) => state.rejectReady?.(new Error(value)))
-    readonly dispose = vi.fn(async () => undefined)
+    readonly cancel = vi.fn((value?: string) => {
+      state.rejectReady?.(new Error(value))
+      const cancelPreparation = state.cancelPreparation
+      state.cancelPreparation = undefined
+      cancelPreparation?.(value)
+    })
+    readonly dispose = vi.fn(async () => { await state.lifecyclePromise?.catch(() => undefined) })
     readonly run = vi.fn(() => state.lifecyclePromise ?? Promise.resolve(state.runResult))
     readonly constructorSignal: AbortSignal
     readonly parent: unknown
@@ -118,6 +124,7 @@ beforeEach(() => {
   state.lifecyclePromise = undefined
   state.readyPromise = undefined
   state.rejectReady = undefined
+  state.cancelPreparation = undefined
 })
 
 describe('autoresearch Host authority normalization', () => {
@@ -237,20 +244,15 @@ describe('autoresearch production wiring', () => {
     expect(state.controllers).toHaveLength(0)
   })
 
-  it.each(['prepare', 'readiness'] as const)('cancels and settles registration when abort occurs while %s is pending', async stage => {
+  it('cancels and settles registration when abort occurs while readiness is pending', async () => {
     const outer = new AbortController()
-    const cancellation = new Error(`tool turn ended during ${stage}`)
-    if (stage === 'prepare') {
-      state.preparePromise = new Promise<void>(() => undefined)
-    } else {
-      const pending = Promise.withResolvers<{ runId: string; tracker: string; branch: string; worktree: string }>()
-      state.readyPromise = pending.promise
-      state.rejectReady = pending.reject
-    }
+    const cancellation = new Error('tool turn ended during readiness')
+    const pending = Promise.withResolvers<{ runId: string; tracker: string; branch: string; worktree: string }>()
+    state.readyPromise = pending.promise
+    state.rejectReady = pending.reject
     const test = harness()
     const result = test.tool.execute(input, execution(outer.signal))
-    await vi.waitFor(() => expect(state.controllers[0]?.prepare).toHaveBeenCalledOnce())
-    if (stage === 'readiness') await vi.waitFor(() => expect(state.controllers[0]?.run).toHaveBeenCalledOnce())
+    await vi.waitFor(() => expect(state.controllers[0]?.run).toHaveBeenCalledOnce())
     outer.abort(cancellation)
     await expect(result).resolves.toMatchObject({ kind: 'background-start-failed', jobId: 'autoresearch-1', status: 'cancelled', reason: cancellation.message })
     expect(state.controllers[0]?.cancel).toHaveBeenCalledWith(cancellation.message)
@@ -258,42 +260,45 @@ describe('autoresearch production wiring', () => {
     expect(state.controllers[0]?.dispose).toHaveBeenCalledOnce()
   })
 
-  it('settles generic cancellation during registered non-cooperative preparation without starting the runner', async () => {
-    state.lifecyclePromise = new Promise<never>(() => undefined)
+  it.each([
+    ['generic cancellation', undefined, 'operator stopped startup'],
+    ['outer abort', new AbortController(), 'tool turn abandoned startup'],
+  ] as const)('returns prompt cancellation during abortable preparation but keeps %s cleanup pending', async (_label, outer, cancellationReason) => {
+    const preparation = Promise.withResolvers<never>()
+    const cleanup = Promise.withResolvers<void>()
+    const preparationCleanupComplete = vi.fn()
+    state.lifecyclePromise = preparation.promise
+    state.cancelPreparation = reason => {
+      void cleanup.promise.then(() => {
+        preparationCleanupComplete()
+        preparation.reject(new Error(reason))
+      })
+    }
     const test = harness()
-    const result = test.tool.execute(input, execution())
+    const result = test.tool.execute(input, execution(outer?.signal))
     await vi.waitFor(() => expect(state.controllers[0]?.prepare).toHaveBeenCalledOnce())
 
-    test.hooks?.cancel('operator stopped startup')
+    if (outer) outer.abort(new Error(cancellationReason))
+    else test.hooks?.cancel(cancellationReason)
 
     await expect(expectPrompt(result)).resolves.toMatchObject({
-      kind: 'background-start-failed', jobId: 'autoresearch-1', status: 'cancelled', reason: 'operator stopped startup',
+      kind: 'background-start-failed', jobId: 'autoresearch-1', status: 'cancelled', reason: cancellationReason,
     })
-    await expect(expectPrompt(test.hooks!.done)).resolves.toMatchObject({ status: 'killed', detail: 'operator stopped startup' })
+    await vi.waitFor(() => expect(state.controllers[0]?.dispose).toHaveBeenCalledOnce())
+    let doneSettled = false
+    void test.hooks!.done.finally(() => { doneSettled = true })
+    const teardown = test.dispose()
+    let teardownSettled = false
+    void teardown.then(() => { teardownSettled = true })
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(doneSettled).toBe(false)
+    expect(teardownSettled).toBe(false)
     expect(state.controllers[0]?.run).not.toHaveBeenCalled()
-    expect(state.controllers[0]?.dispose).toHaveBeenCalledOnce()
-    await expect(expectPrompt(test.dispose())).resolves.toBeUndefined()
-    expect(state.controllers[0]?.dispose).toHaveBeenCalledOnce()
-  })
 
-  it('settles outer abort during registered non-cooperative preparation without starting the runner', async () => {
-    state.lifecyclePromise = new Promise<never>(() => undefined)
-    const outer = new AbortController()
-    const cancellation = new Error('tool turn abandoned startup')
-    const test = harness()
-    const result = test.tool.execute(input, execution(outer.signal))
-    await vi.waitFor(() => expect(state.controllers[0]?.prepare).toHaveBeenCalledOnce())
-
-    outer.abort(cancellation)
-
-    await expect(expectPrompt(result)).resolves.toMatchObject({
-      kind: 'background-start-failed', jobId: 'autoresearch-1', status: 'cancelled', reason: cancellation.message,
-    })
-    await expect(expectPrompt(test.hooks!.done)).resolves.toMatchObject({ status: 'killed', detail: cancellation.message })
-    expect(state.controllers[0]?.run).not.toHaveBeenCalled()
-    expect(state.controllers[0]?.dispose).toHaveBeenCalledOnce()
-    await expect(expectPrompt(test.dispose())).resolves.toBeUndefined()
-    expect(state.controllers[0]?.dispose).toHaveBeenCalledOnce()
+    cleanup.resolve()
+    await expect(test.hooks!.done).resolves.toMatchObject({ status: 'killed', detail: cancellationReason })
+    await teardown
+    expect(preparationCleanupComplete).toHaveBeenCalledOnce()
   })
 
   it('rejects an unknown background evaluator before repository preflight or job registration', async () => {

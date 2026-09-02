@@ -73,6 +73,7 @@ export class AutoresearchRunController {
   private readonly aborter = new AbortController()
   private runPromise?: Promise<AutoresearchRunResult>
   private preparePromise?: Promise<Runtime>
+  private disposePromise?: Promise<void>
   private cancelReason = 'cancelled'
   private jobId?: string
   private readySettled = false
@@ -116,7 +117,11 @@ export class AutoresearchRunController {
     this.persistCancellationIntent()
     if (!this.aborter.signal.aborted) this.aborter.abort(new Error(this.cancelReason))
   }
-  async dispose(): Promise<void> {
+  dispose(): Promise<void> {
+    return this.disposePromise ??= this.disposeOnce()
+  }
+
+  private async disposeOnce(): Promise<void> {
     this.cancel('controller disposed')
     this.disposed = true
     if (!this.readySettled) { this.readySettled = true; this.rejectReady(new Error('controller disposed before start')) }
@@ -124,12 +129,9 @@ export class AutoresearchRunController {
       await this.runPromise.catch(() => undefined)
       return
     }
+    if (this.preparePromise) await this.preparePromise.catch(() => undefined)
     const runtime = this.runtime
-    if (runtime) {
-      this.releaseRuntime(runtime)
-      return
-    }
-    if (this.preparePromise) void this.preparePromise.catch(() => undefined)
+    if (runtime) this.releaseRuntime(runtime)
   }
 
   private prepareRuntime(): Promise<Runtime> {

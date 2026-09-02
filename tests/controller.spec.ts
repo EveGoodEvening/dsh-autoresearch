@@ -116,16 +116,31 @@ describe('exclusive autoresearch controller contract', () => {
     expect(create).not.toHaveBeenCalled()
   })
 
-  it('disposes promptly while non-cooperative preparation remains pending', async () => {
+  it('waits for abortable preparation cleanup before disposal settles', async () => {
     let entered!: () => void
+    let releaseCleanup!: () => void
     const discoveryEntered = new Promise<void>(resolve => { entered = resolve })
-    const resolveExecutable = vi.fn(() => new Promise<string>(() => { entered() }))
+    const cleanupReleased = new Promise<void>(resolve => { releaseCleanup = resolve })
+    const cleanupComplete = vi.fn()
+    const resolveExecutable = vi.fn((_command: string, _env: unknown, signal?: AbortSignal) => new Promise<string>((_resolve, reject) => {
+      entered()
+      signal?.addEventListener('abort', () => {
+        void cleanupReleased.then(() => { cleanupComplete(); reject(signal.reason) })
+      }, { once: true })
+    }))
     const ctx = { subprocess: { resolveExecutable }, agents: { create: vi.fn() } } as unknown as Context
     const controller = new AutoresearchRunController(ctx, { config: controllerConfig(), input, parent: parent(), signal: new AbortController().signal })
     const preparing = controller.prepare('job-1')
     void preparing.catch(() => undefined)
     await discoveryEntered
-    await controller.dispose()
+    const disposing = controller.dispose()
+    let disposed = false
+    void disposing.then(() => { disposed = true })
+    await vi.waitFor(() => expect(resolveExecutable.mock.calls[0]?.[2]?.aborted).toBe(true))
+    expect(disposed).toBe(false)
+    releaseCleanup()
+    await disposing
+    expect(cleanupComplete).toHaveBeenCalledOnce()
     await expect(controller.ready).rejects.toThrow('disposed before start')
     expect(resolveExecutable).toHaveBeenCalledOnce()
   })
