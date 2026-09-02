@@ -463,6 +463,34 @@ function controllerClaims(gitCommonDir: string, runId: string): unknown[] {
   finally { authority.close() }
 }
 
+function registrationResumeEffects(f: ControllerFixture, ready: AutoresearchRunReady, gitCommonDir: string, transitionCount: number, authorityBytesMustRemainUnchanged = true) {
+  const authorityPath = join(gitCommonDir, 'dsh-autoresearch-locks.sqlite')
+  const before = {
+    tracker: readFileSync(ready.tracker),
+    claims: controllerClaims(gitCommonDir, ready.runId),
+    authority: authorityBytesMustRemainUnchanged ? readFileSync(authorityPath) : undefined,
+    head: execFileSync('git', ['-C', ready.worktree, 'rev-parse', 'HEAD']),
+    refs: execFileSync('git', ['-C', f.root, 'show-ref']),
+    status: execFileSync('git', ['-C', ready.worktree, 'status', '--porcelain=v1']),
+    evaluatorSpawns: f.subprocess.evaluatorSpawns,
+    childCount: f.creates.length,
+  }
+  expect(before.claims).toEqual([])
+  return () => {
+    expect(readFileSync(ready.tracker)).toEqual(before.tracker)
+    const inspection = DurableTracker.openReadOnly(ready.tracker)
+    expect(inspection.listTransitions(ready.runId)).toHaveLength(transitionCount)
+    inspection.close()
+    expect(controllerClaims(gitCommonDir, ready.runId)).toEqual(before.claims)
+    if (before.authority !== undefined) expect(readFileSync(authorityPath)).toEqual(before.authority)
+    expect(execFileSync('git', ['-C', ready.worktree, 'rev-parse', 'HEAD'])).toEqual(before.head)
+    expect(execFileSync('git', ['-C', f.root, 'show-ref'])).toEqual(before.refs)
+    expect(execFileSync('git', ['-C', ready.worktree, 'status', '--porcelain=v1'])).toEqual(before.status)
+    expect(f.subprocess.evaluatorSpawns).toBe(before.evaluatorSpawns)
+    expect(f.creates).toHaveLength(before.childCount)
+  }
+}
+
 describe('controller real Git/SQLite outcomes', () => {
   it('activates Host registration authority and atomically persists its identity', async () => {
     const f = controllerFixture([{ stdout: '{"score":1}\n' }])
@@ -542,31 +570,13 @@ describe('controller real Git/SQLite outcomes', () => {
       expect(run['state']).toBe('initializing')
       expect(seeded.database.prepare('SELECT contract_generation, evaluator_id FROM run_registrations WHERE run_id = ?').get(ready.runId)).toEqual({ contract_generation: EVALUATOR_CONTRACT_GENERATION, evaluator_id: 'judge' })
       const transitionCount = seeded.listTransitions(ready.runId).length
-      const claimsBefore = controllerClaims(String(run['git_common_dir']), ready.runId)
       seeded.close()
-      const trackerBefore = readFileSync(ready.tracker)
-      const authorityPath = join(String(run['git_common_dir']), 'dsh-autoresearch-locks.sqlite')
-      const authorityBefore = readFileSync(authorityPath)
-      const headBefore = execFileSync('git', ['-C', ready.worktree, 'rev-parse', 'HEAD'])
-      const refsBefore = execFileSync('git', ['-C', f.root, 'show-ref'])
-      const statusBefore = execFileSync('git', ['-C', ready.worktree, 'status', '--porcelain=v1'])
-      const evaluatorSpawns = f.subprocess.evaluatorSpawns
-      const childCount = f.creates.length
+      const assertNoEffects = registrationResumeEffects(f, ready, String(run['git_common_dir']), transitionCount)
 
       const resumed = await createCaseController(f, {}, ready.runId, { evaluatorRegistrations: [changedRegistration] }).run()
 
       expect(resumed).toMatchObject({ status: 'round-failed', evidence: [expect.objectContaining({ code: 'evaluator-registration-mismatch' })] })
-      expect(readFileSync(ready.tracker)).toEqual(trackerBefore)
-      const inspection = DurableTracker.openReadOnly(ready.tracker)
-      expect(inspection.listTransitions(ready.runId)).toHaveLength(transitionCount)
-      inspection.close()
-      expect(controllerClaims(String(run['git_common_dir']), ready.runId)).toEqual(claimsBefore)
-      expect(readFileSync(authorityPath)).toEqual(authorityBefore)
-      expect(execFileSync('git', ['-C', ready.worktree, 'rev-parse', 'HEAD'])).toEqual(headBefore)
-      expect(execFileSync('git', ['-C', f.root, 'show-ref'])).toEqual(refsBefore)
-      expect(execFileSync('git', ['-C', ready.worktree, 'status', '--porcelain=v1'])).toEqual(statusBefore)
-      expect(f.subprocess.evaluatorSpawns).toBe(evaluatorSpawns)
-      expect(f.creates).toHaveLength(childCount)
+      assertNoEffects()
     } finally { rmSync(f.root, { recursive: true, force: true }) }
   })
   it.each([
@@ -580,31 +590,72 @@ describe('controller real Git/SQLite outcomes', () => {
       const run = first.tracker.getRun(first.ready.runId)!
       expect(first.tracker.database.prepare('SELECT contract_generation, evaluator_id FROM run_registrations WHERE run_id = ?').get(first.ready.runId)).toEqual({ contract_generation: EVALUATOR_CONTRACT_GENERATION, evaluator_id: 'judge' })
       const transitionCount = first.tracker.listTransitions(first.ready.runId).length
-      const claimsBefore = controllerClaims(String(run['git_common_dir']), first.ready.runId)
       first.tracker.close()
-      const trackerBefore = readFileSync(first.ready.tracker)
-      const authorityPath = join(String(run['git_common_dir']), 'dsh-autoresearch-locks.sqlite')
-      const authorityBefore = readFileSync(authorityPath)
-      const headBefore = execFileSync('git', ['-C', first.ready.worktree, 'rev-parse', 'HEAD'])
-      const refsBefore = execFileSync('git', ['-C', f.root, 'show-ref'])
-      const statusBefore = execFileSync('git', ['-C', first.ready.worktree, 'status', '--porcelain=v1'])
-      const evaluatorSpawns = f.subprocess.evaluatorSpawns
-      const childCount = f.creates.length
+      const assertNoEffects = registrationResumeEffects(f, first.ready, String(run['git_common_dir']), transitionCount)
 
       const replayed = await createCaseController(f, { max_experiments: 1, target: 1 }, first.ready.runId, { evaluatorRegistrations: [changedRegistration] }).run()
 
       expect(replayed).toMatchObject({ status: 'blocked', evidence: [expect.objectContaining({ code: 'evaluator-registration-mismatch' })] })
-      expect(readFileSync(first.ready.tracker)).toEqual(trackerBefore)
-      const inspection = DurableTracker.openReadOnly(first.ready.tracker)
-      expect(inspection.listTransitions(first.ready.runId)).toHaveLength(transitionCount)
-      inspection.close()
-      expect(controllerClaims(String(run['git_common_dir']), first.ready.runId)).toEqual(claimsBefore)
-      expect(readFileSync(authorityPath)).toEqual(authorityBefore)
-      expect(execFileSync('git', ['-C', first.ready.worktree, 'rev-parse', 'HEAD'])).toEqual(headBefore)
-      expect(execFileSync('git', ['-C', f.root, 'show-ref'])).toEqual(refsBefore)
-      expect(execFileSync('git', ['-C', first.ready.worktree, 'status', '--porcelain=v1'])).toEqual(statusBefore)
-      expect(f.subprocess.evaluatorSpawns).toBe(evaluatorSpawns)
-      expect(f.creates).toHaveLength(childCount)
+      assertNoEffects()
+    } finally { rmSync(f.root, { recursive: true, force: true }) }
+  })
+  it.each([
+    ['Host registration removal', []],
+    ['args drift', [{ ...evaluatorRegistration, args: ['changed'] }]],
+    ['evaluator-file declaration drift', [{ ...evaluatorRegistration, evaluatorFiles: ['evaluate.mjs', 'other.mjs'] }]],
+    ['dataset declaration drift', [{ ...evaluatorRegistration, dataset: { kind: 'local' as const, files: ['dataset.json'] } }]],
+  ] as const)('rejects nonterminal resume for %s without transitions, claims, Git effects, children, or evaluator spawns', async (_case, evaluatorRegistrations) => {
+    const f = controllerFixture([{ stdout: '{"score":1}\n' }])
+    try {
+      const controller = createCaseController(f, { max_experiments: 1, target: 1 })
+      const ready = await controller.prepare()
+      await controller.dispose()
+      const seeded = DurableTracker.open(ready.tracker)
+      const run = seeded.getRun(ready.runId)!
+      expect(run['state']).toBe('initializing')
+      const transitionCount = seeded.listTransitions(ready.runId).length
+      seeded.close()
+      const assertNoEffects = registrationResumeEffects(f, ready, String(run['git_common_dir']), transitionCount)
+
+      const resumed = await createCaseController(f, {}, ready.runId, { evaluatorRegistrations: [...evaluatorRegistrations] }).run()
+
+      expect(resumed).toMatchObject({ status: 'round-failed', evidence: [expect.objectContaining({ code: 'evaluator-registration-mismatch' })] })
+      assertNoEffects()
+    } finally { rmSync(f.root, { recursive: true, force: true }) }
+  })
+
+  it.each([
+    ['Host registration removal', []],
+    ['args drift', [{ ...evaluatorRegistration, args: ['changed'] }]],
+  ] as const)('rejects terminal replay for %s without transitions, claims, Git effects, children, or evaluator spawns', async (_case, evaluatorRegistrations) => {
+    const f = controllerFixture([{ stdout: '{"score":1}\n' }])
+    try {
+      const first = await runControllerCase(f, { max_experiments: 1, target: 1 })
+      const run = first.tracker.getRun(first.ready.runId)!
+      const transitionCount = first.tracker.listTransitions(first.ready.runId).length
+      first.tracker.close()
+      const assertNoEffects = registrationResumeEffects(f, first.ready, String(run['git_common_dir']), transitionCount)
+
+      const replayed = await createCaseController(f, { max_experiments: 1, target: 1 }, first.ready.runId, { evaluatorRegistrations: [...evaluatorRegistrations] }).run()
+
+      expect(replayed).toMatchObject({ status: 'blocked', evidence: [expect.objectContaining({ code: 'evaluator-registration-mismatch' })] })
+      assertNoEffects()
+    } finally { rmSync(f.root, { recursive: true, force: true }) }
+  })
+
+  it('successfully replays a terminal run with the exact Host registration without transitions, claims, Git effects, children, or an extra evaluator spawn', async () => {
+    const f = controllerFixture([{ stdout: '{"score":1}\n' }])
+    try {
+      const first = await runControllerCase(f, { max_experiments: 1, target: 1 })
+      const run = first.tracker.getRun(first.ready.runId)!
+      const transitionCount = first.tracker.listTransitions(first.ready.runId).length
+      first.tracker.close()
+      const assertNoEffects = registrationResumeEffects(f, first.ready, String(run['git_common_dir']), transitionCount, false)
+
+      const replayed = await createCaseController(f, { max_experiments: 1, target: 1 }, first.ready.runId).run()
+
+      expect(replayed).toMatchObject({ status: 'target-reached', counts: { attempts: 1 } })
+      assertNoEffects()
     } finally { rmSync(f.root, { recursive: true, force: true }) }
   })
   it.each(['nonterminal', 'terminal'] as const)('rejects semantically drifted canonical provenance before writable %s resume', async (kind) => {
