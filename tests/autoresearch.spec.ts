@@ -15,6 +15,7 @@ const state = vi.hoisted(() => ({
     parent: unknown
   }>,
   preparePromise: undefined as Promise<unknown> | undefined,
+  lifecyclePromise: undefined as Promise<unknown> | undefined,
   readyPromise: undefined as Promise<{ runId: string; tracker: string; branch: string; worktree: string }> | undefined,
   rejectReady: undefined as ((reason?: unknown) => void) | undefined,
   preflight: vi.fn(async () => ({
@@ -39,14 +40,11 @@ vi.mock('../src/controller.js', () => ({
     'resume_run_id' in input ? undefined : config.evaluatorRegistry.resolve(input.evaluator_id ?? ''),
   AutoresearchRunController: class {
     readonly ready: Promise<{ runId: string; tracker: string; branch: string; worktree: string }>
-    readonly prepare = vi.fn(async (_jobId: string) => {
-      await state.preparePromise
-      return { runId: 'run-1', tracker: '/tracker.sqlite', branch: 'autoresearch/run-1', worktree: '/worktree' }
-    })
+    readonly prepare = vi.fn((_jobId: string) => state.lifecyclePromise ?? state.preparePromise ?? Promise.resolve({ runId: 'run-1', tracker: '/tracker.sqlite', branch: 'autoresearch/run-1', worktree: '/worktree' }))
     readonly setJobId = vi.fn()
     readonly cancel = vi.fn((value?: string) => state.rejectReady?.(new Error(value)))
     readonly dispose = vi.fn(async () => undefined)
-    readonly run = vi.fn(async () => state.runResult)
+    readonly run = vi.fn(() => state.lifecyclePromise ?? Promise.resolve(state.runResult))
     readonly constructorSignal: AbortSignal
     readonly parent: unknown
     constructor(_ctx: unknown, options: { signal: AbortSignal; parent: unknown }) {
@@ -99,6 +97,13 @@ const input = {
   objective: 'reduce score', run_tag: 'trial', evaluator_id: 'judge', mutable_globs: ['src/**'],
 } as const
 const parent = { id: 'parent', session: { header: { id: 'session', cwd: '/repo' } } }
+
+async function expectPrompt<T>(promise: Promise<T>): Promise<T> {
+  return await Promise.race([
+    promise,
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error('operation did not settle promptly')), 100)),
+  ])
+}
 const execution = (signal = new AbortController().signal) => ({ agent: parent, signal }) as never
 
 beforeEach(() => {
@@ -110,6 +115,7 @@ beforeEach(() => {
   state.startError = undefined
   state.throwAfterRun = false
   state.preparePromise = undefined
+  state.lifecyclePromise = undefined
   state.readyPromise = undefined
   state.rejectReady = undefined
 })
@@ -249,6 +255,44 @@ describe('autoresearch production wiring', () => {
     await expect(result).resolves.toMatchObject({ kind: 'background-start-failed', jobId: 'autoresearch-1', status: 'cancelled', reason: cancellation.message })
     expect(state.controllers[0]?.cancel).toHaveBeenCalledWith(cancellation.message)
     await expect(test.hooks?.done).resolves.toMatchObject({ status: 'killed' })
+    expect(state.controllers[0]?.dispose).toHaveBeenCalledOnce()
+  })
+
+  it('settles generic cancellation during registered non-cooperative preparation without starting the runner', async () => {
+    state.lifecyclePromise = new Promise<never>(() => undefined)
+    const test = harness()
+    const result = test.tool.execute(input, execution())
+    await vi.waitFor(() => expect(state.controllers[0]?.prepare).toHaveBeenCalledOnce())
+
+    test.hooks?.cancel('operator stopped startup')
+
+    await expect(expectPrompt(result)).resolves.toMatchObject({
+      kind: 'background-start-failed', jobId: 'autoresearch-1', status: 'cancelled', reason: 'operator stopped startup',
+    })
+    await expect(expectPrompt(test.hooks!.done)).resolves.toMatchObject({ status: 'killed', detail: 'operator stopped startup' })
+    expect(state.controllers[0]?.run).not.toHaveBeenCalled()
+    expect(state.controllers[0]?.dispose).toHaveBeenCalledOnce()
+    await expect(expectPrompt(test.dispose())).resolves.toBeUndefined()
+    expect(state.controllers[0]?.dispose).toHaveBeenCalledOnce()
+  })
+
+  it('settles outer abort during registered non-cooperative preparation without starting the runner', async () => {
+    state.lifecyclePromise = new Promise<never>(() => undefined)
+    const outer = new AbortController()
+    const cancellation = new Error('tool turn abandoned startup')
+    const test = harness()
+    const result = test.tool.execute(input, execution(outer.signal))
+    await vi.waitFor(() => expect(state.controllers[0]?.prepare).toHaveBeenCalledOnce())
+
+    outer.abort(cancellation)
+
+    await expect(expectPrompt(result)).resolves.toMatchObject({
+      kind: 'background-start-failed', jobId: 'autoresearch-1', status: 'cancelled', reason: cancellation.message,
+    })
+    await expect(expectPrompt(test.hooks!.done)).resolves.toMatchObject({ status: 'killed', detail: cancellation.message })
+    expect(state.controllers[0]?.run).not.toHaveBeenCalled()
+    expect(state.controllers[0]?.dispose).toHaveBeenCalledOnce()
+    await expect(expectPrompt(test.dispose())).resolves.toBeUndefined()
     expect(state.controllers[0]?.dispose).toHaveBeenCalledOnce()
   })
 

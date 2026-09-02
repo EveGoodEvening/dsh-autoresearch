@@ -131,7 +131,10 @@ export function apply(ctx: Context, config: AutoresearchConfig = {}): void {
         const error = exec.signal.reason ?? new Error('autoresearch startup aborted')
         cancelled = true
         cancelReason = reason(error)
-        controller?.cancel(cancelReason)
+        if (controller && !cancellationApplied) {
+          controller.cancel(cancelReason)
+          cancellationApplied = true
+        }
         gate.resolve()
         readiness.resolve(startupFailure(jobId || 'unregistered', error, true))
         startupAbort.reject(error)
@@ -188,6 +191,9 @@ export function apply(ctx: Context, config: AutoresearchConfig = {}): void {
                 }
                 controller!.cancel(cancelReason)
                 cancellationApplied = true
+                gate.resolve()
+                readiness.resolve(startupFailure(jobId || 'unregistered', cancelReason, true))
+                startupAbort.reject(new Error(cancelReason))
               },
               done,
             }
@@ -201,7 +207,9 @@ export function apply(ctx: Context, config: AutoresearchConfig = {}): void {
           () => setImmediate(() => activeJobs.delete(startedHooks.done)),
         )
         if (!controller) throw new Error('job registry did not start the autoresearch controller')
-        await Promise.race([controller.prepare(jobId), startupAbort.promise])
+        const preparing = controller.prepare(jobId)
+        void preparing.catch(() => undefined)
+        await Promise.race([preparing, startupAbort.promise])
         registered = true
         gate.resolve()
         const result = await Promise.race([readiness.promise, startupAbort.promise])
@@ -209,14 +217,17 @@ export function apply(ctx: Context, config: AutoresearchConfig = {}): void {
         return result as never
       } catch (error) {
         exec.signal.removeEventListener('abort', abortStartup)
+        const startupCancelled = cancelled || exec.signal.aborted
         cancelled = true
         cancelReason = reason(error)
-        controller?.cancel(cancelReason)
+        if (controller && !cancellationApplied) {
+          controller.cancel(cancelReason)
+          cancellationApplied = true
+        }
         gate.resolve()
-        if (hooks) await hooks.done.catch(() => undefined)
-        else if (controller) { await controller.dispose(); active.delete(controller) }
+        if (!hooks && controller) { await controller.dispose(); active.delete(controller) }
         if (!jobId && exec.signal.aborted && error === exec.signal.reason) throw error
-        return startupFailure(jobId || 'unregistered', error, exec.signal.aborted) as never
+        return startupFailure(jobId || 'unregistered', error, startupCancelled) as never
       }
     },
     presentCall: args => presentCall(args as unknown as ActivationAutoresearchToolInput),
