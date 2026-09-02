@@ -13,6 +13,17 @@ export const EVALUATOR_CONTRACT_GENERATION = 'host-registration-v1' as const
 export type EvaluatorContractGeneration = typeof EVALUATOR_CONTRACT_GENERATION
 export type AlgorithmQualifiedDigest = `sha256:${string}`
 export type RegistrationManifest = Readonly<Record<string, string>>
+export type RepositoryContainmentCode =
+  | 'repository-target-invalid'
+  | 'repository-target-outside-parent'
+  | 'repository-target-nested'
+
+export interface CanonicalRepositoryTarget {
+  readonly parentCwd: string
+  readonly requestedPath: string
+  readonly repositoryWasOmitted: boolean
+}
+
 export interface FrozenFileDeclarations {
   readonly evaluatorFiles: readonly string[]
   readonly datasetFiles: readonly string[]

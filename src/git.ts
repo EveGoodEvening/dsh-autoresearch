@@ -1,12 +1,12 @@
 import { createHash } from 'node:crypto'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { mkdtemp, readFile, realpath, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { scrubbedParentEnv, type SubprocessHandle, type SubprocessOutcome, type SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
 import type { ResolvedConfig } from './config.js'
-import { normalizeEvaluatorRegistration, normalizeFrozenFileDeclarations, normalizeRegistrationManifest, type EvaluatorRegistration, type FrozenFileDeclarations, type NormalizedRunPolicy, type RegistrationManifest } from './types.js'
+import { normalizeEvaluatorRegistration, normalizeFrozenFileDeclarations, normalizeRegistrationManifest, type CanonicalRepositoryTarget, type EvaluatorRegistration, type FrozenFileDeclarations, type NormalizedRunPolicy, type RegistrationManifest, type RepositoryContainmentCode } from './types.js'
 import { DurableTracker } from './tracker.js'
 import { deriveRegistrationManifest } from './evaluator.js'
 
@@ -17,6 +17,10 @@ const GIT_CONFIG_LOGICAL_PATHS = ['.git/config', '.git/config.worktree'] as cons
 
 export class GitBoundaryError extends Error {
   constructor(readonly code: string, message: string, readonly evidence: readonly string[] = []) { super(message); this.name = 'GitBoundaryError' }
+}
+
+export class RepositoryContainmentError extends GitBoundaryError {
+  constructor(code: RepositoryContainmentCode, message: string, evidence: readonly string[] = []) { super(code, message, evidence); this.name = 'RepositoryContainmentError' }
 }
 export interface GitContext { readonly subprocess: Pick<SubprocessRuntime, 'spawn' | 'resolveExecutable'> }
 export interface GitEnvironmentOverrides { readonly GIT_INDEX_FILE?: string; readonly GIT_AUTHOR_NAME?: string; readonly GIT_AUTHOR_EMAIL?: string; readonly GIT_COMMITTER_NAME?: string; readonly GIT_COMMITTER_EMAIL?: string; readonly GIT_AUTHOR_DATE?: string; readonly GIT_COMMITTER_DATE?: string }
@@ -85,6 +89,29 @@ export async function runGit(ctx: GitContext, executable: string, args: readonly
   const result = { argv: [executable, ...safeGitArgs(args)], stdout: stdout?.text ?? '', stderr: stderr?.text ?? '', exitCode: outcome.exitCode, signal: outcome.signal, timedOut }
   if (result.exitCode !== 0 || deadline.signal.aborted) throw new GitBoundaryError(timedOut ? 'git-timeout' : cancellation || options.signal?.aborted ? 'git-cancelled' : 'git-command-failed', `Git command failed: ${args.join(' ')}: ${result.stderr.trim()}`, [result.stdout, result.stderr])
   return result
+}
+
+export async function canonicalizeRepositoryTarget(parentCwd: string, requestedPath?: string): Promise<CanonicalRepositoryTarget> {
+  const repositoryWasOmitted = requestedPath === undefined
+  const rawParent = normalizedAbsoluteInput(parentCwd, 'parent workspace')
+  const rawRequested = repositoryWasOmitted ? rawParent : normalizedAbsoluteInput(requestedPath, 'repository target', rawParent)
+  if (!repositoryWasOmitted && hasParentTraversal(requestedPath)) throw new RepositoryContainmentError('repository-target-invalid', 'Repository target must not contain parent traversal')
+  try {
+    const [canonicalParent, canonicalRequested] = await Promise.all([realpath(rawParent), realpath(rawRequested)])
+    const [parentFacts, requestedFacts] = await Promise.all([stat(canonicalParent), stat(canonicalRequested)])
+    if (!parentFacts.isDirectory() || !requestedFacts.isDirectory()) throw new RepositoryContainmentError('repository-target-invalid', 'Repository target and parent workspace must be directories')
+    return { parentCwd: canonicalParent, requestedPath: canonicalRequested, repositoryWasOmitted }
+  } catch (error) {
+    if (error instanceof RepositoryContainmentError) throw error
+    throw new RepositoryContainmentError('repository-target-invalid', 'Repository target and parent workspace must already exist', [String((error as NodeJS.ErrnoException).code ?? error)])
+  }
+}
+
+export async function discoverContainedRepository(ctx: GitContext, executable: string, target: CanonicalRepositoryTarget, options: Omit<GitCommandOptions, 'cwd'>): Promise<RepositoryDiscovery> {
+  const parentDiscovery = await discoverRepository(ctx, executable, target.parentCwd, options)
+  if (!isPathContained(parentDiscovery.repository, target.requestedPath)) throw new RepositoryContainmentError('repository-target-outside-parent', 'Repository target is outside the parent Agent repository workspace', [target.requestedPath, parentDiscovery.repository])
+  if (isPathContained(parentDiscovery.gitCommonDir, target.requestedPath) || (target.requestedPath !== parentDiscovery.repository && hasNestedRepositoryBoundary(parentDiscovery.repository, target.requestedPath))) throw new RepositoryContainmentError('repository-target-nested', 'Repository target crosses Git metadata, a nested repository, or a linked-worktree boundary', [target.requestedPath])
+  return { ...parentDiscovery, callerCwd: target.requestedPath }
 }
 
 export async function discoverRepository(ctx: GitContext, executable: string, requestedPath: string, options: Omit<GitCommandOptions, 'cwd'>): Promise<RepositoryDiscovery> {
@@ -489,6 +516,22 @@ function safeGitArgs(args: readonly string[]): readonly string[] { return args[0
 function closedGitEnvironment(overrides: GitEnvironmentOverrides = {}): Record<string, string> { const base = scrubbedParentEnv(); for (const key of Object.keys(base)) if (/^GIT_/iu.test(key)) delete base[key]; const allowed: Readonly<Record<string, true>> = { GIT_INDEX_FILE: true, GIT_AUTHOR_NAME: true, GIT_AUTHOR_EMAIL: true, GIT_COMMITTER_NAME: true, GIT_COMMITTER_EMAIL: true, GIT_AUTHOR_DATE: true, GIT_COMMITTER_DATE: true }; for (const key of Object.keys(overrides)) if (allowed[key] !== true) throw new TypeError(`Unsupported Git environment override ${key}`); const explicit = Object.fromEntries(Object.entries(overrides).filter((entry): entry is [string, string] => entry[1] !== undefined)); return { ...base, ...explicit, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '1', GIT_PAGER: 'cat' } }
 function requireSha(value: string, label: string): void { if (!FULL_SHA.test(value)) throw new GitBoundaryError('git-invalid-sha', `Git returned a non-full ${label}`) }
 function assertDurableIdentity(discovery: RepositoryDiscovery, identity: RunGitIdentity, durable: DurableGitIdentity): void { if (durable.runId !== identity.runId || durable.repositoryId !== discovery.repositoryId || durable.startCommit !== discovery.startCommit || durable.branch !== identity.branch || durable.worktree !== identity.worktree) throw new GitBoundaryError('git-durable-identity-mismatch', 'Allocation identity differs from the immutable durable run') }
+function normalizedAbsoluteInput(value: string, label: string, cwd = process.cwd()): string {
+  if (typeof value !== 'string' || value.length === 0 || value !== value.trim() || /[\0\r\n]/u.test(value)) throw new RepositoryContainmentError('repository-target-invalid', `${label} must be normalized non-empty text`)
+  return resolve(cwd, value)
+}
+function hasParentTraversal(value: string): boolean { return value.split(/[\\/]/u).includes('..') }
+function isPathContained(parent: string, candidate: string): boolean { const path = relative(parent, candidate); return path === '' || (path !== '..' && !path.startsWith(`..${sep}`) && !isAbsolute(path)) }
+function hasNestedRepositoryBoundary(parentRepository: string, target: string): boolean {
+  let current = target
+  while (current !== parentRepository) {
+    if (existsSync(join(current, '.git'))) return true
+    const next = dirname(current)
+    if (next === current || !isPathContained(parentRepository, next)) return true
+    current = next
+  }
+  return false
+}
 async function canonicalGitPath(value: string, cwd: string): Promise<string> { const raw = value.trim(); return realpath(isAbsolute(raw) ? raw : resolve(cwd, raw)) }
 function safeIdentity(value: string, label: string): string { if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(value) || value.includes('..')) throw new TypeError(`${label} is not Git/path safe`); return value }
 function normalizeRepoPath(value: string): string { const path = value.replaceAll('\\', '/').replace(/^\.\//u, ''); if (!path || path.startsWith('/') || path.split('/').includes('..') || path.includes('\0')) throw new GitBoundaryError('git-invalid-path', `Invalid repository path ${value}`); return path }

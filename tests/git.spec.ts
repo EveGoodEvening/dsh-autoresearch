@@ -3,11 +3,11 @@ import { execFileSync, spawn } from 'node:child_process'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { DatabaseSync } from 'node:sqlite'
-import { join } from 'node:path'
+import { basename, dirname, join, sep } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { SubprocessHandle, SubprocessOutputReader, SubprocessOutcome, SubprocessSpawnSpec } from '@deepseek-ai/dsh-subprocess'
 import { DurableTracker } from '../src/tracker.ts'
-import { acquireControllerClaim, acquireRunLock, allocateRunWorktree, captureGitConfigBaseline, commitCandidate, deriveRegistrationManifestAtStartCommit, discoverRepository, durableGitIdentity, GitBoundaryError, heartbeatControllerClaim, inspectRunGitState, makeRunGitIdentity, prepareCandidateTree, reconcileAcceptedHead, reconcileRejectedHead, recoverTerminalRunLock, recoverTerminalRunLockUnderControllerClaim, releaseControllerClaim, releaseTerminalRunLock, removeRunWorktree, resolveGitExecutable, runGit, snapshotCandidate, validateCandidate, validateFrozenCandidatePaths, verifyCandidateTree, verifyExactWorktree, type GitContext } from '../src/git.ts'
+import { acquireControllerClaim, acquireRunLock, allocateRunWorktree, canonicalizeRepositoryTarget, captureGitConfigBaseline, commitCandidate, deriveRegistrationManifestAtStartCommit, discoverContainedRepository, discoverRepository, durableGitIdentity, GitBoundaryError, heartbeatControllerClaim, inspectRunGitState, makeRunGitIdentity, prepareCandidateTree, reconcileAcceptedHead, reconcileRejectedHead, recoverTerminalRunLock, recoverTerminalRunLockUnderControllerClaim, releaseControllerClaim, releaseTerminalRunLock, removeRunWorktree, resolveGitExecutable, runGit, snapshotCandidate, validateCandidate, validateFrozenCandidatePaths, verifyCandidateTree, verifyExactWorktree, type GitContext } from '../src/git.ts'
 
 const roots: string[] = []
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
@@ -81,6 +81,41 @@ describe('host-owned Git boundary', () => {
     expect(discovery.startCommit).toMatch(/^[0-9a-f]{40}$/); expect(discovery.repository).toBe(root); expect(execFileSync('git', ['-C', root, 'status', '--porcelain=v1']).toString()).toBe(before)
     expect(subprocess.specs.every((spec) => spec.env?.GIT_CONFIG_GLOBAL === '/dev/null' && spec.env?.GIT_TERMINAL_PROMPT === '0' && spec.env?.GIT_DIR === undefined && spec.argv.includes('core.hooksPath=/dev/null') && spec.argv.includes('core.fsmonitor=false'))).toBe(true)
     expect(execFileSync('git', ['-C', root, 'worktree', 'list', '--porcelain']).toString().match(/^worktree /gmu)).toHaveLength(1)
+  })
+
+  it('canonicalizes model targets before Git discovery and permits only the parent repository workspace', async () => {
+    const f = fixture(); const contained = join(f.root, 'src')
+    const omitted = await canonicalizeRepositoryTarget(contained)
+    const explicit = await canonicalizeRepositoryTarget(f.root, contained)
+    await expect(discoverContainedRepository(f.ctx, 'git', omitted, commandOptions)).resolves.toMatchObject({ repository: f.root, callerCwd: contained })
+    await expect(discoverContainedRepository(f.ctx, 'git', explicit, commandOptions)).resolves.toMatchObject({ repository: f.root, callerCwd: contained })
+  })
+
+  it('rejects lexical, symlink, nested, sibling, external, and linked-worktree escapes without target discovery', async () => {
+    const f = fixture(); const outside = fixture(); const sibling = join(dirname(f.root), `${basename(f.root)}-sibling`); mkdirSync(sibling); roots.push(sibling)
+    const alias = join(f.root, 'outside-alias'); symlinkSync(outside.root, alias)
+    await expect(canonicalizeRepositoryTarget(f.root, `${join(f.root, 'src')}${sep}..`)).rejects.toMatchObject({ code: 'repository-target-invalid' })
+    expect(f.subprocess.specs).toHaveLength(0)
+    for (const escaped of [alias, sibling, outside.root]) {
+      const target = await canonicalizeRepositoryTarget(f.root, escaped)
+      const discoveryStart = f.subprocess.specs.length
+      await expect(discoverContainedRepository(f.ctx, 'git', target, commandOptions)).rejects.toMatchObject({ code: 'repository-target-outside-parent' })
+      expect(f.subprocess.specs.slice(discoveryStart).every(spec => spec.cwd === f.root)).toBe(true)
+    }
+    const nested = join(f.root, 'nested'); mkdirSync(nested); execFileSync('git', ['init', '-q', nested])
+    const nestedTarget = await canonicalizeRepositoryTarget(f.root, nested)
+    const nestedDiscoveryStart = f.subprocess.specs.length
+    await expect(discoverContainedRepository(f.ctx, 'git', nestedTarget, commandOptions)).rejects.toMatchObject({ code: 'repository-target-nested' })
+    expect(f.subprocess.specs.slice(nestedDiscoveryStart).every(spec => spec.cwd === f.root)).toBe(true)
+    const metadataTarget = await canonicalizeRepositoryTarget(f.root, join(f.root, '.git'))
+    const metadataDiscoveryStart = f.subprocess.specs.length
+    await expect(discoverContainedRepository(f.ctx, 'git', metadataTarget, commandOptions)).rejects.toMatchObject({ code: 'repository-target-nested' })
+    expect(f.subprocess.specs.slice(metadataDiscoveryStart).every(spec => spec.cwd === f.root)).toBe(true)
+    const linked = join(dirname(f.root), `${basename(f.root)}-linked`); roots.push(linked); execFileSync('git', ['-C', f.root, 'worktree', 'add', '--detach', linked])
+    const linkedTarget = await canonicalizeRepositoryTarget(f.root, linked)
+    const linkedDiscoveryStart = f.subprocess.specs.length
+    await expect(discoverContainedRepository(f.ctx, 'git', linkedTarget, commandOptions)).rejects.toMatchObject({ code: 'repository-target-outside-parent' })
+    expect(f.subprocess.specs.slice(linkedDiscoveryStart).every(spec => spec.cwd === f.root)).toBe(true)
   })
 
   it('resolves the configured executable through the provider and makes host controls non-overridable', async () => {

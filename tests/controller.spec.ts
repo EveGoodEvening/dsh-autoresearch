@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { execFileSync, spawn } from 'node:child_process'
 import { DatabaseSync } from 'node:sqlite'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
@@ -424,6 +424,35 @@ describe('controller real Git/SQLite outcomes', () => {
       await controller.dispose()
       rmSync(f.root, { recursive: true, force: true })
     }
+  })
+
+  it('rejects fresh external and symlink-escape targets before target effects', async () => {
+    const f = controllerFixture([{ stdout: '{"score":1}\n' }]); const external = controllerFixture([{ stdout: '{"score":1}\n' }]); const alias = join(f.root, 'external-alias'); symlinkSync(external.root, alias)
+    try {
+      for (const repository of [external.root, alias]) {
+        const discoveryStart = f.subprocess.specs.length
+        const controller = createCaseController(f, { repository })
+        await expect(controller.run()).rejects.toMatchObject({ code: 'repository-target-outside-parent' })
+        await expect(controller.ready).rejects.toMatchObject({ code: 'repository-target-outside-parent' })
+        expect(f.subprocess.specs.slice(discoveryStart).every(spec => spec.cwd === f.root)).toBe(true)
+        expect(f.creates).toHaveLength(0)
+        expect(existsSync(join(external.root, '.git', '.autoresearch-test'))).toBe(false)
+      }
+    } finally { rmSync(f.root, { recursive: true, force: true }); rmSync(external.root, { recursive: true, force: true }) }
+  })
+
+  it('applies the same containment before resume tracker access', async () => {
+    const f = controllerFixture([{ stdout: '{"score":1}\n' }]); const external = controllerFixture([{ stdout: '{"score":1}\n' }])
+    try {
+      const first = createCaseController(f, { max_experiments: 1, target: 1 }); const ready = await first.prepare(); await first.dispose()
+      const trackerBytes = readFileSync(ready.tracker); const discoveryStart = f.subprocess.specs.length; const creates = f.creates.length
+      const resumed = createCaseController(f, { repository: external.root }, ready.runId)
+      await expect(resumed.run()).rejects.toMatchObject({ code: 'repository-target-outside-parent' })
+      expect(readFileSync(ready.tracker)).toEqual(trackerBytes)
+      expect(f.subprocess.specs.slice(discoveryStart).every(spec => spec.cwd === f.root)).toBe(true)
+      expect(f.creates).toHaveLength(creates)
+      expect(existsSync(join(external.root, '.git', '.autoresearch-test'))).toBe(false)
+    } finally { rmSync(f.root, { recursive: true, force: true }); rmSync(external.root, { recursive: true, force: true }) }
   })
 
   it('blocks terminal resume on corrupt durable registration before spawn or mutation', async () => {

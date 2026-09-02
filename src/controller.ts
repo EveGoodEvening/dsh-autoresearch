@@ -7,7 +7,7 @@ import { normalizeRunPolicy, type HostEvaluatorRegistration, type ResolvedConfig
 import { createEvaluatorArtifactWriterFactory } from './evaluator-artifacts.js'
 import { captureFrozenFileAttempt, createEvaluatorBoundary, evaluatorEvaluationSha256, freezeEvaluatorProvenanceFromManifest, FrozenEvaluatorBoundaryError, recomputeRegistrationManifest, revalidateEvaluatorBoundary, revalidateFrozenFileAttempt, runEvaluator, type FrozenEvaluatorProvenance } from './evaluator.js'
 import {
-  acquireControllerClaim, acquireRunLock, allocateRunWorktree, checkoutCandidateForEvaluation, commitCandidate, currentControllerProcessIdentity, deriveRegistrationManifestAtStartCommit, discoverRepository, durableGitIdentity,
+  acquireControllerClaim, acquireRunLock, allocateRunWorktree, canonicalizeRepositoryTarget, checkoutCandidateForEvaluation, commitCandidate, currentControllerProcessIdentity, deriveRegistrationManifestAtStartCommit, discoverContainedRepository, durableGitIdentity,
   GitBoundaryError, heartbeatControllerClaim, makeRunGitIdentity, reconcileAcceptedHead, reconcileRejectedHead, recoverTerminalRunLock, recoverTerminalRunLockUnderControllerClaim, releaseControllerClaim, rollbackRunActivationAuthority,
   removeRunWorktree, resolveGitExecutable, restoreAcceptedWorktree, runGit, snapshotCandidate, validateCandidate, validateFrozenCandidatePaths,
   verifyExactWorktree, type CandidateSnapshot, type ControllerProcessIdentity, type GitCommandOptions, type GitConfigBaseline,
@@ -145,8 +145,9 @@ export class AutoresearchRunController {
       const provisionalTimeout = this.options.input.timeout_ms ?? this.options.config.defaultTimeoutMs
       if (!Number.isSafeInteger(provisionalTimeout) || provisionalTimeout < 1 || provisionalTimeout > this.options.config.maxTimeoutMs) throw new TypeError('timeout_ms exceeds deployment maximum')
       const gitOptions = { timeoutMs: provisionalTimeout, graceMs: this.options.config.terminationGraceMs, maxStdoutBytes: this.options.config.maxStdoutBytes, maxStderrBytes: this.options.config.maxStderrBytes }
+      const requestedTarget = await canonicalizeRepositoryTarget(callerCwd, this.options.input.repository)
       const gitExecutable = await resolveGitExecutable(this.ctx, this.options.config.gitExecutable, this.aborter.signal)
-      let discovery = await discoverRepository(this.ctx, gitExecutable, this.options.input.repository ?? callerCwd, { ...gitOptions, signal: this.aborter.signal })
+      let discovery = await discoverContainedRepository(this.ctx, gitExecutable, requestedTarget, { ...gitOptions, signal: this.aborter.signal })
       const runId = resumeRunId ?? randomUUID()
       if (!isResume) sweepRepositoryRetention(discovery.gitCommonDir, this.options.config.stateRoot, this.options.config, runId)
       const trackerPath = join(discovery.gitCommonDir, this.options.config.stateRoot, 'runs', runId, 'tracker.sqlite')

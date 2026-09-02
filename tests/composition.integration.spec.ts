@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process'
 import { readdirSync } from 'node:fs'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
@@ -182,6 +182,32 @@ describe('real Loader/profile production composition', () => {
       const output = await execute(harness, 'job_output', { job_id: jobId, wait: true, timeout_ms: 20_000 }, parent.agent)
       expect(output.isError).toBe(false)
       expect(JSON.parse((output.value as { text: string }).text)).toMatchObject({ best: { metric: 1 }, status: 'round-failed' })
+    } finally { await parent.dispose() }
+  }, 30_000)
+
+  it.each(['foreground', 'background'] as const)('rejects %s cross-repository and symlink-alias targets without target-side state', async mode => {
+    const harness = await composeHarness(); active.push(harness)
+    const ownerRoot = join(harness.root, 'owner'); const externalRoot = join(harness.root, 'external'); await mkdir(ownerRoot); await mkdir(externalRoot)
+    const ownerRepository = await repository(ownerRoot)
+    const externalRepository = await repository(externalRoot)
+    const alias = join(ownerRepository, 'external-alias'); await symlink(externalRepository, alias)
+    const parent = await parentAgent(harness, ownerRepository, `containment-${mode}`)
+    try {
+      for (const target of [externalRepository, alias]) {
+        const result = await execute(harness, 'autoresearch', request(target, mode), parent.agent)
+        if (mode === 'foreground') {
+          expect(result.isError).toBe(true)
+          expect(result.error).toMatchObject({
+            message: 'Repository target is outside the parent Agent repository workspace',
+          })
+        } else {
+          expect(result.isError).toBe(false)
+          const output = await execute(harness, 'job_output', { job_id: stringProperty(result.value, 'jobId'), wait: true, timeout_ms: 20_000 }, parent.agent)
+          expect(output.isError).toBe(false)
+          expect(stringProperty(output.value, 'text')).toMatch(/outside the parent Agent repository workspace/)
+        }
+        expect(persistedBackgroundJobIds(externalRepository)).toEqual([])
+      }
     } finally { await parent.dispose() }
   }, 30_000)
 
