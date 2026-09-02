@@ -218,7 +218,6 @@ export function apply(ctx: Context, config: AutoresearchConfig = {}): void {
       } catch (error) {
         exec.signal.removeEventListener('abort', abortStartup)
         const startupCancelled = cancelled || exec.signal.aborted
-        cancelled = true
         cancelReason = reason(error)
         if (controller && !cancellationApplied) {
           controller.cancel(cancelReason)

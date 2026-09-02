@@ -343,6 +343,20 @@ describe('autoresearch production wiring', () => {
     expect(state.controllers).toHaveLength(0)
   })
 
+  it('settles rejecting preparation as failed while still cleaning up the controller', async () => {
+    const preparationFailure = new Error('controller preparation failed')
+    state.preparePromise = Promise.reject(preparationFailure)
+    const test = harness()
+
+    await expect(test.tool.execute(input, execution())).resolves.toMatchObject({
+      kind: 'background-start-failed', jobId: 'autoresearch-1', status: 'failed', reason: preparationFailure.message,
+    })
+    expect(state.controllers[0]?.run).not.toHaveBeenCalled()
+    expect(state.controllers[0]?.cancel).toHaveBeenCalledWith(preparationFailure.message)
+    await expect(test.hooks?.done).resolves.toMatchObject({ status: 'failed', detail: preparationFailure.message })
+    expect(state.controllers[0]?.dispose).toHaveBeenCalledOnce()
+  })
+
   it('settles partial registration without executing a controller when start throws after run()', async () => {
     state.throwAfterRun = true
     const test = harness()
@@ -351,7 +365,7 @@ describe('autoresearch production wiring', () => {
     expect(state.controllers[0]?.prepare).not.toHaveBeenCalled()
     expect(state.controllers[0]?.run).not.toHaveBeenCalled()
     expect(state.controllers[0]?.dispose).toHaveBeenCalledOnce()
-    await expect(test.hooks?.done).resolves.toMatchObject({ status: 'killed' })
+    await expect(test.hooks?.done).resolves.toMatchObject({ status: 'failed' })
   })
 
   it('uses synchronous idempotent cancellation and maps settled cancellation to killed', async () => {
