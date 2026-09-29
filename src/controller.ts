@@ -55,7 +55,7 @@ export async function preflightAutoresearchRepository(ctx: Context, options: Pic
   const callerCwd = String(options.parent.session.header.cwd)
   const timeoutMs = options.input.timeout_ms ?? options.config.defaultTimeoutMs
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > options.config.maxTimeoutMs) throw new TypeError('timeout_ms exceeds deployment maximum')
-  const gitOptions = { timeoutMs, graceMs: options.config.terminationGraceMs, maxStdoutBytes: options.config.maxStdoutBytes, maxStderrBytes: options.config.maxStderrBytes }
+  const gitOptions = { timeoutMs: options.config.gitTimeoutMs, graceMs: options.config.terminationGraceMs, maxStdoutBytes: options.config.gitMaxStdoutBytes, maxStderrBytes: options.config.gitMaxStderrBytes }
   const requestedTarget = await canonicalizeRepositoryTarget(callerCwd, options.input.repository)
   const gitExecutable = await resolveGitExecutable(ctx, options.config.gitExecutable, options.signal)
   const discovery = await discoverContainedRepository(ctx, gitExecutable, requestedTarget, { ...gitOptions, signal: options.signal })

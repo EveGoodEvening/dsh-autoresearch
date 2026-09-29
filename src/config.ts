@@ -30,6 +30,9 @@ export interface Config {
   model?: string
   maxTokens?: number
   gitExecutable?: string
+  gitTimeoutMs?: number
+  gitMaxStdoutBytes?: number
+  gitMaxStderrBytes?: number
   stateRoot?: string
   branchPrefix?: string
   defaultMaxExperiments?: number
@@ -56,6 +59,9 @@ export interface ResolvedConfig {
   readonly model?: string
   readonly maxTokens?: number
   readonly gitExecutable: string
+  readonly gitTimeoutMs: number
+  readonly gitMaxStdoutBytes: number
+  readonly gitMaxStderrBytes: number
   readonly stateRoot: string
   readonly branchPrefix: string
   readonly defaultMaxExperiments: number
@@ -79,6 +85,9 @@ export interface ResolvedConfig {
 
 export const DEFAULT_CONFIG: ResolvedConfig = deepFreeze({
   gitExecutable: 'git',
+  gitTimeoutMs: 900_000,
+  gitMaxStdoutBytes: 1_048_576,
+  gitMaxStderrBytes: 1_048_576,
   stateRoot: 'dsh-autoresearch',
   branchPrefix: 'autoresearch/',
   defaultMaxExperiments: 20,
@@ -108,6 +117,9 @@ export const Config: z<Config> = z.object({
   model: z.string(),
   maxTokens: positive(),
   gitExecutable: z.string().default(DEFAULT_CONFIG.gitExecutable),
+  gitTimeoutMs: positive().default(DEFAULT_CONFIG.gitTimeoutMs),
+  gitMaxStdoutBytes: positive().default(DEFAULT_CONFIG.gitMaxStdoutBytes),
+  gitMaxStderrBytes: positive().default(DEFAULT_CONFIG.gitMaxStderrBytes),
   stateRoot: z.string().default(DEFAULT_CONFIG.stateRoot),
   branchPrefix: z.string().default(DEFAULT_CONFIG.branchPrefix),
   defaultMaxExperiments: positive(),
@@ -146,6 +158,7 @@ export const Config: z<Config> = z.object({
 
 const CONFIG_KEYS = new Set([
   'provider', 'model', 'maxTokens', 'gitExecutable', 'stateRoot', 'branchPrefix',
+  'gitTimeoutMs', 'gitMaxStdoutBytes', 'gitMaxStderrBytes',
   'defaultMaxExperiments', 'maxExperiments', 'maxHandoffChars', 'maxResultChars',
   'maxStdoutBytes', 'maxStderrBytes', 'defaultTimeoutMs', 'maxTimeoutMs',
   'terminationGraceMs', 'maxActiveRunsPerRepository', 'artifactRetentionDays',
@@ -163,6 +176,9 @@ export function resolveConfig(config: Config = {}): ResolvedConfig {
     ...optionalText(config.model, 'model', 'model'),
     ...optionalPositive(config.maxTokens, 'maxTokens', 'maxTokens'),
     gitExecutable: normalizedText(config.gitExecutable ?? DEFAULT_CONFIG.gitExecutable, 'gitExecutable'),
+    gitTimeoutMs: positiveInteger(config.gitTimeoutMs ?? DEFAULT_CONFIG.gitTimeoutMs, 'gitTimeoutMs'),
+    gitMaxStdoutBytes: positiveInteger(config.gitMaxStdoutBytes ?? DEFAULT_CONFIG.gitMaxStdoutBytes, 'gitMaxStdoutBytes'),
+    gitMaxStderrBytes: positiveInteger(config.gitMaxStderrBytes ?? DEFAULT_CONFIG.gitMaxStderrBytes, 'gitMaxStderrBytes'),
     stateRoot: safeRelativePath(config.stateRoot ?? DEFAULT_CONFIG.stateRoot, 'stateRoot'),
     branchPrefix: branchPrefix(config.branchPrefix ?? DEFAULT_CONFIG.branchPrefix),
     defaultMaxExperiments: positiveInteger(config.defaultMaxExperiments ?? Math.min(DEFAULT_CONFIG.defaultMaxExperiments, maxExperiments), 'defaultMaxExperiments'),

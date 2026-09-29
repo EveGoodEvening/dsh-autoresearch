@@ -2092,18 +2092,67 @@ describe('controller real Git/SQLite outcomes', () => {
     } finally { rmSync(f.root, { recursive: true, force: true }) }
   })
 
+  it('discovers and reconciles a real repository with a one-millisecond evaluator watchdog', async () => {
+    const f = controllerFixture([{ hang: true }])
+    const callerHead = execFileSync('git', ['-C', f.root, 'rev-parse', 'HEAD']).toString().trim()
+    try {
+      const first = await runControllerCase(f, { timeout_ms: 1 })
+      expect(first.result).toMatchObject({ status: 'baseline-blocked', exit: { timedOut: true } })
+      first.tracker.close()
+      const resumed = await createCaseController(f, { timeout_ms: 1 }, first.ready.runId).run()
+      expect(resumed).toEqual(first.result)
+      expect(execFileSync('git', ['-C', f.root, 'rev-parse', 'HEAD']).toString().trim()).toBe(callerHead)
+      expect(execFileSync('git', ['-C', f.root, 'status', '--porcelain']).toString()).toBe('')
+    } finally { rmSync(f.root, { recursive: true, force: true }) }
+  })
+
+  it('commits and resumes candidates with tiny evaluator output budgets without limiting Git', async () => {
+    const f = controllerFixture([{ stdout: '{"score":10}\n' }, { stdout: '{"score":9}\n' }], [worktree => writeFileSync(join(worktree, 'src', 'code.ts'), 'export const n = 2\n')])
+    const callerHead = execFileSync('git', ['-C', f.root, 'rev-parse', 'HEAD']).toString().trim()
+    const budgets = { maxStdoutBytes: 16, maxStderrBytes: 1 }
+    try {
+      const first = await runControllerCase(f, { max_experiments: 1 }, budgets)
+      expect(first.result).toMatchObject({ status: 'budget-limited', best: { metric: 9 }, counts: { experimentsCompleted: 1, attempts: 2 } })
+      if (first.result.status !== 'budget-limited') throw new Error('expected completed candidate budget')
+      expect(first.result.best?.commit).not.toBe(callerHead)
+      first.tracker.close()
+      expect(await createCaseController(f, {}, first.ready.runId, budgets).run()).toEqual(first.result)
+      expect(execFileSync('git', ['-C', f.root, 'rev-parse', 'HEAD']).toString().trim()).toBe(callerHead)
+      expect(execFileSync('git', ['-C', f.root, 'status', '--porcelain']).toString()).toBe('')
+    } finally { rmSync(f.root, { recursive: true, force: true }) }
+  })
+
+  it('still blocks actual evaluator output exceeding its independent cap', async () => {
+    const f = controllerFixture([{ stdout: '{"score":10}\n' }])
+    try {
+      const { result, tracker } = await runControllerCase(f, {}, { maxStdoutBytes: 1, maxStderrBytes: 1 })
+      expect(result).toMatchObject({ status: 'baseline-blocked' })
+      expect(f.subprocess.evaluatorSpawns).toBe(1)
+      expect(f.creates).toHaveLength(0)
+      expect(tracker.database.prepare('SELECT state FROM experiments').get()?.['state']).toBe('crashed')
+      tracker.close()
+    } finally { rmSync(f.root, { recursive: true, force: true }) }
+  })
+
+  it('fails real discovery honestly when the Host Git stdout budget is too small', async () => {
+    const f = controllerFixture([{ stdout: '{"score":10}\n' }])
+    try {
+      const controller = createCaseController(f, {}, undefined, { gitMaxStdoutBytes: 1 })
+      await expect(controller.run()).rejects.toMatchObject({ code: 'git-output-limit' })
+      await expect(controller.ready).rejects.toMatchObject({ code: 'git-output-limit' })
+      expect(f.subprocess.evaluatorSpawns).toBe(0)
+      expect(f.creates).toHaveLength(0)
+    } finally { rmSync(f.root, { recursive: true, force: true }) }
+  })
+
   it('classifies a real evaluator timeout, awaits process-tree exit, retains artifacts, and spawns no child', async () => {
     const markers = { stdout: 'evaluator-started-out\n', stderr: 'evaluator-started-err\n' }
     const f = controllerFixture([{ hang: true, ...markers }])
     try {
       const config = resolveConfig({ stateRoot: '.autoresearch-test', cleanupWorktreesOnSuccess: false, retainWorktrees: true, exportTsv: false, evaluatorRegistrations: [evaluatorRegistration] })
       const signal = new AbortController().signal
-      // Discover the actual repository with a Git deadline independent of the evaluator watchdog.
-      const repositoryPreflight = await preflightAutoresearchRepository(f.ctx, {
-        config, input: { ...input, repository: f.root, timeout_ms: 30_000 }, parent: f.parent, signal,
-      })
       const controller = new AutoresearchRunController(f.ctx, {
-        config, input: { ...input, repository: f.root, timeout_ms: 1_000 }, parent: f.parent, signal, repositoryPreflight,
+        config, input: { ...input, repository: f.root, timeout_ms: 1_000 }, parent: f.parent, signal,
       })
       const result = await controller.run()
       const ready = await controller.ready

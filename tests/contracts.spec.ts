@@ -206,6 +206,17 @@ describe('configuration and policy normalization', () => {
     expect(DEFAULT_CONFIG.evaluatorRegistry.registrations).toEqual([])
   })
 
+  it.each(['gitTimeoutMs', 'gitMaxStdoutBytes', 'gitMaxStderrBytes'] as const)('rejects invalid Host %s budgets at loader and runtime boundaries', key => {
+    for (const value of [0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, '1']) {
+      expect(() => resolveConfig({ [key]: value } as never)).toThrow()
+      expect(() => Config({ [key]: value } as never)).toThrow()
+    }
+    expect(resolveConfig({ [key]: 1 })[key]).toBe(1)
+    expect(resolveConfig({ [key]: Number.MAX_SAFE_INTEGER })[key]).toBe(Number.MAX_SAFE_INTEGER)
+    expect(Config({ [key]: 1 })[key]).toBe(1)
+    expect(Config({ [key]: Number.MAX_SAFE_INTEGER })[key]).toBe(Number.MAX_SAFE_INTEGER)
+  })
+
   it.each(['subagentProvider', 'resultsFile'] as const)('rejects removed deployment key %s', (key) => {
     expect(() => resolveConfig({ [key]: 'legacy-value' } as never)).toThrow(`Config: unknown key "${key}"`)
   })
@@ -300,7 +311,11 @@ describe('configuration and policy normalization', () => {
     expect(decodeActivationToolInput({ ...common, resume_run_id: durableRunId })).not.toHaveProperty('evaluator_id')
     for (const evaluatorId of ['matching', 'mismatching', 'unknown']) expect(() => decodeActivationToolInput({ ...common, resume_run_id: durableRunId, evaluator_id: evaluatorId })).toThrow(/unknown key "evaluator_id"/)
     for (const unsafe of ['run-1', '../escape', '/absolute', 'nested/component', 'nested\\component', '00000000-0000-4000-0000-000000000000']) expect(() => decodeActivationToolInput({ ...common, resume_run_id: unsafe })).toThrow(/canonical UUID v4/)
-    for (const key of ['evaluation', 'metric_name', 'metric_direction', 'environment', 'provenance', 'exceptional_allowlists']) expect(() => decodeActivationToolInput({ ...common, run_tag: 'new', evaluator_id: 'judge', [key]: {} })).toThrow(new RegExp(`unknown key "${key}"`))
+    for (const key of ['evaluation', 'metric_name', 'metric_direction', 'environment', 'provenance', 'exceptional_allowlists', 'gitTimeoutMs', 'gitMaxStdoutBytes', 'gitMaxStderrBytes']) expect(() => decodeActivationToolInput({ ...common, run_tag: 'new', evaluator_id: 'judge', [key]: {} })).toThrow(new RegExp(`unknown key "${key}"`))
+    for (const key of ['gitTimeoutMs', 'gitMaxStdoutBytes', 'gitMaxStderrBytes']) {
+      expect(() => decodeActivationToolInput({ ...common, resume_run_id: durableRunId, [key]: 1 })).toThrow(new RegExp(`unknown key "${key}"`))
+      expect(ACTIVATION_AUTORESEARCH_TOOL_SCHEMA).not.toHaveProperty(key)
+    }
     expect(JSON.stringify(ACTIVATION_AUTORESEARCH_TOOL_SCHEMA)).not.toMatch(/evaluation|metric_name|metric_direction|environment|provenance|exceptional_allowlists/)
   })
 

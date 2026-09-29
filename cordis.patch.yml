@@ -3,6 +3,9 @@
       name: dsh-autoresearch
       config:
         gitExecutable: git
+        gitTimeoutMs: 900000
+        gitMaxStdoutBytes: 1048576
+        gitMaxStderrBytes: 1048576
         stateRoot: dsh-autoresearch
         branchPrefix: autoresearch/
         defaultMaxExperiments: 20
