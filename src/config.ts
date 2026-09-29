@@ -109,6 +109,9 @@ export const DEFAULT_CONFIG: ResolvedConfig = deepFreeze({
   evaluatorRegistry: createEvaluatorRegistry([]),
 })
 
+// Node timers clamp larger delays to 1 ms instead of preserving the requested timeout.
+const MAX_GIT_TIMEOUT_MS = 2_147_483_647
+
 const positive = () => z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER)
 
 /** Loader-time deployment schema. Independent defaults are explicit because patch rows replace whole configs. */
@@ -117,7 +120,7 @@ export const Config: z<Config> = z.object({
   model: z.string(),
   maxTokens: positive(),
   gitExecutable: z.string().default(DEFAULT_CONFIG.gitExecutable),
-  gitTimeoutMs: positive().default(DEFAULT_CONFIG.gitTimeoutMs),
+  gitTimeoutMs: z.number().step(1).min(1).max(MAX_GIT_TIMEOUT_MS).default(DEFAULT_CONFIG.gitTimeoutMs),
   gitMaxStdoutBytes: positive().default(DEFAULT_CONFIG.gitMaxStdoutBytes),
   gitMaxStderrBytes: positive().default(DEFAULT_CONFIG.gitMaxStderrBytes),
   stateRoot: z.string().default(DEFAULT_CONFIG.stateRoot),
@@ -176,7 +179,7 @@ export function resolveConfig(config: Config = {}): ResolvedConfig {
     ...optionalText(config.model, 'model', 'model'),
     ...optionalPositive(config.maxTokens, 'maxTokens', 'maxTokens'),
     gitExecutable: normalizedText(config.gitExecutable ?? DEFAULT_CONFIG.gitExecutable, 'gitExecutable'),
-    gitTimeoutMs: positiveInteger(config.gitTimeoutMs ?? DEFAULT_CONFIG.gitTimeoutMs, 'gitTimeoutMs'),
+    gitTimeoutMs: gitTimeout(config.gitTimeoutMs ?? DEFAULT_CONFIG.gitTimeoutMs),
     gitMaxStdoutBytes: positiveInteger(config.gitMaxStdoutBytes ?? DEFAULT_CONFIG.gitMaxStdoutBytes, 'gitMaxStdoutBytes'),
     gitMaxStderrBytes: positiveInteger(config.gitMaxStderrBytes ?? DEFAULT_CONFIG.gitMaxStderrBytes, 'gitMaxStderrBytes'),
     stateRoot: safeRelativePath(config.stateRoot ?? DEFAULT_CONFIG.stateRoot, 'stateRoot'),
@@ -310,6 +313,7 @@ function safeRelativePath(value: unknown, label: string): string { const result 
 function runTag(value: unknown): string { const result = normalizedText(value, 'run_tag'); if (!/^[a-z0-9][a-z0-9._-]*$/u.test(result) || result.endsWith('.') || result.includes('..')) throw new TypeError('run_tag must be lower-case Git-safe text'); return result }
 function branchPrefix(value: unknown): string { const result = normalizedText(value, 'branchPrefix'); if (!result.endsWith('/') || /[\s~^:?*[\\]/u.test(result) || result.includes('..')) throw new TypeError('branchPrefix must be a valid Git prefix ending in /'); return result }
 function positiveInteger(value: unknown, label: string): number { if (!Number.isSafeInteger(value) || (value as number) < 1) throw new TypeError(`${label} must be a positive safe integer`); return value as number }
+function gitTimeout(value: unknown): number { if (!Number.isInteger(value) || (value as number) < 1 || (value as number) > MAX_GIT_TIMEOUT_MS) throw new TypeError(`gitTimeoutMs must be an integer between 1 and ${MAX_GIT_TIMEOUT_MS}`); return value as number }
 function boolean(value: unknown, label: string): boolean { if (typeof value !== 'boolean') throw new TypeError(`${label} must be boolean`); return value }
 function optionalText(value: unknown, key: string, label: string): Record<string, string> { return value === undefined ? {} : { [key]: normalizedText(value, label) } }
 function optionalPositive(value: unknown, key: string, label: string): Record<string, number> { return value === undefined ? {} : { [key]: positiveInteger(value, label) } }

@@ -206,7 +206,7 @@ describe('configuration and policy normalization', () => {
     expect(DEFAULT_CONFIG.evaluatorRegistry.registrations).toEqual([])
   })
 
-  it.each(['gitTimeoutMs', 'gitMaxStdoutBytes', 'gitMaxStderrBytes'] as const)('rejects invalid Host %s budgets at loader and runtime boundaries', key => {
+  it.each(['gitMaxStdoutBytes', 'gitMaxStderrBytes'] as const)('rejects invalid Host %s budgets at loader and runtime boundaries', key => {
     for (const value of [0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, '1']) {
       expect(() => resolveConfig({ [key]: value } as never)).toThrow()
       expect(() => Config({ [key]: value } as never)).toThrow()
@@ -215,6 +215,17 @@ describe('configuration and policy normalization', () => {
     expect(resolveConfig({ [key]: Number.MAX_SAFE_INTEGER })[key]).toBe(Number.MAX_SAFE_INTEGER)
     expect(Config({ [key]: 1 })[key]).toBe(1)
     expect(Config({ [key]: Number.MAX_SAFE_INTEGER })[key]).toBe(Number.MAX_SAFE_INTEGER)
+  })
+
+  it('limits Host Git timeouts to the Node timer range at loader and runtime boundaries', () => {
+    for (const value of [0, -1, 1.5, NaN, Infinity, 2_147_483_648, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER + 1, '1']) {
+      expect(() => resolveConfig({ gitTimeoutMs: value } as never)).toThrow('gitTimeoutMs must be an integer between 1 and 2147483647')
+      expect(() => Config({ gitTimeoutMs: value } as never)).toThrow()
+    }
+    for (const value of [1, 2_147_483_647]) {
+      expect(resolveConfig({ gitTimeoutMs: value }).gitTimeoutMs).toBe(value)
+      expect(Config({ gitTimeoutMs: value }).gitTimeoutMs).toBe(value)
+    }
   })
 
   it.each(['subagentProvider', 'resultsFile'] as const)('rejects removed deployment key %s', (key) => {
