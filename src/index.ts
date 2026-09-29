@@ -1,5 +1,5 @@
 import type { Context, Fiber } from '@deepseek-ai/cordis'
-import { JobId, type JobOutcome } from '@deepseek-ai/dsh-jobs'
+import type { JobOutcome } from '@deepseek-ai/dsh-jobs'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolCallView } from '@deepseek-ai/dsh-tools'
@@ -146,7 +146,7 @@ export function apply(ctx: Context, config: AutoresearchConfig = {}): void {
         exec.signal.removeEventListener('abort', abortStartup)
         return await startupAbort.promise as never
       }
-      // The owner's context survives producer HMR, but requires its own jobs injection.
+      // The owner's jobs-injected child scope survives producer HMR; keep its listener through owner teardown.
       let observer: Fiber | undefined
       let observing = false
       try {
@@ -155,7 +155,12 @@ export function apply(ctx: Context, config: AutoresearchConfig = {}): void {
             if (event.type === 'settled' && event.job.id === jobId && event.job.owner === parent.id) registrySettled.resolve()
           })
           observing = true
-          return unsubscribe
+          // Cordis disposes yielded effects in reverse order, awaiting the barrier before unsubscribing.
+          // This also retains the listener when owner and Host effects unload concurrently.
+          return ownerCtx.effect(function* () {
+            yield unsubscribe
+            yield async () => { if (jobId && hooks) await registrySettled.promise }
+          }, 'autoresearch.registryObserver()')
         })
         await Promise.race([observer.await(), startupAbort.promise])
         if (!observing) throw new Error('owner job observer did not activate')
@@ -215,12 +220,9 @@ export function apply(ctx: Context, config: AutoresearchConfig = {}): void {
         jobId = String(id)
         const startedHooks = hooks
         if (startedHooks) {
-          const settled = startedHooks.done.then(async () => {
-            // A terminal projection may precede this callback (or the returned id).
-            // get is owner-fenced and does not mark settlement as awaited by the model.
-            const job = ctx.jobs.get(JobId(jobId), parent.id)
-            if (job.status === 'running' || job.status === 'stopping') await registrySettled.promise
-          }).finally(() => observer!.dispose())
+          // The owner's cleanup may drop the record immediately after the terminal event;
+          // its non-consuming event, not a later get(), is the registry-commit authority.
+          const settled = startedHooks.done.then(() => registrySettled.promise).finally(() => observer!.dispose())
           activeJobs.add(settled)
           void settled.then(() => activeJobs.delete(settled), () => undefined)
         } else {

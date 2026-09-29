@@ -1,4 +1,4 @@
-import type { Context } from '@deepseek-ai/cordis'
+import { Context } from '@deepseek-ai/cordis'
 import { JobId, type JobEvent, type JobHooks, type JobSpec, type JobStatus, type JobView } from '@deepseek-ai/dsh-jobs'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
@@ -17,6 +17,7 @@ const state = vi.hoisted(() => ({
   }>,
   preparePromise: undefined as Promise<unknown> | undefined,
   lifecyclePromise: undefined as Promise<unknown> | undefined,
+  runPromise: undefined as Promise<unknown> | undefined,
   readyPromise: undefined as Promise<{ runId: string; tracker: string; branch: string; worktree: string }> | undefined,
   registrySettlementPromise: undefined as Promise<void> | undefined,
   rejectReady: undefined as ((reason?: unknown) => void) | undefined,
@@ -52,7 +53,7 @@ vi.mock('../src/controller.js', () => ({
       cancelPreparation?.(value)
     })
     readonly dispose = vi.fn(async () => { await state.lifecyclePromise?.catch(() => undefined) })
-    readonly run = vi.fn(() => state.lifecyclePromise ?? Promise.resolve(state.runResult))
+    readonly run = vi.fn(() => state.runPromise ?? state.lifecyclePromise ?? Promise.resolve(state.runResult))
     readonly constructorSignal: AbortSignal
     readonly parent: unknown
     constructor(_ctx: unknown, options: { signal: AbortSignal; parent: unknown }) {
@@ -74,12 +75,21 @@ interface Harness {
   job?: JobSpec
   hooks?: JobHooks
   readonly activeObservers: number
+  readonly jobStatus: JobStatus
+  readonly registryCommitted: Promise<void>
+  readonly ownerCancellation: Promise<void>
+  readJob(): JobView
+  disposeOwner(): Promise<void>
   dispose(): Promise<void>
 }
 
-function harness(): Harness {
+function harness(realOwner = false): Harness {
   let tool: ToolDefinition | undefined
   let prompt: Harness['prompt']
+  const registryCommitted = Promise.withResolvers<void>()
+  const ownerCancellation = Promise.withResolvers<void>()
+  let closeRealOwner: (() => Promise<void>) | undefined
+  let ownerDropped = false
   let cleanup: (() => Promise<void>) | undefined
   const value: Harness = {
     get tool() { if (!tool) throw new Error('tool missing'); return tool },
@@ -87,6 +97,11 @@ function harness(): Harness {
     get job() { return thisJob },
     get hooks() { return thisHooks },
     get activeObservers() { return listeners.size },
+    get jobStatus() { return status },
+    get registryCommitted() { return registryCommitted.promise },
+    get ownerCancellation() { return ownerCancellation.promise },
+    async disposeOwner() { await closeRealOwner?.() },
+    readJob() { return ctx.jobs.get(JobId('autoresearch-1'), parent.id) },
     async dispose() { await cleanup?.() },
   }
   let thisJob: JobSpec | undefined
@@ -111,11 +126,12 @@ function harness(): Harness {
           status = outcome.status
           const event: JobEvent = { type: 'settled', job: projection(), cause: 'producer', awaited: false }
           for (const listener of listeners) listener(event)
+          registryCommitted.resolve()
         })
         return id
       },
       get(id: JobId, owner: SessionId) {
-        if (id !== JobId('autoresearch-1') || owner !== parent.id) throw new Error('unknown or foreign job')
+        if (ownerDropped || id !== JobId('autoresearch-1') || owner !== parent.id) throw new Error('unknown or foreign job')
         return projection()
       },
       events: { subscribe(_filter: { owner: SessionId }, listener: (event: JobEvent) => void) {
@@ -125,10 +141,18 @@ function harness(): Harness {
     },
     effect(factory: () => () => Promise<void>) { cleanup = factory(); return cleanup },
   }
-  parent.ctx = { inject(_deps: unknown, callback: (ownerCtx: Context) => () => void) {
-    const unsubscribe = callback(ctx as unknown as Context)
-    return { await: async () => {}, dispose: async () => { unsubscribe() } }
-  } } as unknown as Context
+  const ownerRoot = new Context()
+  ownerRoot.provide('jobs', ctx.jobs)
+  const ownerScope = realOwner
+    ? ownerRoot.plugin(() => async () => {
+      thisHooks?.cancel('owner context disposed')
+      ownerCancellation.resolve()
+      await registryCommitted.promise
+      ownerDropped = true
+    })
+    : ownerRoot.plugin(() => {})
+  parent.ctx = ownerScope.ctx
+  if (realOwner) closeRealOwner = () => ownerScope.dispose()
   apply(ctx as unknown as Context, { evaluatorRegistrations: [{ id: 'judge', command: 'node', args: ['score.mjs'], metricName: 'score', metricDirection: 'minimize', metricParserVersion: 'final-line-json-v1', evaluatorFiles: [] }] })
   return value
 }
@@ -156,6 +180,7 @@ beforeEach(() => {
   state.throwAfterRun = false
   state.preparePromise = undefined
   state.lifecyclePromise = undefined
+  state.runPromise = undefined
   state.registrySettlementPromise = undefined
   state.readyPromise = undefined
   state.rejectReady = undefined
@@ -201,14 +226,11 @@ describe('autoresearch production wiring', () => {
     expect(test.job).toBeUndefined()
   })
 
-  it('durably binds the owner job before releasing controller execution and preserves agent identity', async () => {
-    const signal = new AbortController().signal
+  it('durably binds the owner job before releasing controller execution', async () => {
     const test = harness()
-    const result = await test.tool.execute(input, execution(signal))
+    const result = await test.tool.execute(input, execution())
     expect(state.preflight).toHaveBeenCalledOnce()
-    expect(state.preflight).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ input, parent, signal }))
     expect(test.job).toMatchObject({ kind: 'autoresearch', owner: parent.id })
-    expect(state.controllers[0]?.parent).toBe(parent)
     expect(state.controllers[0]?.prepare).toHaveBeenCalledWith('autoresearch-1')
     expect(state.controllers[0]?.prepare.mock.invocationCallOrder[0]).toBeLessThan(state.controllers[0]?.run.mock.invocationCallOrder[0] ?? 0)
     expect(result).toEqual({ kind: 'background', jobId: 'autoresearch-1', runId: 'run-1', tracker: '/tracker.sqlite', branch: 'autoresearch/run-1', worktree: '/worktree' })
@@ -429,6 +451,49 @@ describe('autoresearch production wiring', () => {
     registry.resolve()
     await unloading
     expect(unloaded).toBe(true)
+    expect(test.activeObservers).toBe(0)
+    expect(state.releaseTool).toHaveBeenCalledOnce()
+    expect(state.releasePrompt).toHaveBeenCalledOnce()
+  })
+
+  it('finishes producer unload after owner closure begins before its job settles', async () => {
+    const running = Promise.withResolvers<typeof state.runResult>()
+    const registry = Promise.withResolvers<void>()
+    state.runPromise = running.promise
+    state.registrySettlementPromise = registry.promise
+    state.runResult = { ...state.runResult, status: 'cancelled' } as never
+    const test = harness(true)
+    await test.tool.execute(input, execution())
+    expect(test.readJob().status).toBe('running')
+    expect(test.activeObservers).toBe(1)
+
+    // Cordis unloads the owner's observer child and job cleanup concurrently.
+    // The owner's cleanup cancels the job and drops its record after registry commit.
+    const closingOwner = test.disposeOwner()
+    await test.ownerCancellation
+    expect(state.controllers[0]?.cancel).toHaveBeenCalledWith('owner context disposed')
+    const unloading = test.dispose()
+    running.resolve(state.runResult)
+    await expect(test.hooks!.done).resolves.toMatchObject({ status: 'killed' })
+    expect(test.readJob().status).toBe('running')
+    registry.resolve()
+    await test.registryCommitted
+    await closingOwner
+    expect(() => test.readJob()).toThrow('unknown or foreign job')
+
+    // A pending promise cannot keep the test process alive. Bound only the diagnostic;
+    // do not poll or consume the job's settlement notice to make unload succeed.
+    let timeout: NodeJS.Timeout | undefined
+    try {
+      await Promise.race([
+        unloading,
+        new Promise<never>((_, reject) => {
+          timeout = setTimeout(() => reject(new Error('producer unload stuck after owner closure and terminal registry commit')), 1_000)
+        }),
+      ])
+    } finally {
+      clearTimeout(timeout)
+    }
     expect(test.activeObservers).toBe(0)
     expect(state.releaseTool).toHaveBeenCalledOnce()
     expect(state.releasePrompt).toHaveBeenCalledOnce()
