@@ -12,7 +12,7 @@ import { JobId, type JobEvent } from '@deepseek-ai/dsh-jobs'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import { afterEach, describe, expect, it } from 'vitest'
-import { COMPOSITION_TERMINATION_GRACE_MS, composeHarness, assembledPrompt, type RealHarness } from './fixtures/harness-composition.ts'
+import { COMPOSITION_TERMINATION_GRACE_MS, composeHarness, assembledPrompt, observeJobSettlement, type RealHarness } from './fixtures/harness-composition.ts'
 import { calls, holdModel, releaseModel } from './fixtures/loader/model-provider.ts'
 
 const run = promisify(execFile)
@@ -153,16 +153,18 @@ describe('real Loader/profile production composition', () => {
 
     const cwd = await repository(harness.root)
     const parent = await parentAgent(harness, cwd, 'web-standard', 'standard')
+    const terminal = observeJobSettlement(harness.ctx, parent.agent.id)
     try {
       expect(harness.ctx.tools.schemas(parent.agent).map(tool => tool.name)).toEqual(expect.arrayContaining(['autoresearch', 'job_output', 'job_list', 'job_kill']))
       const started = await execute(harness, 'autoresearch', request(cwd), parent.agent)
       expect(started.isError).toBe(false)
       expect(started.value).toMatchObject({ kind: 'background', jobId: expect.stringMatching(/^autoresearch-/) })
       const jobId = stringProperty(started.value, 'jobId')
-      const output = await execute(harness, 'job_output', { job_id: jobId, wait: true, timeout_ms: 20_000 }, parent.agent)
+      expect((await terminal.settled).job.id).toBe(jobId)
+      const output = await execute(harness, 'job_output', { job_id: jobId }, parent.agent)
       expect(output.isError).toBe(false)
       expect(JSON.parse(stringProperty(output.value, 'text'))).toMatchObject({ best: { metric: 1 }, status: 'round-failed' })
-    } finally { await parent.dispose() }
+    } finally { terminal.dispose(); await parent.dispose() }
   }, 30_000)
 
   it('boots and executes autoresearch when equivalent profile entry rows are deliberately reversed', async () => {
@@ -174,15 +176,17 @@ describe('real Loader/profile production composition', () => {
 
     const cwd = await repository(harness.root)
     const parent = await parentAgent(harness, cwd, 'reordered')
+    const terminal = observeJobSettlement(harness.ctx, parent.agent.id)
     try {
       const started = await execute(harness, 'autoresearch', request(cwd), parent.agent)
       expect(started.isError).toBe(false)
       expect(started.value).toMatchObject({ kind: 'background', jobId: expect.stringMatching(/^autoresearch-/) })
       const jobId = (started.value as { jobId: string }).jobId
-      const output = await execute(harness, 'job_output', { job_id: jobId, wait: true, timeout_ms: 20_000 }, parent.agent)
+      expect((await terminal.settled).job.id).toBe(jobId)
+      const output = await execute(harness, 'job_output', { job_id: jobId }, parent.agent)
       expect(output.isError).toBe(false)
       expect(JSON.parse((output.value as { text: string }).text)).toMatchObject({ best: { metric: 1 }, status: 'round-failed' })
-    } finally { await parent.dispose() }
+    } finally { terminal.dispose(); await parent.dispose() }
   }, 30_000)
 
   it.each(['foreground', 'background'] as const)('rejects %s external, symlink, nested, and linked-worktree targets without registering a job or creating target-side state', async mode => {
@@ -296,6 +300,8 @@ describe('real Loader/profile production composition', () => {
     const parent = await parentAgent(harness, cwd)
     const created: Agent[] = []
     const release = harness.ctx.on('agent/created', ({ agent }) => { created.push(agent) })
+    const terminal = observeJobSettlement(harness.ctx, parent.agent.id)
+    holdModel()
     try {
       const started = await execute(harness, 'autoresearch', request(cwd), parent.agent)
       expect(started.isError).toBe(false)
@@ -309,7 +315,12 @@ describe('real Loader/profile production composition', () => {
 
       const listed = await execute(harness, 'job_list', {}, parent.agent)
       expect(listed.value).toEqual(expect.arrayContaining([expect.objectContaining({ id: value.jobId, kind: 'autoresearch' })]))
-      const output = await execute(harness, 'job_output', { job_id: value.jobId, wait: true, timeout_ms: 20_000 }, parent.agent)
+      const pendingOutput = await execute(harness, 'job_output', { job_id: value.jobId, wait: true, timeout_ms: 1 }, parent.agent)
+      expect(pendingOutput.isError).toBe(false)
+      expect(pendingOutput.value).toMatchObject({ text: '', job: { id: value.jobId, status: 'running' } })
+      releaseModel()
+      expect((await terminal.settled).job.id).toBe(value.jobId)
+      const output = await execute(harness, 'job_output', { job_id: value.jobId }, parent.agent)
       expect(output.isError).toBe(false)
       const text = (output.value as { text: string }).text
       const completed = JSON.parse(text) as unknown
@@ -325,6 +336,8 @@ describe('real Loader/profile production composition', () => {
       expect(child).toBeDefined()
       expect(harness.ctx.agents.get(child!.id)).toBeUndefined()
     } finally {
+      releaseModel()
+      terminal.dispose()
       release()
       await parent.dispose()
     }

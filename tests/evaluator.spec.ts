@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process'
-import { lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
@@ -460,15 +460,24 @@ describe('host-owned evaluator execution', () => {
     const childPidPath = join(paths.root, 'child.pid')
     const script = [
       "const { spawn } = require('node:child_process')",
-      "const { writeFileSync } = require('node:fs')",
+      "const { writeFileSync, renameSync } = require('node:fs')",
       "process.on('SIGTERM', () => {})",
-      "const child = spawn(process.execPath, ['-e', \"process.on('SIGTERM',()=>{});setInterval(()=>{},1000)\"], { stdio: 'ignore' })",
-      `writeFileSync(${JSON.stringify(childPidPath)}, String(child.pid))`,
+      "const child = spawn(process.execPath, ['-e', \"process.on('SIGTERM',()=>{});process.send('ready');setInterval(()=>{},1000)\"], { stdio: ['ignore', 'ignore', 'ignore', 'ipc'] })",
+      `child.once('message', () => { writeFileSync(${JSON.stringify(`${childPidPath}.tmp`)}, String(child.pid)); renameSync(${JSON.stringify(`${childPidPath}.tmp`)}, ${JSON.stringify(childPidPath)}) })`,
       "setInterval(() => {}, 1000)",
     ].join(';')
     const controller = new AbortController()
     const durable = persistence()
+    let childPid: number | undefined
+    const persist = durable.persistAttemptOutcome
+    durable.persistAttemptOutcome = (...facts) => {
+      if (childPid !== undefined) expectProcessTerminatedNow(childPid)
+      persist(...facts)
+    }
     const evaluation = { command: process.execPath, args: ['-e', script], cwd: 'bench' }
+    // Advance only the watchdog clock after both real processes are ready. The
+    // separate unready case below proves the real startup deadline is not reset.
+    if (mode === 'timeout') vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
     const pending = runEvaluator({
       subprocess: new LocalSubprocess(), worktree: paths.root,
       boundary: createEvaluatorBoundary(paths.root, { evaluation, normalizedPolicySha256: 'b'.repeat(64) }),
@@ -476,15 +485,63 @@ describe('host-owned evaluator execution', () => {
       metricName: 'score', metricDirection: 'minimize', timeoutMs: mode === 'timeout' ? 150 : 5_000,
       terminationGraceMs: 30, maxStdoutBytes: 128, maxStderrBytes: 64,
       artifactWriterFactory: () => EvaluatorArtifactWriter.mint(StateLayout.open(paths.artifacts), 'run', 'experiment', mode), persistence: durable,
-      ...(mode === 'repeated-cancellation' ? { signal: controller.signal } : {}),
+      signal: controller.signal,
     })
-    while (!readFileExists(childPidPath)) await new Promise(resolve => setTimeout(resolve, 5))
-    const childPid = Number(readFileSync(childPidPath, 'utf8'))
-    if (mode === 'repeated-cancellation') { controller.abort(); controller.abort() }
-    const result = await pending
-    expect(result).toMatchObject({ kind: 'failed', code: mode === 'timeout' ? 'timeout' : 'cancelled', exit: { processTreeQuiescent: true } })
-    expect(durable.events.at(-1)).toBe('outcome')
-    await expectProcessTerminated(childPid)
+    let passed = false
+    try {
+      childPid = await waitForEvaluatorDescendant(childPidPath, pending)
+      if (childPid === undefined) throw new Error('evaluator settled before its descendant was ready; timeout must cover a started tree')
+      if (mode === 'timeout') {
+        await vi.advanceTimersByTimeAsync(150)
+        await vi.advanceTimersByTimeAsync(30)
+      } else { controller.abort(); controller.abort() }
+      const result = await pending
+      expect(result).toMatchObject({ kind: 'failed', code: mode === 'timeout' ? 'timeout' : 'cancelled', exit: { processTreeQuiescent: true } })
+      expect(durable.events.at(-1)).toBe('outcome')
+      await expectProcessTerminated(childPid)
+      passed = true
+    } finally {
+      controller.abort()
+      if (mode === 'timeout') await vi.runOnlyPendingTimersAsync()
+      await pending.catch(() => {})
+      if (mode === 'timeout') vi.useRealTimers()
+      if (!passed && childPid !== undefined) {
+        try { process.kill(childPid, 'SIGKILL') } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error
+        }
+      }
+    }
+  }, 10_000)
+
+  it('settles a timeout even when evaluator readiness never occurs', async () => {
+    const paths = fixture()
+    const childPidPath = join(paths.root, 'child.pid')
+    const evaluation = {
+      command: process.execPath,
+      args: ['-e', `setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(childPidPath)}, 'late'), 500)`],
+      cwd: 'bench',
+    }
+    const durable = persistence()
+    const controller = new AbortController()
+    const pending = runEvaluator({
+      subprocess: new LocalSubprocess(), worktree: paths.root,
+      boundary: createEvaluatorBoundary(paths.root, { evaluation, normalizedPolicySha256: 'b'.repeat(64) }),
+      evaluation, metricName: 'score', metricDirection: 'minimize', timeoutMs: 30,
+      terminationGraceMs: 30, maxStdoutBytes: 128, maxStderrBytes: 64,
+      artifactWriterFactory: () => EvaluatorArtifactWriter.mint(StateLayout.open(paths.artifacts), 'run', 'experiment', 'unready'), persistence: durable,
+      signal: controller.signal,
+    })
+    try {
+      const childPid = await waitForEvaluatorDescendant(childPidPath, pending)
+      const result = await pending
+      expect(childPid).toBeUndefined()
+      expect(result).toMatchObject({ kind: 'failed', code: 'timeout', exit: { processTreeQuiescent: true } })
+      expect(durable.events.at(-1)).toBe('outcome')
+      expect(existsSync(childPidPath)).toBe(false)
+    } finally {
+      controller.abort()
+      await pending.catch(() => {})
+    }
   }, 10_000)
 
   it('rejects lossy stdout as non-authoritative while persisting its bounded tail', async () => {
@@ -893,9 +950,40 @@ describe('host-owned evaluator execution', () => {
   })
 })
 
-function readFileExists(path: string): boolean {
-  try { readFileSync(path); return true } catch { return false }
+async function waitForEvaluatorDescendant(path: string, pending: Promise<unknown>): Promise<number | undefined> {
+  let completed = false
+  void pending.then(() => { completed = true }, () => { completed = true })
+  return Promise.race([
+    pending.then(() => undefined),
+    (async () => {
+      while (!completed) {
+        try {
+          const value = readFileSync(path, 'utf8')
+          const pid = Number(value)
+          if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error(`invalid evaluator descendant pid: ${value}`)
+          return pid
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+        }
+        await delay(5)
+      }
+      return undefined
+    })(),
+  ])
 }
+
+function expectProcessTerminatedNow(pid: number): void {
+  try { process.kill(pid, 0) } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ESRCH') return
+    throw error
+  }
+  if (process.platform === 'linux') {
+    const state = readLinuxProcessState(pid)
+    if (state === undefined || state === 'Z') return
+  }
+  throw new Error(`evaluator descendant ${pid} was alive when its outcome was persisted`)
+}
+
 
 async function expectProcessTerminated(pid: number, timeoutMs = 2_000): Promise<void> {
   const deadline = Date.now() + timeoutMs
@@ -908,7 +996,7 @@ async function expectProcessTerminated(pid: number, timeoutMs = 2_000): Promise<
       throw error
     }
     linuxState = process.platform === 'linux' ? readLinuxProcessState(pid) : undefined
-    if (process.platform === 'linux' && linuxState === undefined) return
+    if (process.platform === 'linux' && (linuxState === undefined || linuxState === 'Z')) return
     await delay(10)
   } while (Date.now() < deadline)
 

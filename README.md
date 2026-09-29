@@ -15,14 +15,14 @@ The design is inspired by [Karpathy's `autoresearch`](https://github.com/karpath
 
 ## Requirements and compatibility
 
-| Component | `dsh-autoresearch@0.2.0` compatibility | Verified on 2026-09-29 |
+| Component | `dsh-autoresearch@0.2.1` compatibility | Verified on 2026-09-29 |
 | --- | --- | --- |
-| DeepSeek Harness CLI and DSH service peers | `@deepseek-ai/dsh@0.1.7-rc.2` and the exact `0.1.7-rc.2` service family pinned in `package.json` | `0.1.7-rc.2` (release baseline) |
+| DeepSeek Harness CLI and DSH service peers | `@deepseek-ai/dsh@0.2.0-rc.2` and the exact `0.2.0-rc.2` service family pinned in `package.json` | `0.2.0-rc.2` (CLI npm `latest` at verification) |
 | Cordis | Scoped fork `@deepseek-ai/cordis` peer `~4.0.4`, **not** unscoped `cordis` | `4.0.4` |
 | Node.js | `^22.19.0 || >=24.2.0` (`node:sqlite`; the DSH CLI uses `import.meta.main`) | `24.21.0`; other declared Node versions are not separately verified |
 | pnpm | `11.7.0` (`package.json` package manager) | `11.7.0` |
 
-This version targets a tested **prerelease DSH host** pairing, not every DSH release. A fresh registry lookup on 2026-09-29 resolves the CLI's npm `latest` tag to `0.2.0-rc.2`, which is **outside the current exact DSH peer pins**. The scheduled forward-compatibility probe below does not expand those published support ranges. The older `0.1.1-rc.2` Host family is no longer supported by this version. Repin the coordinated CLI/service family and retest the integration before claiming support for another DSH release; component dist-tags need not match the CLI's.
+This version targets a tested **prerelease DSH host** pairing, not every DSH release. The CLI's npm `latest` tag resolved to `0.2.0-rc.2` during verification on 2026-09-29. The previous `dsh-autoresearch@0.2.0` release targets the older `0.1.7-rc.2` Host family; this release moves the exact CLI/service peer pins together. The scheduled forward-compatibility probe below does not automatically expand published support ranges. Repin the coordinated family and retest before claiming support for another DSH release; component dist-tags need not match the CLI's.
 
 The Host must provide `agents`, `jobs`, `subprocess`, `systemPrompt`, and `tools`. Background mode additionally requires the calling Agent to mount `dsh-tool-jobs`; the Web `standard` Agent preset and the base/headless compositions do so. Host-global `job_*` tools are not required.
 
@@ -33,7 +33,7 @@ Automatic takeover of a controller claim left by abnormal Host death requires Li
 Install this version through DSH's profile plugin manager:
 
 ```sh
-dsh plugin --profile <name> add dsh-autoresearch@0.2.0
+dsh plugin --profile <name> add dsh-autoresearch@0.2.1
 dsh --profile <name> --dump-config
 ```
 
@@ -184,7 +184,9 @@ pnpm run release:smoke  # packed-artifact release verification
 
 Release verification exercises the packed artifact **outside** the checkout: inspect the allowlist, install without local links, import generated ESM/declarations, install/dump the real named dsh profile, and boot the actual Web profile long enough to fetch its HTML surface. The integration suite separately executes autoresearch through the Web `standard` Agent preset with owner-scoped `job_*` controls.
 
-The long-running evaluator fixture publishes its PID marker by atomic rename. HMR and cancellation checks must observe a complete PID before asserting process liveness; file creation alone is not a readiness barrier.
+The evaluator boundary tests publish atomic PID markers and race readiness against evaluator settlement: a process can time out before publishing a marker. The real-tree timeout test advances its watchdog only after both processes acknowledge readiness; a separate real-clock regression covers timeout before readiness. Descendant quiescence is checked at durable outcome publication. The long-running HMR evaluator also publishes its PID by atomic rename, so file creation cannot expose an empty marker.
+
+`job_output(wait: true)` waits only up to its requested bound and may return a running job with no final text. Integration consumers subscribe before starting the job, observe the non-consuming terminal event, and only then collect and decode its result; a held-model scenario verifies the intermediate empty/running response. WAL snapshot coverage still performs 20 snapshots against a live concurrent writer, but compares database bytes with native `Buffer.equals()` rather than a JavaScript deep-equality walk.
 
 Packing runs separately after the parallel test suite. `prepack` deletes and rebuilds `lib/`, so invoking `pnpm pack` from a concurrent test can break Loader imports even when the package was built before testing.
 

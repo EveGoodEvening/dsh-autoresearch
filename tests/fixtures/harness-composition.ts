@@ -5,6 +5,8 @@ import { dirname, join, relative } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { boot, composeEntries, createRuntimeResolution, initProfile, loadOverlayPatches, loadProfile, PluginPackages, writeProfileManifest } from '@deepseek-ai/dsh-app-boot'
 import type { Context } from '@deepseek-ai/cordis'
+import type { JobEvent } from '@deepseek-ai/dsh-jobs'
+import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { EntryOptions } from '@deepseek-ai/cordis-plugin-loader'
 import type { PatchOptions } from '@deepseek-ai/cordis-plugin-include'
 import type {} from '@deepseek-ai/dsh-hmr'
@@ -31,6 +33,16 @@ export interface RealHarness {
   dispose(): Promise<void>
   reloadAutoresearch(): Promise<void>
   setAutoresearchEnabled(enabled: boolean): Promise<void>
+}
+
+// Install before starting the owner's job. A bounded job_output wait can return
+// while the job is still running; only settlement makes its final result readable.
+export function observeJobSettlement(ctx: Context, owner: SessionId) {
+  const terminal = Promise.withResolvers<Extract<JobEvent, { type: 'settled' }>>()
+  const dispose = ctx.jobs.events.subscribe({ owner }, event => {
+    if (event.type === 'settled') terminal.resolve(event)
+  })
+  return { settled: terminal.promise, dispose }
 }
 
 function providerOverlay(): PatchOptions[] {

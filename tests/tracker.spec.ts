@@ -134,25 +134,29 @@ describe('durable SQLite tracker', () => {
     try {
       for (let index = 0; index < 20; index += 1) {
         const snapshot = DurableTracker.openReadOnly(path)
-        const rows = snapshot.database.prepare('SELECT updated_at FROM runs ORDER BY run_id').all() as { updated_at: string }[]
-        expect(rows).toHaveLength(2)
-        expect(rows[0]!.updated_at).toBe(rows[1]!.updated_at)
-        snapshot.close()
+        try {
+          const rows = snapshot.database.prepare('SELECT updated_at FROM runs ORDER BY run_id').all() as { updated_at: string }[]
+          expect(rows).toHaveLength(2)
+          expect(rows[0]!.updated_at).toBe(rows[1]!.updated_at)
+        } finally { snapshot.close() }
       }
     } finally {
+      const stopped = new Promise<void>((resolve, reject) => { writer.once('message', () => resolve()); writer.once('error', reject) })
       Atomics.store(new Int32Array(stop), 0, 1)
-      await new Promise<void>((resolve, reject) => { writer.once('message', () => resolve()); writer.once('error', reject) })
+      await stopped
     }
-    seed.database.exec('PRAGMA wal_checkpoint(PASSIVE)')
-    const sourceBefore = readFileSync(path)
-    const walBefore = existsSync(`${path}-wal`) ? readFileSync(`${path}-wal`) : null
-    const sidecarExistenceBefore = [`${path}-wal`, `${path}-shm`].map(existsSync)
-    const snapshot = DurableTracker.openReadOnly(path)
-    snapshot.close()
-    expect(readFileSync(path)).toEqual(sourceBefore)
-    expect(existsSync(`${path}-wal`) ? readFileSync(`${path}-wal`) : null).toEqual(walBefore)
-    expect([`${path}-wal`, `${path}-shm`].map(existsSync)).toEqual(sidecarExistenceBefore)
-    seed.close()
+    try {
+      seed.database.exec('PRAGMA wal_checkpoint(PASSIVE)')
+      const sourceBefore = readFileSync(path)
+      const walBefore = existsSync(`${path}-wal`) ? readFileSync(`${path}-wal`) : null
+      const sidecarExistenceBefore = [`${path}-wal`, `${path}-shm`].map(existsSync)
+      const snapshot = DurableTracker.openReadOnly(path)
+      snapshot.close()
+      // Compare bytes natively: deep Buffer equality walks every WAL byte in JS.
+      expect(readFileSync(path).equals(sourceBefore)).toBe(true)
+      expect(walBefore === null ? !existsSync(`${path}-wal`) : readFileSync(`${path}-wal`).equals(walBefore)).toBe(true)
+      expect([`${path}-wal`, `${path}-shm`].map(existsSync)).toEqual(sidecarExistenceBefore)
+    } finally { seed.close() }
   })
 
   it('bounds online-backup lock waits and classifies busy separately from invalid data', async () => {

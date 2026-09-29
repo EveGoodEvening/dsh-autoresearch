@@ -5,11 +5,10 @@ import { dirname, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { JobId } from '@deepseek-ai/dsh-jobs'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { describe, expect, it, vi } from 'vitest'
-import { composeHarness, packageRoot } from './fixtures/harness-composition.ts'
+import { composeHarness, observeJobSettlement, packageRoot } from './fixtures/harness-composition.ts'
 
 const evaluator = new URL('./fixtures/loader/evaluator.mjs', import.meta.url).pathname
 const descendantEvaluator = new URL('./fixtures/loader/evaluator-descendant-hold.mjs', import.meta.url).pathname
@@ -319,6 +318,7 @@ releaseDescribe('packed release scenarios', () => {
     try {
       const cwd = await repository(harness.root, 'background')
       const owner = await parent(harness.ctx, cwd)
+      const terminal = observeJobSettlement(harness.ctx, owner.agent.id)
       try {
         const args = request(cwd, 'release accepted candidate', 'background')
         const started = await execute(harness.ctx, owner.agent, args)
@@ -328,7 +328,8 @@ releaseDescribe('packed release scenarios', () => {
         expect(listed.isError).toBe(false)
         expect(listed.value).toEqual(expect.arrayContaining([expect.objectContaining({ id: started.jobId })]))
 
-        const output = await harness.ctx.tools.execute({ callId: ToolCallId('output'), name: 'job_output', arguments: { job_id: started.jobId, wait: true, timeout_ms: 20_000 }, agent: owner.agent, signal: new AbortController().signal })
+        expect((await terminal.settled).job).toMatchObject({ id: started.jobId, status: 'completed' })
+        const output = await harness.ctx.tools.execute({ callId: ToolCallId('output'), name: 'job_output', arguments: { job_id: started.jobId }, agent: owner.agent, signal: new AbortController().signal })
         expect(output.isError).toBe(false)
         const outputValue = output.value as unknown as { text: string }
         const completed = JSON.parse(outputValue.text) as ReleaseRun
@@ -353,6 +354,7 @@ releaseDescribe('packed release scenarios', () => {
           headAdvanced: advancedHead !== durable.run.start_commit, resumeCwdChanged: resumeCwd !== durable.run.caller_cwd,
         }
       } finally {
+        terminal.dispose()
         await owner.dispose()
       }
     } finally {
@@ -365,17 +367,19 @@ releaseDescribe('packed release scenarios', () => {
     const harness = await composeHarness({ autoresearchConfig: { evaluatorRegistrations: [{ id: 'judge', command: process.execPath, args: [descendantEvaluator, marker], metricName: 'score', metricDirection: 'minimize', metricParserVersion: 'final-line-json-v1', evaluatorFiles: [] }] } })
     try {
       const cwd = await repository(harness.root, 'interruption'); const owner = await parent(harness.ctx, cwd)
+      const terminal = observeJobSettlement(harness.ctx, owner.agent.id)
       try {
         const args = request(cwd, 'release interruption resume', 'background')
         const started = await execute(harness.ctx, owner.agent, args); await waitUntil(async () => { try { await readFile(marker); return true } catch { return false } }, 'descendant evaluator did not start')
         const pids = JSON.parse(await readFile(marker, 'utf8')) as { parent: number; child: number }
         const killed = await harness.ctx.tools.execute({ callId: ToolCallId('interrupt-kill'), name: 'job_kill', arguments: { job_id: started.jobId }, agent: owner.agent, signal: new AbortController().signal }); expect(killed.isError).toBe(false)
-        await harness.ctx.jobs.wait(JobId(started.jobId), 20_000, owner.agent.id); await waitUntil(async () => await processGone(pids.parent) && await processGone(pids.child), 'provider-owned evaluator tree survived cancellation')
+        expect((await terminal.settled).job).toMatchObject({ id: started.jobId, status: 'killed' })
+        await waitUntil(async () => await processGone(pids.parent) && await processGone(pids.child), 'provider-owned evaluator tree survived cancellation')
         const { run_tag: _tag, evaluator_id: _evaluatorId, mode: _mode, ...stable } = args; const resumed = await execute(harness.ctx, owner.agent, { ...stable, resume_run_id: started.runId, mode: 'foreground' })
         expect(resumed).toMatchObject({ kind: 'foreground', run: { runId: started.runId, status: 'cancelled' } })
         const durable = inspect(started.tracker, started.runId); const db = new DatabaseSync(started.tracker, { readOnly: true }); const attempts = Number(db.prepare('SELECT COUNT(*) n FROM attempts').get()?.n); const uncertain = Number(db.prepare('SELECT COUNT(*) n FROM attempts WHERE process_tree_quiescent IS NOT 1').get()?.n); db.close(); expect(attempts).toBe(1); expect(uncertain).toBe(0)
         evidence.interruptionResume = { ok: true, runId: started.runId, parentPid: pids.parent, childPid: pids.child, processTreeQuiescent: true, resumedStatus: resumed.run.status, attempts, duplicateCandidate: durable.experiments.filter(row => row.kind === 'candidate').length > 1 }
-      } finally { await owner.dispose() }
+      } finally { terminal.dispose(); await owner.dispose() }
     } finally {
       await harness.dispose().catch(() => undefined)
       await rm(marker, { force: true })
