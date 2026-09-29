@@ -8,7 +8,7 @@ import { DatabaseSync } from 'node:sqlite'
 import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-preset-registry'
 import type { SubprocessHandle } from '@deepseek-ai/dsh-subprocess'
-import { JobId } from '@deepseek-ai/dsh-jobs'
+import { JobId, type JobEvent } from '@deepseek-ai/dsh-jobs'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -31,7 +31,9 @@ function evaluatorConfig(commandArgs: string[], direction: 'minimize' | 'maximiz
 afterEach(async () => {
   calls.length = 0
   releaseModel()
-  await Promise.allSettled(active.splice(0).map(harness => harness.dispose()))
+  const outcomes = await Promise.allSettled(active.splice(0).map(harness => harness.dispose()))
+  const failures = outcomes.filter((outcome): outcome is PromiseRejectedResult => outcome.status === 'rejected')
+  if (failures.length) throw new AggregateError(failures.map(failure => failure.reason), 'composition harness cleanup failed')
 })
 
 async function repository(root: string): Promise<string> {
@@ -324,6 +326,36 @@ describe('real Loader/profile production composition', () => {
       expect(harness.ctx.agents.get(child!.id)).toBeUndefined()
     } finally {
       release()
+      await parent.dispose()
+    }
+  }, 30_000)
+
+  it('leaves owner completion eligible for the real job-tools notice when the producer settles', async () => {
+    const harness = await composeHarness()
+    active.push(harness)
+    const cwd = await repository(harness.root)
+    const parent = await parentAgent(harness, cwd)
+    const terminal = Promise.withResolvers<Extract<JobEvent, { type: 'settled' }>>()
+    let jobId: string | undefined
+    const unsubscribe = harness.ctx.jobs.events.subscribe({ owner: parent.agent.id }, event => {
+      if (event.type === 'settled' && event.job.id === jobId) terminal.resolve(event)
+    })
+    holdModel()
+    try {
+      const started = await execute(harness, 'autoresearch', request(cwd), parent.agent)
+      expect(started.isError).toBe(false)
+      if (started.value && typeof started.value === 'object' && 'kind' in started.value && started.value.kind === 'background-start-failed') throw new Error(JSON.stringify(started.value))
+      expect(started.value).toMatchObject({ kind: 'background', jobId: expect.stringMatching(/^autoresearch-/) })
+      jobId = stringProperty(started.value, 'jobId')
+      releaseModel()
+      const event = await terminal.promise
+      expect(event.job).toMatchObject({ id: jobId, owner: parent.agent.id })
+      expect(event.cause).toBe('producer')
+      // A live internal wait marks this event awaited and suppresses job-tools' owner notice.
+      expect(event.awaited).toBe(false)
+    } finally {
+      releaseModel()
+      unsubscribe()
       await parent.dispose()
     }
   }, 30_000)

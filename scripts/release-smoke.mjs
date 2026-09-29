@@ -1,12 +1,14 @@
 #!/usr/bin/env node
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { spawn } from 'node:child_process'
 
 const repoRoot = resolve(import.meta.dirname, '..')
 const dshExecutable = process.env.DSH_BIN || join(repoRoot, 'node_modules', '.bin', process.platform === 'win32' ? 'dsh.cmd' : 'dsh')
+const basePackage = dirname(dirname(fileURLToPath(import.meta.resolve('@deepseek-ai/dsh-base'))))
+const sharedCheckoutLink = join(basePackage, 'node_modules', 'dsh-autoresearch')
 const MODULES = ['agent', 'config', 'controller', 'evaluator-artifacts', 'evaluator', 'git', 'index', 'invariant', 'recovery', 'render', 'retention', 'state-layout', 'tracker', 'types']
 export const EXPECTED_TARBALL_ENTRIES = Object.freeze([
   'package/LICENSE', 'package/README.md', 'package/cordis.patch.yml', 'package/package.json',
@@ -53,6 +55,7 @@ async function main(args) {
       if (changed) throw new Error('external DSH_HOME changed during isolated smoke')
     }
     const installedRoot = await findInstalledPackage(dshHome, manifest.name)
+    await assertNoSharedCheckoutLink()
     if (installedRoot.startsWith(repoRoot)) throw new Error('installed profile resolved the source tree instead of its installed tarball')
 
     await mkdir(consumer, { recursive: true })
@@ -65,7 +68,8 @@ async function main(args) {
     await run(process.execPath, ['--input-type=module', '--eval', "const root=await import('dsh-autoresearch');const invariant=await import('dsh-autoresearch/invariant');if(root.name!=='autoresearch'||invariant.name!=='autoresearch-invariant')throw new Error('imports failed')"], { cwd: consumer })
 
     evidence.scenarios = await runInstalledScenarios(installedRoot, root)
-    evidence.profileBoot = { installedRoot, sourceTreeResolved: false, activatedRunId: evidence.scenarios.accepted.runId }
+    await assertNoSharedCheckoutLink()
+    evidence.profileBoot = { installedRoot, sourceTreeResolved: false, sharedCheckoutLinkAbsent: true, activatedRunId: evidence.scenarios.accepted.runId }
     evidence.ok = true
     console.log(JSON.stringify(evidence))
   } finally { await rm(root, { recursive: true, force: true }) }
@@ -277,6 +281,15 @@ export async function runWebProfileSmoke(command, env) {
     }
   }
 }
+async function assertNoSharedCheckoutLink() {
+  try {
+    const entry = await lstat(sharedCheckoutLink)
+    throw new Error(`shared Host dependency tree contains ${sharedCheckoutLink} (${entry.isSymbolicLink() ? 'symlink' : 'non-symlink'}); packed runtime isolation is invalid`)
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error
+  }
+}
+
 
 async function runInstalledScenarios(installedRoot, root) {
   const runner = join(import.meta.dirname, 'release-scenarios.mjs')

@@ -1,4 +1,4 @@
-import type { Context } from '@deepseek-ai/cordis'
+import type { Context, Fiber } from '@deepseek-ai/cordis'
 import { JobId, type JobOutcome } from '@deepseek-ai/dsh-jobs'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import { defineTool } from '@deepseek-ai/dsh-tools'
@@ -116,6 +116,7 @@ export function apply(ctx: Context, config: AutoresearchConfig = {}): void {
 
       const gate = deferred<void>()
       const readiness = deferred<AutoresearchToolResult>()
+      const registrySettled = deferred<void>()
       let controller: AutoresearchRunController | undefined
       let hooks: { cancel(value?: string): void; done: Promise<JobOutcome> } | undefined
       let jobId = ''
@@ -145,7 +146,20 @@ export function apply(ctx: Context, config: AutoresearchConfig = {}): void {
         exec.signal.removeEventListener('abort', abortStartup)
         return await startupAbort.promise as never
       }
+      // The owner's context survives producer HMR, but requires its own jobs injection.
+      let observer: Fiber | undefined
+      let observing = false
       try {
+        observer = parent.ctx.inject(['jobs'], ownerCtx => {
+          const unsubscribe = ownerCtx.jobs.events.subscribe({ owner: parent.id }, event => {
+            if (event.type === 'settled' && event.job.id === jobId && event.job.owner === parent.id) registrySettled.resolve()
+          })
+          observing = true
+          return unsubscribe
+        })
+        await Promise.race([observer.await(), startupAbort.promise])
+        if (!observing) throw new Error('owner job observer did not activate')
+        if (cancelled) throw exec.signal.reason ?? new Error('autoresearch startup aborted')
         const id = ctx.jobs.start({
           kind: 'autoresearch',
           label: `autoresearch: ${input.objective}`,
@@ -202,11 +216,15 @@ export function apply(ctx: Context, config: AutoresearchConfig = {}): void {
         const startedHooks = hooks
         if (startedHooks) {
           const settled = startedHooks.done.then(async () => {
-            const job = await ctx.jobs.wait(JobId(jobId), 30_000, parent.id)
-            if (job.status === 'running' || job.status === 'stopping') throw new Error(`autoresearch job ${job.id} remained ${job.status} after producer completion`)
-          })
+            // A terminal projection may precede this callback (or the returned id).
+            // get is owner-fenced and does not mark settlement as awaited by the model.
+            const job = ctx.jobs.get(JobId(jobId), parent.id)
+            if (job.status === 'running' || job.status === 'stopping') await registrySettled.promise
+          }).finally(() => observer!.dispose())
           activeJobs.add(settled)
           void settled.then(() => activeJobs.delete(settled), () => undefined)
+        } else {
+          await observer!.dispose()
         }
         if (!controller) throw new Error('job registry did not start the autoresearch controller')
         const preparing = controller.prepare(jobId)
@@ -219,6 +237,7 @@ export function apply(ctx: Context, config: AutoresearchConfig = {}): void {
         return result as never
       } catch (error) {
         exec.signal.removeEventListener('abort', abortStartup)
+        if (!jobId) await observer?.dispose()
         const startupCancelled = cancelled || exec.signal.aborted
         cancelReason = reason(error)
         if (controller && !cancellationApplied) {

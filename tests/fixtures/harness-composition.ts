@@ -102,11 +102,6 @@ export async function composeHarness(options: { autoresearch?: boolean; autorese
     await mkdir(join(modulesDir, '@deepseek-ai'), { recursive: true })
     await symlink(dirname(webPackage), join(modulesDir, '@deepseek-ai', 'dsh-web-app'), 'dir')
   }
-  const baseModules = join(basePackage, 'node_modules')
-  await mkdir(baseModules, { recursive: true })
-  await symlink(packageRoot, join(baseModules, 'dsh-autoresearch'), 'dir').catch((error: NodeJS.ErrnoException) => {
-    if (error.code !== 'EEXIST') throw error
-  })
   const standardOverlay = options.standardPreset ? standardAgentPlaneOverlay() : []
   if (options.standardPreset) await linkStandardPresetModules(modulesDir, standardOverlay)
   const profile = loadProfile('dsh-autoresearch-test', 'integration', installAnchor, home, { userLayer: false })
@@ -133,7 +128,7 @@ export async function composeHarness(options: { autoresearch?: boolean; autorese
     ctx = await boot('dsh-autoresearch-test', configPath, patches, async bootCtx => {
       bootCtx.dshHomePath = (...segments: string[]) => join(home, ...segments)
       await bootCtx.plugin(PluginPackages, { resolution })
-    }, pathToFileURL(join(basePackage, 'package.json')).href)
+    })
   } catch (error) {
     await rm(root, { recursive: true, force: true }).catch(() => {})
     throw error
