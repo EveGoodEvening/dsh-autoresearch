@@ -1,0 +1,193 @@
+name: Upstream compatibility
+
+on:
+  schedule:
+    - cron: '23 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Serialize reports as well as checks; simultaneous failures must not open duplicates.
+concurrency:
+  group: upstream-compatibility
+  cancel-in-progress: false
+
+jobs:
+  compatibility:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      dsh: ${{ steps.resolve.outputs.dsh }}
+      cordis: ${{ steps.resolve.outputs.cordis }}
+      failed_steps: ${{ steps.summary.outputs.failed_steps }}
+    steps:
+      - name: Check out source
+        id: checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        id: node
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: Set up pnpm
+        id: pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          run_install: false
+          cache: false
+
+      - name: Resolve latest upstreams in an isolated workspace
+        id: resolve
+        run: node scripts/prepare-compatibility.mjs "$RUNNER_TEMP/upstream-compatibility"
+
+      - name: Install candidate dependencies
+        id: install
+        working-directory: ${{ runner.temp }}/upstream-compatibility
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Check peer dependencies
+        id: peers
+        working-directory: ${{ runner.temp }}/upstream-compatibility
+        run: pnpm peers check
+
+      - name: Check types
+        id: types
+        working-directory: ${{ runner.temp }}/upstream-compatibility
+        run: pnpm run typecheck
+
+      - name: Build package before integration tests
+        id: build
+        working-directory: ${{ runner.temp }}/upstream-compatibility
+        run: pnpm run build
+
+      - name: Run full test suite
+        id: tests
+        working-directory: ${{ runner.temp }}/upstream-compatibility
+        run: pnpm run test
+
+      - name: Verify packed consumer and real Web profile
+        id: smoke
+        working-directory: ${{ runner.temp }}/upstream-compatibility
+        run: pnpm run release:smoke
+
+      - name: Preserve resolved versions and candidate lockfile
+        id: evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: upstream-compatibility
+          path: |
+            ${{ runner.temp }}/upstream-compatibility/upstream-versions.json
+            ${{ runner.temp }}/upstream-compatibility/package.json
+            ${{ runner.temp }}/upstream-compatibility/pnpm-lock.yaml
+            ${{ runner.temp }}/upstream-compatibility/pnpm-workspace.yaml
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Summarize compatibility result
+        id: summary
+        if: ${{ always() }}
+        uses: actions/github-script@v8
+        env:
+          CHECK_STEPS: ${{ toJSON(steps) }}
+          DSH_VERSION: ${{ steps.resolve.outputs.dsh }}
+          CORDIS_VERSION: ${{ steps.resolve.outputs.cordis }}
+        with:
+          script: |
+            const steps = Object.entries(JSON.parse(process.env.CHECK_STEPS));
+            const failed = steps.filter(([, step]) => step.outcome === 'failure').map(([name]) => name);
+            core.setOutput('failed_steps', failed.join(', '));
+            await core.summary
+              .addHeading('Latest upstream compatibility')
+              .addRaw(`DSH family: ${process.env.DSH_VERSION || 'unresolved'}; scoped Cordis: ${process.env.CORDIS_VERSION || 'unresolved'}.\n\n`)
+              .addRaw('Forward-compatibility probe only: peers are temporarily repinned in an isolated workspace. Published support ranges are unchanged.\n\n')
+              .addTable([
+                [{ data: 'Step', header: true }, { data: 'Result', header: true }],
+                ...steps.map(([name, step]) => [name, step.outcome]),
+              ])
+              .write();
+
+  report:
+    needs: compatibility
+    # Branch experiments retain logs/artifacts but must not open or close the default-branch incident.
+    if: >-
+      ${{ always() && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+          && (needs.compatibility.result == 'success' || needs.compatibility.result == 'failure') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      # No checkout or upstream dependency code runs with the issue-writing token.
+      - name: Report failure or recovery
+        uses: actions/github-script@v8
+        env:
+          CHECK_RESULT: ${{ needs.compatibility.result }}
+          DSH_VERSION: ${{ needs.compatibility.outputs.dsh }}
+          CORDIS_VERSION: ${{ needs.compatibility.outputs.cordis }}
+          FAILED_STEPS: ${{ needs.compatibility.outputs.failed_steps }}
+        with:
+          script: |
+            const marker = '<!-- dsh-autoresearch-upstream-compatibility -->';
+            const run = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}/attempts/${process.env.GITHUB_RUN_ATTEMPT}`;
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              ...context.repo, state: 'open', creator: 'github-actions[bot]', per_page: 100,
+            });
+            const issue = issues.find(item => !item.pull_request && item.body?.includes(marker));
+            if (process.env.CHECK_RESULT === 'success') {
+              if (issue) {
+                await github.rest.issues.createComment({
+                  ...context.repo, issue_number: issue.number,
+                  body: `Compatibility recovered with DSH \`${process.env.DSH_VERSION}\` and Cordis \`${process.env.CORDIS_VERSION}\`. [Passing run](${run}). Published peer ranges remain unchanged.`,
+                });
+                await github.rest.issues.update({
+                  ...context.repo, issue_number: issue.number, state: 'closed', state_reason: 'completed',
+                });
+                core.notice(`Closed recovered compatibility incident #${issue.number}`);
+              }
+              return;
+            }
+
+            const dsh = process.env.DSH_VERSION || 'unresolved';
+            const cordis = process.env.CORDIS_VERSION || 'unresolved';
+            const failed = process.env.FAILED_STEPS || 'setup, runner, or summary; see run log';
+            const key = `<!-- upstream-failure: ${dsh}; ${cordis}; ${failed} -->`;
+            const body = [
+              marker, key,
+              `@${context.repo.owner} the latest-upstream compatibility check failed.`,
+              '',
+              '| Target | Resolved version |',
+              '| --- | --- |',
+              `| DSH CLI and synchronized service family (npm latest) | \`${dsh}\` |`,
+              `| @deepseek-ai/cordis (npm latest) | \`${cordis}\` |`,
+              '',
+              `Failed steps: **${failed}**.`,
+              `[Workflow logs and candidate dependency artifact](${run}).`,
+              '',
+              'Compatibility is unverified, not necessarily broken: registry, installation, or runner failures also trigger this report. See the failed step before attributing an API regression.',
+              'This probe temporarily repins DSH and Cordis peers in an isolated workspace; it does not change the repository lockfile or published support ranges.',
+              'The artifact includes exact Cordis companion versions, original peer declarations, and the candidate manifest/lockfile. Re-run **Upstream compatibility** from Actions to check recovery.',
+              '',
+              'Repeated failures with the same versions and failed steps update this issue without new comments. A changed failure adds a notification; a passing default-branch check closes the issue.',
+            ].join('\n');
+            if (issue) {
+              if (!issue.body.includes(key)) {
+                await github.rest.issues.createComment({
+                  ...context.repo, issue_number: issue.number,
+                  body: `@${context.repo.owner} the compatibility failure changed: DSH \`${dsh}\`, Cordis \`${cordis}\`; failed steps: **${failed}**. [Run](${run}).`,
+                });
+              }
+              await github.rest.issues.update({ ...context.repo, issue_number: issue.number, body });
+              core.notice(`Updated compatibility incident #${issue.number}`);
+            } else {
+              const { data: created } = await github.rest.issues.create({
+                ...context.repo, title: 'Latest DSH / Cordis compatibility check failed', body,
+              });
+              core.notice(`Created compatibility incident #${created.number}`);
+            }

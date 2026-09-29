@@ -17,12 +17,12 @@ The design is inspired by [Karpathy's `autoresearch`](https://github.com/karpath
 
 | Component | `dsh-autoresearch@0.2.0` compatibility | Verified on 2026-09-29 |
 | --- | --- | --- |
-| DeepSeek Harness CLI and DSH service peers | `@deepseek-ai/dsh@0.1.7-rc.2` and the exact `0.1.7-rc.2` service family pinned in `package.json` | `0.1.7-rc.2` (CLI npm `latest`) |
+| DeepSeek Harness CLI and DSH service peers | `@deepseek-ai/dsh@0.1.7-rc.2` and the exact `0.1.7-rc.2` service family pinned in `package.json` | `0.1.7-rc.2` (release baseline) |
 | Cordis | Scoped fork `@deepseek-ai/cordis` peer `~4.0.4`, **not** unscoped `cordis` | `4.0.4` |
 | Node.js | `^22.19.0 || >=24.2.0` (`node:sqlite`; the DSH CLI uses `import.meta.main`) | `24.21.0`; other declared Node versions are not separately verified |
 | pnpm | `11.7.0` (`package.json` package manager) | `11.7.0` |
 
-This version targets a tested **prerelease DSH host** pairing, not every DSH release. As of 2026-09-29, the CLI's npm `next` tag points to `0.2.0-rc.2`; that channel is **untested and not supported by the current exact DSH peer pins**. The older `0.1.1-rc.2` Host family is no longer supported by this version. Repin the coordinated CLI/service family and retest the integration before claiming support for another DSH release; component dist-tags need not match the CLI's.
+This version targets a tested **prerelease DSH host** pairing, not every DSH release. A fresh registry lookup on 2026-09-29 resolves the CLI's npm `latest` tag to `0.2.0-rc.2`, which is **outside the current exact DSH peer pins**. The scheduled forward-compatibility probe below does not expand those published support ranges. The older `0.1.1-rc.2` Host family is no longer supported by this version. Repin the coordinated CLI/service family and retest the integration before claiming support for another DSH release; component dist-tags need not match the CLI's.
 
 The Host must provide `agents`, `jobs`, `subprocess`, `systemPrompt`, and `tools`. Background mode additionally requires the calling Agent to mount `dsh-tool-jobs`; the Web `standard` Agent preset and the base/headless compositions do so. Host-global `job_*` tools are not required.
 
@@ -187,6 +187,30 @@ Release verification exercises the packed artifact **outside** the checkout: ins
 The long-running evaluator fixture publishes its PID marker by atomic rename. HMR and cancellation checks must observe a complete PID before asserting process liveness; file creation alone is not a readiness barrier.
 
 Packing runs separately after the parallel test suite. `prepack` deletes and rebuilds `lib/`, so invoking `pnpm pack` from a concurrent test can break Loader imports even when the package was built before testing.
+
+### Scheduled upstream compatibility
+
+`.github/workflows/compatibility.yml` checks npm **`latest`** daily at **03:23 UTC** and supports **Actions → Upstream compatibility → Run workflow**. It resolves the CLI version once and uses that exact version for every direct DSH package; scoped `@deepseek-ai/cordis` and its direct Cordis companions resolve their own `latest` tags. It does not test unscoped `cordis` or opt into npm `next`.
+
+The probe copies the checkout into a new temporary workspace, repins development dependencies **and peers only in that copy**, then installs, checks peers/types, builds, runs the full test suite, and runs the sequential packed-consumer/Web-profile `release:smoke`. Repinning the candidate's peers prevents packed consumers from silently testing the old DSH family. A passing probe means the candidate passed these checks, **not** that the published package's peer declarations already support those versions. The source manifest, lockfile, and release workflow remain unchanged.
+
+Default-branch failures open one bot-owned GitHub Issue mentioning the repository owner (`@EveGoodEvening` here), with resolved DSH/Cordis versions, failed steps, and a run link. Repeated failures with the same DSH/Cordis-core versions and failed steps refresh that issue without new comments; a changed pair/stage adds a notification, and a passing check comments and closes it. Registry/setup/runner failures are reported as **unverified compatibility**, not automatically as an API regression. Branch-only manual runs keep their logs and artifacts but do not change the default-branch incident. Each run records step outcomes in its summary and retains available dependency evidence for 14 days; an installation failure may leave the copied baseline lockfile rather than a fully resolved candidate lockfile.
+
+The workflow uses the automatic `GITHUB_TOKEN`, with `issues: write` granted only to a separate reporting job that never checks out or runs upstream code; no personal token or publishing secret is needed. Commit the workflow to the default branch and keep Actions and Issues enabled. Mentions use your GitHub notification preferences. GitHub may delay scheduled runs and [disables scheduled workflows in inactive public repositories after 60 days](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/disable-and-enable-workflows); re-enable the workflow in Actions if needed.
+
+To reproduce locally with the supported Node/pnpm versions, without changing your checkout:
+
+```sh
+workspace="$(mktemp -d)/candidate"
+node scripts/prepare-compatibility.mjs "$workspace"
+cd "$workspace"
+pnpm install --no-frozen-lockfile &&
+  pnpm peers check &&
+  pnpm run typecheck &&
+  pnpm run build &&
+  pnpm run test &&
+  pnpm run release:smoke
+```
 
 ## Publish to npm
 
