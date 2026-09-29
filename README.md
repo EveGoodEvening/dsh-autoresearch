@@ -178,6 +178,10 @@ pnpm run release:smoke  # packed-artifact release verification
 
 Release verification exercises the packed artifact **outside** the checkout: inspect the allowlist, install without local links, import generated ESM/declarations, install/dump the real named dsh profile, and boot the actual Web profile long enough to fetch its HTML surface. The integration suite separately executes autoresearch through the Web `standard` Agent preset with owner-scoped `job_*` controls.
 
+The long-running evaluator fixture publishes its PID marker by atomic rename. HMR and cancellation checks must observe a complete PID before asserting process liveness; file creation alone is not a readiness barrier.
+
+Packing runs separately after the parallel test suite. `prepack` deletes and rebuilds `lib/`, so invoking `pnpm pack` from a concurrent test can break Loader imports even when the package was built before testing.
+
 ## Publish to npm
 
 `.github/workflows/publish.yml` publishes through [npm Trusted Publishing](https://docs.npmjs.com/trusted-publishers) when a `v*` tag is pushed. It uses a GitHub-hosted Ubuntu runner, Node.js 24, npm 11.16.0, and the pnpm version declared in `package.json`; no long-lived npm publishing token is needed.
