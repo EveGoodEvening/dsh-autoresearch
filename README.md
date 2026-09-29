@@ -193,14 +193,17 @@ Before the first CI release, configure the `dsh-autoresearch` package's **Settin
 | Environment name | Leave empty; the workflow does not use a GitHub Environment |
 | Allowed actions | Explicitly allow `npm publish`; new configurations default to staged publishing |
 
-For a stable release, update `package.json` to a new, unpublished version and commit it together with any release changes. Push a tag whose name is exactly `v` followed by that version, for example:
+For a stable release, update `package.json` to a new, unpublished version and commit it together with any release changes. Push a tag whose name is exactly `v` followed by that version:
 
 ```sh
-git tag v0.1.7
-git push origin v0.1.7
+VERSION="$(node -p "require('./package.json').version")"
+git tag "v$VERSION"
+git push origin "v$VERSION"
 ```
 
 The workflow rejects mismatched tags, installs with the frozen lockfile, checks peers and types, builds, runs the full test suite, and runs `release:smoke` before `npm publish`. Build must precede tests on a clean checkout because integration and consumer tests load the generated `lib/` entry points; the workflow invokes these scripts separately rather than using the test-before-build `check` script. Any failed step stops publication. npm generates provenance automatically when publishing this public package from a public repository through OIDC.
+
+This workflow is tag-push-only: changing Actions settings or pushing `master` does not replay an earlier tag push or start a release. After resolving settings or account restrictions, a new unpublished version and matching tag provide a fresh release event without rewriting an existing tag. Confirm that an actual workflow run appears in the Actions tab; an `active` workflow registration alone is not evidence that a release started.
 
 ## License
 
