@@ -1,246 +1,80 @@
 # dsh-autoresearch
 
-> Bounded, metric-driven autoresearch plugin for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness).
+Bounded, metric-driven optimization for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness), inspired by [Karpathy's autoresearch](https://github.com/karpathy/autoresearch).
 
-`dsh-autoresearch` gives a DeepSeek Harness agent a single tool — `autoresearch` — that runs a **baseline-first, bounded keep/reject optimization loop** inside an isolated Git worktree.
+The `autoresearch` tool measures a baseline, lets an agent edit allowed files in an isolated Git worktree, and keeps only strict improvements. The Host controls evaluation; SQLite records results for inspection and recovery.
 
-The design is inspired by [Karpathy's `autoresearch`](https://github.com/karpathy/autoresearch): a *propose → edit → run → measure → keep/revert* search where a coding agent proposes candidates and a fixed mechanical metric acts as the source of truth. Trusted Host configuration selects the evaluator; Host code owns evaluation, metric decisions, persistence, cancellation, and recovery. The proposal model cannot submit evaluator commands, metric definitions, dataset authority, or evaluator environment.
+## Supported versions
 
-- **One scalar metric.** Strict `minimize` / `maximize` improvement against a measured baseline; no hidden tie-breaker or separate complexity score.
-- **Host-selected evaluator.** New runs name a deployment registration with `evaluator_id`; the immutable argv, metric, environment, evaluator files, and dataset identity are persisted and revalidated for baseline, candidates, and resume.
-- **Narrow mutable surface.** Only `mutable_globs` paths may change; registered evaluator and local dataset files remain protected even under broad globs.
-- **Durable SQLite evidence.** Every run, experiment, attempt, and bounded artifact record is transition-checked and hash-bound.
-- **Background jobs by default.** Runs are `dsh-jobs` background jobs; inspect or stop them with the generic job tools.
-- **Fail-closed recovery.** Resume reconciles durable Host evidence before mutation or evaluator spawn.
+For **`dsh-autoresearch@0.2.1`**:
 
-## Requirements and compatibility
-
-| Component | `dsh-autoresearch@0.2.1` compatibility | Verified on 2026-09-29 |
+| Component | Supported | Tested |
 | --- | --- | --- |
-| DeepSeek Harness CLI and DSH service peers | `@deepseek-ai/dsh@0.2.0-rc.2` and the exact `0.2.0-rc.2` service family pinned in `package.json` | `0.2.0-rc.2` (CLI npm `latest` at verification) |
-| Cordis | Scoped fork `@deepseek-ai/cordis` peer `~4.0.4`, **not** unscoped `cordis` | `4.0.4` |
-| Node.js | `^22.19.0 || >=24.2.0` (`node:sqlite`; the DSH CLI uses `import.meta.main`) | `24.21.0`; other declared Node versions are not separately verified |
-| pnpm | `11.7.0` (`package.json` package manager) | `11.7.0` |
+| DSH CLI (`@deepseek-ai/dsh`) and DSH service peers | **`0.2.0-rc.2`** (exact, coordinated family) | `0.2.0-rc.2` |
+| Cordis (`@deepseek-ai/cordis`) | **`~4.0.4`** | `4.0.4` |
+| Node.js | `^22.19.0 \|\| >=24.2.0` | `24.21.0` |
 
-This version targets a tested **prerelease DSH host** pairing, not every DSH release. The CLI's npm `latest` tag resolved to `0.2.0-rc.2` during verification on 2026-09-29. The previous `dsh-autoresearch@0.2.0` release targets the older `0.1.7-rc.2` Host family; this release moves the exact CLI/service peer pins together. The scheduled forward-compatibility probe below does not automatically expand published support ranges. Repin the coordinated family and retest before claiming support for another DSH release; component dist-tags need not match the CLI's.
-
-The Host must provide `agents`, `jobs`, `subprocess`, `systemPrompt`, and `tools`. Background mode additionally requires the calling Agent to mount `dsh-tool-jobs`; the Web `standard` Agent preset and the base/headless compositions do so. Host-global `job_*` tools are not required.
-
-Automatic takeover of a controller claim left by abnormal Host death requires Linux `/proc/<pid>/stat` start-token evidence. Normal managed execution is not declared Linux-only, but on non-Linux systems a stale claim remains conservatively blocked; lease expiry alone is not proof that its owner died.
+Verified on **2026-09-29**. Use the **scoped Cordis fork**, not unscoped `cordis`. DSH is a prerelease pairing; other DSH versions are not declared supported. Daily [upstream compatibility checks](https://github.com/EveGoodEvening/dsh-autoresearch/blob/master/.github/workflows/compatibility.yml) do not automatically expand these ranges.
 
 ## Install
-
-Install this version through DSH's profile plugin manager:
 
 ```sh
 dsh plugin --profile <name> add dsh-autoresearch@0.2.1
 dsh --profile <name> --dump-config
 ```
 
-`dsh plugin` forwards the package spec to pnpm inside the selected profile, then adds installed packages that declare `dsh.bundle` to that profile's ordered bundle list. A plain `pnpm add` does not perform that DSH reconciliation.
+The dump should contain `id: autoresearch` and `name: dsh-autoresearch`. Use `dsh plugin`, not plain `pnpm add`, to activate the bundle.
 
-For a release-like installation from this checkout, build and install the artifact emitted by `pnpm pack` (the filename is derived from `package.json`):
+The Host needs `agents`, `jobs`, `subprocess`, `systemPrompt`, and `tools`. Background runs also need `dsh-tool-jobs` in the calling Agent; the Web `standard` preset and base/headless compositions provide it.
 
-```sh
-pnpm install --frozen-lockfile
-TARBALL=$(pnpm pack --silent)
-dsh plugin --profile <name> add "./$TARBALL"
-dsh --profile <name> --dump-config
+## Use
+
+**Register an evaluator first.** Set `evaluatorRegistrations` in the plugin's Host configuration; none are supplied by default. Each registration fixes the command/argv, metric, environment, evaluator files, and dataset identity. See the [configuration schema](https://github.com/EveGoodEvening/dsh-autoresearch/blob/master/src/config.ts) and [shipped defaults](cordis.patch.yml).
+
+Then ask the agent to run `autoresearch`. For example, with a registered `validation-loss` evaluator and `train.py` in the repository:
+
+```json
+{
+  "objective": "Reduce validation loss",
+  "run_tag": "loss-trial-1",
+  "evaluator_id": "validation-loss",
+  "mutable_globs": ["train.py"],
+  "max_experiments": 20
+}
 ```
 
-For local development, install a link to the built checkout instead:
+- `repository` defaults to the agent's working directory. Use a fresh, Git-safe `run_tag` for each new run.
+- Runs are background jobs by default. Inspect or stop them with `job_list`, `job_output`, and `job_kill`; use `"mode": "foreground"` to wait for completion.
+- Optional inputs: `target` (stopping threshold), `timeout_ms` (per-attempt watchdog), and `constraints` (advisory guidance, not acceptance rules).
+- To resume, replace `run_tag` and `evaluator_id` with `resume_run_id` and retain the original run policy. The stored evaluator registration is revalidated before execution.
+
+Defaults: **20 candidates**, deployment cap **100**, **15-minute watchdog per attempt**, and **one active run per repository**. The baseline is separate from the candidate cap. Limits and retention are configurable.
+
+## Behavior and safety
+
+- **Baseline first; strict keep/reject.** One scalar metric, minimized or maximized. Only improvements over the current best are accepted.
+- **Narrow edits.** Only `mutable_globs` may change; registered evaluator and local dataset files remain protected.
+- **Bounded execution.** Safely terminated candidate evaluator failures consume a candidate slot and may continue. Baseline failures or uncertain process/policy state stop or block the run.
+- **Durable recovery.** SQLite preserves decisions and evidence. Resume fails closed on registration or provenance mismatch; legacy runs without Host registrations cannot resume.
+- **Not a security sandbox.** A Git worktree isolates repository changes, not hostile code. Use trusted evaluators/candidates or separately provide an external sandbox. The watchdog is not a fair-compute budget.
+- **Crash takeover requires Linux.** Reclaiming a stale controller after abnormal Host death needs `/proc` evidence; non-Linux recovery remains conservatively blocked.
+
+## Development
+
+Use **pnpm 11.7.0**. Build before testing: integration tests load `lib/`.
 
 ```sh
 pnpm install --frozen-lockfile
+pnpm run typecheck
 pnpm run build
-dsh plugin --profile <name> add .
-dsh --profile <name> --dump-config
+pnpm run test
+pnpm run release:smoke
 ```
 
-DSH anchors relative filesystem specs such as `.` and the path emitted by `pnpm pack` to the directory where you invoke `dsh`. The config dump should contain `id: autoresearch` and `name: dsh-autoresearch`.
+`release:smoke` checks a packed install and the real DSH Web profile outside the checkout. Run it after tests, not concurrently: packing rebuilds `lib/`.
 
-The package ships a Cordis patch row (`cordis.patch.yml`) declared via `dsh.bundle.patch` in `package.json`. DeepSeek Harness out-of-tree features ship as opt-in bundles: the stable patch inserts an ordinary Cordis plugin row whose config is **replaced whole, not deep-merged**, so every default you want must be explicit in the patch row.
-
-## How it works
-
-```
-┌─────────────┐  proposal   ┌──────────────────┐  evaluator id  ┌──────────────────┐
-│  proposal   │ ─────────► │ AutoresearchRun  │ ─────────────► │ Host registration│
-│   agent     │ ◄───────── │    Controller    │ ◄───────────── │ + managed argv   │
-└─────────────┘  memory     └────────┬─────────┘     metric     └──────────────────┘
-                                     │ persist
-                                     ▼
-                            ┌──────────────────┐
-                            │  DurableTracker  │  SQLite; current schema authority:
-                            └──────────────────┘  TRACKER_SCHEMA_VERSION in src/tracker.ts
-```
-
-1. **Baseline.** The controller checks out the immutable start commit, resolves the Host registration, derives hashes for registered local evaluator/dataset files, and measures the baseline. No baseline → `baseline-blocked`.
-2. **Propose.** A delegated proposal agent (inherited tools: `read`, `write`, `edit`, `glob`, `grep`) edits only `mutable_globs` and submits one bounded, untrusted annotation. Later proposal prompts receive bounded research memory: truncated child hypotheses/summaries plus Host-derived commits, changed paths/diff statistics, metrics, decisions, and failure facts—not full logs or patches. Only exact configured secret values are redacted; all child annotations must still be treated as potentially sensitive untrusted data.
-3. **Evaluate.** The candidate commit is checked out and the registered shell-free argv runs through the managed `ctx.subprocess` provider. The immutable registration and run-creation evaluator/local-dataset manifest are revalidated immediately before and after provider spawn for each attempt.
-4. **Decide.** Strict improvement of the configured scalar metric against the current best → `accept`; otherwise `reject`. `constraints` are immutable, hash-bound proposal guidance only. They are not a Host-enforced simplicity criterion, complexity field, authoritative report field, or acceptance tie-breaker. Encode required simplicity in the trusted evaluator/objective or mutable-path policy.
-5. **Continue or stop.** A proven-quiescent candidate timeout, non-zero exit, signal, output-limit failure, metric-protocol failure, or provider spawn failure is recorded, consumes that candidate ordinal, restores the accepted worktree, and permits the next bounded candidate. Baseline failures, cancellation, uncertain process state, policy/provenance/registration violations, persistence or Git contradictions, and exhausted recovery reruns stop or block the run.
-6. **Persist and replay.** Every transition is written to the SQLite tracker. Cancellation records and replays the exact pre-cancellation run state (`lastState`) and canonical lineage; recovery does not infer a replacement origin state.
-
-Runtime authority lives in `AutoresearchRunController` (`src/controller.ts`); it composes the existing `agents`, `jobs`, `subprocess`, `systemPrompt`, and `tools` services — no separate workflow engine or subagent service.
-
-### Trust and isolation boundary
-
-The Host-selected evaluator registration and the managed DSH subprocess provider are trusted. The plugin manages exact argv, a closed evaluator environment, bounded stdout/stderr capture, a per-attempt wall-clock timeout, cancellation, process-tree termination, and quiescence checks. It does **not** use the separate DSH sandbox seam and does not provide hostile-code filesystem, process, same-UID, privilege, or network isolation. An isolated Git worktree protects repository state; it is not an OS security boundary.
-
-Do not run hostile evaluator or candidate code on the strength of this plugin. Deployments requiring that property must separately select and verify an external sandbox or read-only execution provider. First-party support for that broader threat model requires an explicit product change defining and testing a sandbox/deployment contract.
-
-The timeout is a safety watchdog, not fixed steps, epochs, CPU/GPU time, FLOPs, or an exact fair-compute budget. Comparable compute methodology belongs to the trusted evaluator and remains identical through the frozen registration used for baseline, candidates, and resume.
-
-## The `autoresearch` tool
-
-Registered by `apply()` in `src/index.ts`. Runs as a **background job** by default; set `mode: 'foreground'` to block the caller until completion.
-
-| Parameter | Required | Description |
-| --- | --- | --- |
-| `repository` | no | Repository or cwd; defaults to the initiating agent cwd. |
-| `objective` | yes | Immutable optimization objective. |
-| `mutable_globs` | yes | Narrow relative paths/globs the proposal agent may edit. |
-| `run_tag` | new run | Fresh Git-safe exclusion tag; required with `evaluator_id` and forbidden on resume. |
-| `evaluator_id` | new run | Host-provided evaluator registration id; required with `run_tag` and forbidden on resume. |
-| `resume_run_id` | resume | Durable run id; mutually exclusive with `run_tag` and `evaluator_id`. The stored registration and policy remain authoritative. |
-| `constraints` | no | Immutable, hash-bound advisory proposal guidance; not an acceptance rule. |
-| `timeout_ms` | no | Per-attempt wall-clock watchdog bounded by deployment policy. |
-| `max_experiments` | no | Immutable candidate cap for the run; baseline is separate. |
-| `target` | no | Finite stopping threshold. |
-| `mode` | no | Execution-only dispatch: `background` (default) or `foreground`; it may change when resuming a run. |
-
-Evaluator command, args, cwd, environment, metric name/direction, evaluator files, and dataset registration are deployment configuration under `evaluatorRegistrations`; they are intentionally absent from tool input. A new run freezes the normalized registration and hashes local files from its isolated worktree at exactly the start commit. Local datasets declare repository files; external datasets provide an algorithm-qualified immutable digest. Resume fails closed before spawn if the current Host registration, durable fingerprint, or frozen bytes disagree.
-
-**Output** is a discriminated JSON: `background` (run + job started), `background-start-failed`, or `foreground` (full run result). Run results carry `status`, `counts`, `best`, `artifacts`, and blocker `evidence`.
-
-Canonical run JSON is validated independently of `maxResultChars`; that setting applies only to rendered and background-job presentation.
-
-## Configuration
-
-The `Config` schema (`src/config.ts`) is loaded at deploy time. Defaults (also in `cordis.patch.yml`):
-
-| Key | Default | Meaning |
-| --- | --- | --- |
-| `gitExecutable` | `git` | Git binary. |
-| `stateRoot` | `dsh-autoresearch` | Tracker + worktree state directory. |
-| `branchPrefix` | `autoresearch/` | Run branch prefix (must end in `/`). |
-| `defaultMaxExperiments` | `20` | Default candidate cap; baseline is separate. |
-| `maxExperiments` | `100` | Configured deployment maximum candidate cap (the shipped default, not a universal code constant). |
-| `maxHandoffChars` | `16384` | Maximum serialized bounded research-memory handoff. |
-| `defaultTimeoutMs` | `900000` | 15 min wall-clock watchdog per attempt. |
-| `maxTimeoutMs` | `3600000` | Configured maximum watchdog per attempt. |
-| `terminationGraceMs` | `5000` | Grace period before killing the evaluator tree. |
-| `maxActiveRunsPerRepository` | `1` | Concurrent run cap per repo. |
-| `maxStdoutBytes` / `maxStderrBytes` | `1048576` | Evaluator output capture limits. |
-| `maxResultChars` | `16384` | Rendered tool and background-job presentation limit; canonical run results are unaffected. |
-| `artifactRetentionDays` | `30` | Artifact-byte retention window, enforced lazily for safe terminal runs. |
-| `retainFailedArtifacts` | `true` | If `false`, prune failed-attempt bytes at safe terminal settlement. |
-| `retainWorktrees` | `true` | Keep terminal worktrees; `false` enables terminal cleanup. |
-| `cleanupWorktreesOnSuccess` | `false` | With `retainWorktrees: false`, limit cleanup to `target-reached` / `budget-limited`. |
-| `exportTsv` | `true` | Export a TSV summary per run. |
-| `evaluatorRegistrations` | `[]` | Host-owned evaluator, metric, environment, frozen-file, and dataset contracts selectable by `evaluator_id`. |
-| `tsvRetentionDays` | `30` | TSV retention window, measured from the export mtime. |
-
-Runs are bounded. The shipped default is 20 candidate experiments and the shipped deployment maximum is 100; each candidate failure that is safe to continue consumes one ordinal. The baseline is separate, and a target, cancellation, blocking condition, or exhausted candidate cap can stop earlier. There is no indefinite mode or automatic run chaining; an operator may explicitly start another run.
-
-Retention is repository-local and lazy: each controller startup sweeps safely terminal runs without a live controller owner, and each safe terminal settlement applies the same policy to the current run. Pruning removes artifact bytes but preserves SQLite artifact identity, size, hash, and outcome metadata so terminal replay remains deterministic. `retainWorktrees: false` removes every safely terminal worktree unless `cleanupWorktreesOnSuccess: true` narrows removal to successful terminal statuses.
-
-## Project layout
-
-```
-src/
-  index.ts            Plugin entry: registers the `autoresearch` tool + direct-human guidance
-  controller.ts       AutoresearchRunController — sole owner of the run state machine
-  config.ts           Config schema, defaults, run-policy normalization
-  types.ts            Tool parameters, output schema, durable state types
-  evaluator.ts        Shell-free evaluator boundary, provenance freezing, final-line JSON metric
-  git.ts              Worktree/lock/claim/commit reconciliation, candidate validation
-  tracker.ts          DurableTracker — SQLite; TRACKER_SCHEMA_VERSION is authoritative
-  recovery.ts         Crash-safe run reconciliation from durable state
-  agent.ts            Delegated proposal agent + autoresearch_report tool
-  render.ts           Tool result rendering with bounded truncation
-  invariant.ts        Package invariant companion (dsh-invariants)
-  state-layout.ts     SQLite state layout
-  retention.ts        Lazy artifact/TSV retention sweeps and current-run pruning
-  evaluator-artifacts.ts  Evaluator stdout/stderr artifact capture
-```
-
-## Legacy runs
-
-Runs created before the Host-registration contract are retained as historical evidence and are never automatically converted or reinterpreted as satisfying the current Host-registration contract. Ordinary SQLite tracker schema migrations may still occur during retention or other writable maintenance; those migrations do not create an evaluator registration or grant resume authority. A legacy terminal run remains inspectable and eligible for normal retention handling. Attempting to resume a legacy nonterminal run fails closed with `legacy-evaluator-policy-unsupported`; inspect its tracker/artifacts, preserve or archive them according to operator policy, then explicitly start a new run with `run_tag` and a Host-provided `evaluator_id` if experimentation should continue.
-
-## Develop
-
-```sh
-pnpm install
-pnpm run typecheck      # tsc --noEmit
-pnpm run test           # vitest run
-pnpm run test:coverage  # vitest run --coverage
-pnpm run build          # tsc -p tsconfig.json → lib/
-pnpm run check          # typecheck + test + build
-pnpm run release:smoke  # packed-artifact release verification
-```
-
-Release verification exercises the packed artifact **outside** the checkout: inspect the allowlist, install without local links, import generated ESM/declarations, install/dump the real named dsh profile, and boot the actual Web profile long enough to fetch its HTML surface. The integration suite separately executes autoresearch through the Web `standard` Agent preset with owner-scoped `job_*` controls.
-
-The evaluator boundary tests publish atomic PID markers and race readiness against evaluator settlement: a process can time out before publishing a marker. The real-tree timeout test advances its watchdog only after both processes acknowledge readiness; a separate real-clock regression covers timeout before readiness. Descendant quiescence is checked at durable outcome publication. The long-running HMR evaluator also publishes its PID by atomic rename, so file creation cannot expose an empty marker.
-
-`job_output(wait: true)` waits only up to its requested bound and may return a running job with no final text. Integration consumers subscribe before starting the job, observe the non-consuming terminal event, and only then collect and decode its result; a held-model scenario verifies the intermediate empty/running response. WAL snapshot coverage still performs 20 snapshots against a live concurrent writer, but compares database bytes with native `Buffer.equals()` rather than a JavaScript deep-equality walk.
-
-Packing runs separately after the parallel test suite. `prepack` deletes and rebuilds `lib/`, so invoking `pnpm pack` from a concurrent test can break Loader imports even when the package was built before testing.
-
-### Scheduled upstream compatibility
-
-`.github/workflows/compatibility.yml` checks npm **`latest`** daily at **03:23 UTC** and supports **Actions → Upstream compatibility → Run workflow**. It resolves the CLI version once and uses that exact version for every direct DSH package; scoped `@deepseek-ai/cordis` and its direct Cordis companions resolve their own `latest` tags. It does not test unscoped `cordis` or opt into npm `next`.
-
-The probe copies the checkout into a new temporary workspace, repins development dependencies **and peers only in that copy**, then installs, checks peers/types, builds, runs the full test suite, and runs the sequential packed-consumer/Web-profile `release:smoke`. Repinning the candidate's peers prevents packed consumers from silently testing the old DSH family. A passing probe means the candidate passed these checks, **not** that the published package's peer declarations already support those versions. The source manifest, lockfile, and release workflow remain unchanged.
-
-Default-branch failures open one bot-owned GitHub Issue mentioning the repository owner (`@EveGoodEvening` here), with resolved DSH/Cordis versions, failed steps, and a run link. Repeated failures with the same DSH/Cordis-core versions and failed steps refresh that issue without new comments; a changed pair/stage adds a notification, and a passing check comments and closes it. Registry/setup/runner failures are reported as **unverified compatibility**, not automatically as an API regression. Branch-only manual runs keep their logs and artifacts but do not change the default-branch incident. Each run records step outcomes in its summary and retains available dependency evidence for 14 days; an installation failure may leave the copied baseline lockfile rather than a fully resolved candidate lockfile.
-
-The workflow uses the automatic `GITHUB_TOKEN`, with `issues: write` granted only to a separate reporting job that never checks out or runs upstream code; no personal token or publishing secret is needed. Commit the workflow to the default branch and keep Actions and Issues enabled. Mentions use your GitHub notification preferences. GitHub may delay scheduled runs and [disables scheduled workflows in inactive public repositories after 60 days](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/disable-and-enable-workflows); re-enable the workflow in Actions if needed.
-
-To reproduce locally with the supported Node/pnpm versions, without changing your checkout:
-
-```sh
-workspace="$(mktemp -d)/candidate"
-node scripts/prepare-compatibility.mjs "$workspace"
-cd "$workspace"
-pnpm install --no-frozen-lockfile &&
-  pnpm peers check &&
-  pnpm run typecheck &&
-  pnpm run build &&
-  pnpm run test &&
-  pnpm run release:smoke
-```
-
-## Publish to npm
-
-`.github/workflows/publish.yml` publishes through [npm Trusted Publishing](https://docs.npmjs.com/trusted-publishers) when a `v*` tag is pushed. It uses a GitHub-hosted Ubuntu runner, Node.js 24, npm 11.16.0, and the pnpm version declared in `package.json`; no long-lived npm publishing token is needed.
-
-Before the first CI release, configure the `dsh-autoresearch` package's **Settings → Trusted publishing** on npmjs.com:
-
-| Field | Value |
-| --- | --- |
-| Provider | GitHub Actions |
-| Organization or user | `EveGoodEvening` |
-| Repository | `dsh-autoresearch` |
-| Workflow filename | `publish.yml` (not the full path) |
-| Environment name | Leave empty; the workflow does not use a GitHub Environment |
-| Allowed actions | Explicitly allow `npm publish`; new configurations default to staged publishing |
-
-For a release, update `package.json` to a new, unpublished version and commit it together with any release changes. Push a tag whose name is exactly `v` followed by that version:
-
-```sh
-VERSION="$(node -p "require('./package.json').version")"
-git tag "v$VERSION"
-git push origin "v$VERSION"
-```
-
-The workflow rejects mismatched tags, installs with the frozen lockfile, checks peers and types, builds, runs the full test suite, and runs `release:smoke` before `npm publish`. Build must precede tests on a clean checkout because integration and consumer tests load the generated `lib/` entry points; the workflow invokes these scripts separately rather than using the test-before-build `check` script. Any failed step stops publication. npm generates provenance automatically when publishing this public package from a public repository through OIDC.
-
-This workflow is tag-push-only: changing Actions settings or pushing `master` does not replay an earlier tag push or start a release. After resolving settings or account restrictions, a new unpublished version and matching tag provide a fresh release event without rewriting an existing tag. Confirm that an actual workflow run appears in the Actions tab; an `active` workflow registration alone is not evidence that a release started.
+For local installation, build and run `dsh plugin --profile <name> add .`. Releases use the [publish workflow](https://github.com/EveGoodEvening/dsh-autoresearch/blob/master/.github/workflows/publish.yml) with npm Trusted Publishing and a matching `v<package-version>` tag.
 
 ## License
 
-MIT © 2026 EveGoodEvening
+[MIT](LICENSE) © 2026 EveGoodEvening
