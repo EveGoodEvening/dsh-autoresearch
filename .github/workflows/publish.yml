@@ -1,0 +1,68 @@
+name: Publish to npm
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out release
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+          package-manager-cache: false
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          run_install: false
+          cache: false
+
+      - name: Set up npm for trusted publishing
+        run: npm install --global npm@11.16.0
+
+      - name: Check release tag
+        run: |
+          node --input-type=module <<'NODE'
+          import { readFileSync } from 'node:fs'
+          const { version } = JSON.parse(readFileSync('package.json', 'utf8'))
+          if (process.env.GITHUB_REF_NAME !== `v${version}`) {
+            throw new Error(`Expected tag v${version}, got ${process.env.GITHUB_REF_NAME}`)
+          }
+          NODE
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Check peer dependencies
+        run: pnpm peers check
+
+      - name: Check types
+        run: pnpm run typecheck
+
+      - name: Build package
+        run: pnpm run build
+
+      - name: Run tests
+        run: pnpm run test
+
+      - name: Verify packed release
+        run: pnpm run release:smoke
+
+      - name: Publish with OIDC
+        run: npm publish

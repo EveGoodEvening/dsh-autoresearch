@@ -178,6 +178,30 @@ pnpm run release:smoke  # packed-artifact release verification
 
 Release verification exercises the packed artifact **outside** the checkout: inspect the allowlist, install without local links, import generated ESM/declarations, install/dump the real named dsh profile, and boot the actual Web profile long enough to fetch its HTML surface. The integration suite separately executes autoresearch through the Web `standard` Agent preset with owner-scoped `job_*` controls.
 
+## Publish to npm
+
+`.github/workflows/publish.yml` publishes through [npm Trusted Publishing](https://docs.npmjs.com/trusted-publishers) when a `v*` tag is pushed. It uses a GitHub-hosted Ubuntu runner, Node.js 24, npm 11.16.0, and the pnpm version declared in `package.json`; no long-lived npm publishing token is needed.
+
+Before the first CI release, configure the `dsh-autoresearch` package's **Settings → Trusted publishing** on npmjs.com:
+
+| Field | Value |
+| --- | --- |
+| Provider | GitHub Actions |
+| Organization or user | `EveGoodEvening` |
+| Repository | `dsh-autoresearch` |
+| Workflow filename | `publish.yml` (not the full path) |
+| Environment name | Leave empty; the workflow does not use a GitHub Environment |
+| Allowed actions | Explicitly allow `npm publish`; new configurations default to staged publishing |
+
+For a stable release, update `package.json` to a new, unpublished version and commit it together with any release changes. Push a tag whose name is exactly `v` followed by that version, for example:
+
+```sh
+git tag v0.1.7
+git push origin v0.1.7
+```
+
+The workflow rejects mismatched tags, installs with the frozen lockfile, checks peers and types, builds, runs the full test suite, and runs `release:smoke` before `npm publish`. Build must precede tests on a clean checkout because integration and consumer tests load the generated `lib/` entry points; the workflow invokes these scripts separately rather than using the test-before-build `check` script. Any failed step stops publication. npm generates provenance automatically when publishing this public package from a public repository through OIDC.
+
 ## License
 
 MIT © 2026 EveGoodEvening
