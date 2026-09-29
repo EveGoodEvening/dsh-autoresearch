@@ -1,5 +1,7 @@
 # Handoff 2026-08-30 Remediation Checklist
 
+> 2026-09-29 current aggregate work is tracked only in [September full reassessment](handoff-2026-0903.md#2026-09-29-full-reassessment-and-release-ledger). H-01..H-15 boxes/SHAs below remain completed historical evidence, not fresh gates. H-02 exact compact lifecycle/trust documentation follow-up and unused H-01 raw contract cleanup are pending there. H-12/Chunk08 prose/version drift-test acceptance is superseded by higher-priority policy prohibiting incidental prose/version/script-copy tests: use manual source/packed truthfulness review and actual setup/runtime smoke, not new assertions. No closed history is reopened merely to add forbidden tests.
+
 ## Purpose and invariants
 
 This is the durable remediation tracker for the findings in `docs/plan/handoff-2026-0830.md`, reconciled with the independent audits and plan proposals in `local://handoff-audits.json` and `local://handoff-plan-proposals.json`.
