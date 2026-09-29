@@ -13,21 +13,27 @@ The design is inspired by [Karpathy's `autoresearch`](https://github.com/karpath
 - **Background jobs by default.** Runs are `dsh-jobs` background jobs; inspect or stop them with the generic job tools.
 - **Fail-closed recovery.** Resume reconciles durable Host evidence before mutation or evaluator spawn.
 
-## Requirements
+## Requirements and compatibility
 
-- Node.js `^22.19.0 || >=24.0.0` (uses `node:sqlite`)
-- pnpm `11.7.0`
-- DeepSeek Harness `0.1.1-rc.2`; this developer-preview integration is retested and repinned for each supported DSH release.
-- The Host must provide `agents`, `jobs`, `subprocess`, `systemPrompt`, and `tools`. Background mode additionally requires the calling Agent to mount `dsh-tool-jobs`; the Web `standard` Agent preset and the base/headless compositions do so. Host-global `job_*` tools are not required.
+| Component | `dsh-autoresearch@0.2.0` compatibility | Verified on 2026-09-29 |
+| --- | --- | --- |
+| DeepSeek Harness CLI and DSH service peers | `@deepseek-ai/dsh@0.1.7-rc.2` and the exact `0.1.7-rc.2` service family pinned in `package.json` | `0.1.7-rc.2` (CLI npm `latest`) |
+| Cordis | Scoped fork `@deepseek-ai/cordis` peer `~4.0.4`, **not** unscoped `cordis` | `4.0.4` |
+| Node.js | `^22.19.0 || >=24.2.0` (`node:sqlite`; the DSH CLI uses `import.meta.main`) | `24.21.0`; other declared Node versions are not separately verified |
+| pnpm | `11.7.0` (`package.json` package manager) | `11.7.0` |
+
+This version targets a tested **prerelease DSH host** pairing, not every DSH release. As of 2026-09-29, the CLI's npm `next` tag points to `0.2.0-rc.2`; that channel is **untested and not supported by the current exact DSH peer pins**. The older `0.1.1-rc.2` Host family is no longer supported by this version. Repin the coordinated CLI/service family and retest the integration before claiming support for another DSH release; component dist-tags need not match the CLI's.
+
+The Host must provide `agents`, `jobs`, `subprocess`, `systemPrompt`, and `tools`. Background mode additionally requires the calling Agent to mount `dsh-tool-jobs`; the Web `standard` Agent preset and the base/headless compositions do so. Host-global `job_*` tools are not required.
 
 Automatic takeover of a controller claim left by abnormal Host death requires Linux `/proc/<pid>/stat` start-token evidence. Normal managed execution is not declared Linux-only, but on non-Linux systems a stale claim remains conservatively blocked; lease expiry alone is not proof that its owner died.
 
 ## Install
 
-Install the published package through DSH's profile plugin manager:
+Install this version through DSH's profile plugin manager:
 
 ```sh
-dsh plugin --profile <name> add dsh-autoresearch
+dsh plugin --profile <name> add dsh-autoresearch@0.2.0
 dsh --profile <name> --dump-config
 ```
 
@@ -197,7 +203,7 @@ Before the first CI release, configure the `dsh-autoresearch` package's **Settin
 | Environment name | Leave empty; the workflow does not use a GitHub Environment |
 | Allowed actions | Explicitly allow `npm publish`; new configurations default to staged publishing |
 
-For a stable release, update `package.json` to a new, unpublished version and commit it together with any release changes. Push a tag whose name is exactly `v` followed by that version:
+For a release, update `package.json` to a new, unpublished version and commit it together with any release changes. Push a tag whose name is exactly `v` followed by that version:
 
 ```sh
 VERSION="$(node -p "require('./package.json').version")"
