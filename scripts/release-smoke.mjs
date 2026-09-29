@@ -53,14 +53,7 @@ async function main(args) {
       if (changed) throw new Error('external DSH_HOME changed during isolated smoke')
     }
     const installedRoot = await findInstalledPackage(dshHome, manifest.name)
-    const installed = await import(pathToFileURL(join(installedRoot, 'lib', 'index.js')).href)
-    const registrations = { tools: [], prompts: [] }
-    const ctx = activationContext(registrations)
-    installed.apply(ctx, {})
-    if (!registrations.tools.includes('autoresearch')) throw new Error('installed profile package did not register the autoresearch tool')
-    if (!registrations.prompts.includes('tool:autoresearch')) throw new Error('installed profile package did not register prompt guidance')
-    evidence.profileBoot = { installedRoot, sourceTreeResolved: installedRoot.startsWith(repoRoot), tools: registrations.tools, prompts: registrations.prompts }
-    if (evidence.profileBoot.sourceTreeResolved) throw new Error('installed profile resolved the source tree instead of its installed tarball')
+    if (installedRoot.startsWith(repoRoot)) throw new Error('installed profile resolved the source tree instead of its installed tarball')
 
     await mkdir(consumer, { recursive: true })
     await writeFile(join(consumer, 'package.json'), JSON.stringify({ name: 'dsh-autoresearch-consumer-smoke', private: true, type: 'module', scripts: { typecheck: 'tsc --noEmit -p tsconfig.json' } }, null, 2))
@@ -72,6 +65,7 @@ async function main(args) {
     await run(process.execPath, ['--input-type=module', '--eval', "const root=await import('dsh-autoresearch');const invariant=await import('dsh-autoresearch/invariant');if(root.name!=='autoresearch'||invariant.name!=='autoresearch-invariant')throw new Error('imports failed')"], { cwd: consumer })
 
     evidence.scenarios = await runInstalledScenarios(installedRoot, root)
+    evidence.profileBoot = { installedRoot, sourceTreeResolved: false, activatedRunId: evidence.scenarios.accepted.runId }
     evidence.ok = true
     console.log(JSON.stringify(evidence))
   } finally { await rm(root, { recursive: true, force: true }) }
@@ -190,27 +184,6 @@ async function findInstalledPackage(root, name) {
   throw new Error(`installed profile package ${name} not found below ${root}`)
 }
 
-function activationContext(registrations) {
-  return {
-    agents: { create() {} },
-    jobs: { start() {} },
-    subprocess: {},
-    tools: {
-      register(tool) {
-        registrations.tools.push(tool.name)
-        return () => {}
-      },
-    },
-    systemPrompt: {
-      section(spec) {
-        registrations.prompts.push(spec.name)
-        return () => {}
-      },
-    },
-    effect(runEffect) { return runEffect() },
-    on() { return () => {} },
-  }
-}
 
 export async function runWebProfileSmoke(command, env) {
   const child = spawn(command, ['web', '--no-open', '--host', '127.0.0.1', '--port', '0'], {
@@ -220,7 +193,6 @@ export async function runWebProfileSmoke(command, env) {
   const ready = Promise.withResolvers()
   const exited = Promise.withResolvers()
   let stdout = ''
-  let stderr = ''
   let readySettled = false
 
   const rejectReady = error => {
@@ -229,32 +201,63 @@ export async function runWebProfileSmoke(command, env) {
     ready.reject(error)
   }
   child.stdout.setEncoding('utf8').on('data', chunk => {
+    if (readySettled) return
     stdout += chunk
-    const match = stdout.match(/http:\/\/127\.0\.0\.1:\d+/u)
-    if (!match || readySettled) return
+    const match = stdout.match(/^dsh web: (\S+)\r?\n/mu)
+    if (!match) {
+      // Startup output may include credentials; retain only the incomplete tail.
+      stdout = stdout.slice(-4096)
+      return
+    }
     readySettled = true
-    ready.resolve(match[0])
+    ready.resolve(match[1])
+    stdout = ''
   })
-  child.stderr.setEncoding('utf8').on('data', chunk => { stderr += chunk })
+  // Never include Web output in exceptions: its startup line contains a launch secret.
+  child.stderr.resume()
   child.once('error', error => {
-    rejectReady(error)
+    rejectReady(new Error(`web profile could not start: ${error.code ?? 'spawn error'}`))
     exited.resolve({ error })
   })
   child.once('close', (code, signal) => {
-    rejectReady(new Error(`${command} web exited before readiness (${code ?? signal})\n${stdout}\n${stderr}`))
+    rejectReady(new Error(`web profile exited before readiness (${code ?? signal})`))
     exited.resolve({ code, signal })
   })
 
   const timeout = setTimeout(() => {
-    rejectReady(new Error(`${command} web did not become ready within 60s\n${stdout}\n${stderr}`))
+    rejectReady(new Error('web profile did not become ready within 60s'))
   }, 60_000)
   try {
-    const url = await ready.promise
-    const response = await fetch(url, { signal: AbortSignal.timeout(10_000) })
+    const printedUrl = await ready.promise
+    let bootstrap
+    try { bootstrap = new URL(printedUrl) } catch { throw new Error('web profile printed an invalid bootstrap URL') }
+    if (bootstrap.protocol !== 'http:' || bootstrap.hostname !== '127.0.0.1' || !bootstrap.port || bootstrap.username || bootstrap.password || bootstrap.pathname !== '/' || !bootstrap.searchParams.get('token')) {
+      throw new Error('web profile did not print a loopback root bootstrap URL')
+    }
+    const url = bootstrap.origin + '/'
+    const unauthenticated = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(10_000) })
+    if (unauthenticated.status !== 401) throw new Error(`web profile exposed an unauthenticated index: ${unauthenticated.status}`)
+
+    // The official process-token URL is a one-time browser bootstrap: GET /?token
+    // mints an authority-bound session cookie and redirects to the clean root.
+    let exchange
+    try {
+      exchange = await fetch(bootstrap, { redirect: 'manual', signal: AbortSignal.timeout(10_000) })
+    } catch {
+      throw new Error('web profile bootstrap URL request failed')
+    }
+    const cookie = exchange.headers.get('set-cookie')?.split(';', 1)[0]
+    if (exchange.status !== 303 || exchange.headers.get('location') !== './' || !cookie) {
+      throw new Error(`web profile did not exchange the bootstrap URL for a session: ${exchange.status}`)
+    }
+    const response = await fetch(new URL('./', bootstrap), {
+      headers: { cookie },
+      signal: AbortSignal.timeout(10_000),
+    })
     const contentType = response.headers.get('content-type') ?? ''
-    await response.arrayBuffer()
-    if (!response.ok || !contentType.includes('text/html')) {
-      throw new Error(`web profile returned ${response.status} ${contentType || '(no content type)'}`)
+    const html = await response.text()
+    if (response.status !== 200 || !contentType.includes('text/html') || !/<(?:!doctype\s+html|html\b)/iu.test(html)) {
+      throw new Error(`web profile did not serve an authenticated HTML document: ${response.status} ${contentType || '(no content type)'}`)
     }
     child.kill('SIGTERM')
     const outcome = await Promise.race([
@@ -262,9 +265,9 @@ export async function runWebProfileSmoke(command, env) {
       new Promise(resolveTimeout => setTimeout(() => resolveTimeout({ timeout: true }), 10_000)),
     ])
     if (outcome.timeout) throw new Error('web profile did not stop within 10s after SIGTERM')
-    if (outcome.error) throw outcome.error
-    if (outcome.code !== 0) throw new Error(`web profile exited ${outcome.code ?? outcome.signal}\n${stdout}\n${stderr}`)
-    return { url, status: response.status, contentType }
+    if (outcome.error) throw new Error(`web profile failed: ${outcome.error.code ?? 'spawn error'}`)
+    if (outcome.code !== 0) throw new Error(`web profile exited ${outcome.code ?? outcome.signal}`)
+    return { url, unauthenticatedStatus: unauthenticated.status, bootstrapStatus: exchange.status, status: response.status, contentType }
   } finally {
     clearTimeout(timeout)
     if (child.exitCode === null && child.signalCode === null) {

@@ -11,7 +11,7 @@ import {
   resolveChildAgentOptions,
   resolveChildDepth,
 } from '@deepseek-ai/dsh-subagent'
-import type { JobSnapshot } from '@deepseek-ai/dsh-jobs'
+import type { JobView } from '@deepseek-ai/dsh-jobs'
 import { validateJsonSchemaValue, type JsonSchemaNode, type ToolDefinition, type ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import type { ResolvedConfig } from './config.js'
 import { captureGitConfigBaseline, type GitCommandOptions, type GitConfigBaseline } from './git.js'
@@ -23,6 +23,12 @@ import type {
   FullCommitSha,
   RunId,
 } from './types.js'
+
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    'autoresearch-proposal': { kind: 'autoresearch-proposal' }
+  }
+}
 
 export const PROPOSAL_REPORT_TOOL = 'autoresearch_report' as const
 export const PROPOSAL_INHERITED_TOOLS = ['read', 'write', 'edit', 'glob', 'grep'] as const
@@ -241,7 +247,7 @@ export async function requestProposal(ctx: Context, request: ProposalAgentReques
   const childDepth = resolveChildDepth(request.parent, undefined)
   const delegatedPolicy = captureDelegatedPolicyOverrides(request.parent)
   const agentOptions = resolvedRoute(request, childDepth)
-  const meta = { ...childSessionMeta(request.parent, childDepth, 0), cwd: request.workspace.worktree }
+  const meta = { ...childSessionMeta(request.parent, childDepth, false), cwd: request.workspace.worktree }
   const nonce = randomUUID()
   const sessionId = SessionId(randomUUID())
   const prompt = buildPrompt(request, nonce)
@@ -280,13 +286,12 @@ export async function requestProposal(ctx: Context, request: ProposalAgentReques
   try {
     handle = await ctx.agents.create({
       sessionId,
+      parentAgent: request.parent,
       meta,
       agentOptions,
       signal: request.signal,
-      setup(childCtx) {
-        const child = childCtx.agent
-        if (child === undefined) throw fail('capability-unavailable', 'Unpublished child Agent is unavailable during setup')
-        appendDelegatedPolicyOverrides(child.session, delegatedPolicy)
+      setup(childCtx, childAgent) {
+        appendDelegatedPolicyOverrides(childAgent.session, delegatedPolicy)
         applyChildComposition(childCtx, request.parent, { toolFilter: { allow: PROPOSAL_INHERITED_TOOLS } })
         childCtx.tools.presentAs('native')
         childCtx.tools.register(reportTool(async (args, exec) => {
@@ -323,7 +328,7 @@ export async function requestProposal(ctx: Context, request: ProposalAgentReques
       handle.agent.cancel({ kind: 'parent' })
       throw fail('cancelled', 'Proposal request was cancelled after child publication', request.signal.reason)
     }
-    handle.agent.followup(createUserMessage({ content: [{ type: 'text', text: prompt }], source: { kind: 'plugin', plugin: 'dsh-autoresearch' } }))
+    handle.agent.followup(createUserMessage({ content: [{ type: 'text', text: prompt }], source: { kind: 'autoresearch-proposal' } }))
     await handle.agent.whenIdle()
     if (request.signal.aborted) throw fail('cancelled', 'Proposal request was cancelled', request.signal.reason)
     if (reportError !== undefined) throw reportError
@@ -341,7 +346,7 @@ export async function requestProposal(ctx: Context, request: ProposalAgentReques
   if (operationError instanceof ProposalAgentError && operationError.code === 'dispose-failed') throw operationError
   if (handle !== undefined) {
     if (ctx.agents.get(sessionId) !== undefined) throw fail('not-quiescent', 'Disposed proposal child remains registered')
-    const liveJobs = ctx.jobs.list(handle.agent).filter((job: JobSnapshot) => job.status === 'running' || job.status === 'stopping')
+    const liveJobs = ctx.jobs.list(handle.agent.id).filter((job: JobView) => job.status === 'running' || job.status === 'stopping')
     if (liveJobs.length > 0) throw fail('not-quiescent', 'Disposed proposal child retains nonterminal jobs')
   }
   if (operationError !== undefined) throw operationError

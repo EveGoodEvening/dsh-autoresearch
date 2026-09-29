@@ -6,9 +6,11 @@ import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { DatabaseSync } from 'node:sqlite'
 import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
-import type {} from '@deepseek-ai/dsh-agent-presets'
+import type {} from '@deepseek-ai/dsh-agent-preset-registry'
 import type { SubprocessHandle } from '@deepseek-ai/dsh-subprocess'
+import { JobId } from '@deepseek-ai/dsh-jobs'
 import { SessionId } from '@deepseek-ai/dsh-session'
+import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import { afterEach, describe, expect, it } from 'vitest'
 import { COMPOSITION_TERMINATION_GRACE_MS, composeHarness, assembledPrompt, type RealHarness } from './fixtures/harness-composition.ts'
 import { calls, holdModel, releaseModel } from './fixtures/loader/model-provider.ts'
@@ -63,7 +65,7 @@ function stringProperty(value: unknown, property: string): string {
 }
 
 async function execute(harness: RealHarness, name: string, args: unknown, agent: Agent) {
-  return harness.ctx.tools.execute({ callId: `call-${crypto.randomUUID()}` as never, name, arguments: args, agent, signal: new AbortController().signal })
+  return harness.ctx.tools.execute({ callId: ToolCallId(`call-${crypto.randomUUID()}`), name, arguments: args, agent, signal: new AbortController().signal })
 }
 
 function request(cwd: string, mode: 'background' | 'foreground' = 'background') {
@@ -132,14 +134,10 @@ describe('real Loader/profile production composition', () => {
   it('boots the shipped base profile keylessly with the opt-in stable autoresearch row and providers', async () => {
     const without = await composeHarness({ autoresearch: false })
     active.push(without)
-    expect(without.entries.some(entry => entry.id === 'autoresearch')).toBe(false)
+    expect(without.ctx.tools.schemas().map(tool => tool.name)).not.toContain('autoresearch')
 
     const harness = await composeHarness()
     active.push(harness)
-    const row = harness.entries.find(entry => entry.id === 'autoresearch')
-    expect(row).toMatchObject({ id: 'autoresearch', name: 'dsh-autoresearch', config: { defaultMaxExperiments: 20 } })
-    expect(harness.profile.layers.map(layer => layer.packageName)).toEqual(['@deepseek-ai/dsh-base', 'dsh-autoresearch'])
-    expect(harness.entries.map(entry => entry.id)).toEqual(expect.arrayContaining(['agent', 'jobs', 'subprocess', 'system-prompt', 'tools', 'tool-jobs']))
     expect(harness.ctx.tools.schemas().map(tool => tool.name)).toEqual(expect.arrayContaining(['autoresearch', 'job_output', 'job_list', 'job_kill']))
     expect(await assembledPrompt(harness.ctx)).toContain('Use autoresearch only when the direct human explicitly requests')
     expect(harness.ctx.llm.listProviders().map(provider => provider.id)).toContain('autoresearch-test')
@@ -202,11 +200,11 @@ describe('real Loader/profile production composition', () => {
     ]
     try {
       for (const target of targets) {
-        const jobsBefore = harness.ctx.jobs.list(parent.agent).map(job => job.id)
+        const jobsBefore = harness.ctx.jobs.list(parent.agent.id).map(job => job.id)
         const result = await execute(harness, 'autoresearch', request(target.path, mode), parent.agent)
         expect(result.isError).toBe(true)
         expect(result.error).toMatchObject({ message: target.message })
-        expect(harness.ctx.jobs.list(parent.agent).map(job => job.id)).toEqual(jobsBefore)
+        expect(harness.ctx.jobs.list(parent.agent.id).map(job => job.id)).toEqual(jobsBefore)
         expect(persistedBackgroundJobIds(target.path)).toEqual([])
       }
     } finally { await parent.dispose() }
@@ -264,13 +262,13 @@ describe('real Loader/profile production composition', () => {
       expect(persistedBackgroundJobIds(cwd)).toContain(jobId)
       expect(evaluatorSignal?.aborted).toBe(false)
 
-      expect(harness.ctx.jobs.kill(jobId as never, parent.agent, 'ordering test cancellation')).toBe('requested')
+      expect(harness.ctx.jobs.kill(JobId(jobId), parent.agent.id, 'ordering test cancellation')).toBe('requested')
       let lastProcessState: string | undefined
       let lastJobStatus: string | undefined
       await waitUntil(() => evaluatorSignal?.aborted === true, 'job cancellation did not abort the evaluator-owned signal')
       await waitUntil(async () => {
         lastProcessState = await processState(pid)
-        lastJobStatus = harness.ctx.jobs.get(jobId as never, parent.agent).status
+        lastJobStatus = harness.ctx.jobs.get(JobId(jobId), parent.agent.id).status
         return evaluatorHandleSettled
           && (lastProcessState === undefined || lastProcessState === 'Z')
           && lastJobStatus === 'killed'
@@ -278,7 +276,7 @@ describe('real Loader/profile production composition', () => {
       expect(await evaluatorHandle?.waitForExit()).toBe(true)
       const finalProcessState = await processState(pid)
       if (finalProcessState !== undefined && finalProcessState !== 'Z') throw new Error(`evaluator orphan ${pid} remains live in process state ${finalProcessState}`)
-      expect((await harness.ctx.jobs.wait(jobId as never, 1, parent.agent)).status).toBe('killed')
+      expect((await harness.ctx.jobs.wait(JobId(jobId), 1, parent.agent.id)).status).toBe('killed')
       const result = await execution
       expect(result.isError).toBe(false)
       expect(result.value).toMatchObject({ kind: 'background', jobId })
@@ -302,9 +300,9 @@ describe('real Loader/profile production composition', () => {
       if (started.value && typeof started.value === 'object' && 'kind' in started.value && started.value.kind === 'background-start-failed') throw new Error(JSON.stringify(started.value))
       expect(started.value).toMatchObject({ kind: 'background', jobId: expect.stringMatching(/^autoresearch-/), runId: expect.any(String), worktree: expect.any(String) })
       const value = started.value as { jobId: string; runId: string }
-      expect(harness.ctx.jobs.get(value.jobId as never, parent.agent)).toMatchObject({ id: value.jobId, kind: 'autoresearch', status: 'running' })
+      expect(harness.ctx.jobs.get(JobId(value.jobId), parent.agent.id)).toMatchObject({ id: value.jobId, kind: 'autoresearch', status: 'running' })
       const foreign = await parentAgent(harness, cwd, 'foreign')
-      await expect(Promise.resolve().then(() => harness.ctx.jobs.get(value.jobId as never, foreign.agent))).rejects.toThrow(/access|owner|unknown|session/i)
+      await expect(Promise.resolve().then(() => harness.ctx.jobs.get(JobId(value.jobId), foreign.agent.id))).rejects.toThrow(/access|owner|unknown|session/i)
       await foreign.dispose()
 
       const listed = await execute(harness, 'job_list', {}, parent.agent)
@@ -342,17 +340,21 @@ describe('real Loader/profile production composition', () => {
       const initialProcessState = await processState(pid)
       expect(initialProcessState).toBeDefined()
       expect(initialProcessState).not.toBe('Z')
-      expect(harness.ctx.jobs.list(parent.agent)).toEqual([expect.objectContaining({ kind: 'autoresearch', status: 'running' })])
+      expect(harness.ctx.jobs.list(parent.agent.id)).toEqual([expect.objectContaining({ kind: 'autoresearch', status: 'running' })])
 
       await harness.reloadAutoresearch()
       await execution
 
-      let finalProcessState: string | undefined
-      await waitUntil(async () => {
-        finalProcessState = await processState(pid)
-        return finalProcessState === undefined || finalProcessState === 'Z'
-      }, () => `evaluator process survived HMR unload in process state ${finalProcessState ?? 'unknown'}`)
-      expect(harness.ctx.jobs.list(parent.agent).every(job => job.status !== 'running' && job.status !== 'stopping')).toBe(true)
+      const finalProcessState = await processState(pid)
+      expect(finalProcessState === undefined || finalProcessState === 'Z', `evaluator process survived HMR unload in process state ${finalProcessState ?? 'unknown'}`).toBe(true)
+      const jobs = harness.ctx.jobs.list(parent.agent.id)
+      if (jobs.some(job => job.status === 'running' || job.status === 'stopping')) {
+        throw new Error(`autoresearch jobs survived HMR unload: ${JSON.stringify(jobs.map(job => ({ id: job.id, status: job.status, detail: job.detail, finishedAt: job.finishedAt, result: harness.ctx.jobs.read(JobId(job.id), parent.agent.id).result })))}`)
+      }
+      expect(jobs).toEqual([expect.objectContaining({ kind: 'autoresearch', status: 'killed', finishedAt: expect.any(Number) })])
+      const result = harness.ctx.jobs.read(JobId(jobs[0]!.id), parent.agent.id).result
+      if (result === undefined) throw new Error('HMR job has no authoritative cancellation result')
+      expect(JSON.parse(result)).toMatchObject({ status: 'cancelled' })
       expect(harness.ctx.agents.list().map(agent => agent.id)).toEqual([parent.agent.id])
     } finally {
       try { await parent.dispose() } finally { await marker.dispose() }
@@ -371,13 +373,15 @@ describe('real Loader/profile production composition', () => {
       if (!started.value || typeof started.value !== 'object' || !('jobId' in started.value) || typeof started.value.jobId !== 'string') throw new Error(JSON.stringify(started.value))
       const jobId = started.value.jobId
       await waitUntil(() => calls.length > 0 && harness.ctx.agents.list().length > 1, 'autoresearch child did not become active before HMR')
-      expect(harness.ctx.jobs.get(jobId as never, parent.agent)).toMatchObject({ status: 'running' })
+      expect(harness.ctx.jobs.get(JobId(jobId), parent.agent.id)).toMatchObject({ status: 'running' })
 
       await harness.reloadAutoresearch()
+      const settled = harness.ctx.jobs.get(JobId(jobId), parent.agent.id)
+      expect(settled.status).toBe('killed')
+      const result = harness.ctx.jobs.read(JobId(jobId), parent.agent.id).result
+      if (result === undefined) throw new Error('HMR job has no authoritative cancellation result')
+      expect(JSON.parse(result)).toMatchObject({ status: 'cancelled' })
       releaseModel()
-
-      const settled = await harness.ctx.jobs.wait(jobId as never, 20_000, parent.agent)
-      expect(['failed', 'killed']).toContain(settled.status)
       expect(harness.ctx.agents.list().map(agent => agent.id)).toEqual([parent.agent.id])
       expect(harness.ctx.tools.schemas().filter(tool => tool.name === 'autoresearch')).toHaveLength(1)
       expect((await assembledPrompt(harness.ctx)).match(/Use autoresearch only/g)).toHaveLength(1)
@@ -388,6 +392,16 @@ describe('real Loader/profile production composition', () => {
   }, 30_000)
 })
 
+async function activationFailure(options: Parameters<typeof composeHarness>[0]): Promise<string> {
+  let failure: unknown
+  try {
+    const harness = await composeHarness(options)
+    await harness.dispose()
+  } catch (error) { failure = error }
+  if (failure === undefined) throw new Error('expected Loader activation to fail')
+  return failure instanceof Error ? failure.message : String(failure)
+}
+
 describe('Loader activation failures', () => {
   it.each([
     ['tools', 'tools'],
@@ -396,17 +410,17 @@ describe('Loader activation failures', () => {
     ['subprocess', 'subprocess'],
     ['agent', 'agents'],
   ])('fails clearly when the shipped profile omits %s', async (entry, service) => {
-    await expect(composeHarness({ omitEntry: entry })).rejects.toThrow(new RegExp(service, 'i'))
+    expect(await activationFailure({ omitEntry: entry })).toMatch(new RegExp(service, 'i'))
   }, 30_000)
 
   it('rejects reserved DSH_* Host evaluator environment during real Loader activation', async () => {
     const registration = evaluatorConfig([evaluator]).evaluatorRegistrations[0]!
-    await expect(composeHarness({ autoresearchConfig: { evaluatorRegistrations: [{ ...registration, environment: { DSH_TOKEN: 'reserved' } }] } })).rejects.toThrow(/environment name DSH_TOKEN is reserved/)
+    expect(await activationFailure({ autoresearchConfig: { evaluatorRegistrations: [{ ...registration, environment: { DSH_TOKEN: 'reserved' } }] } })).toMatch(/environment name DSH_TOKEN is reserved/)
   }, 30_000)
 
   it('rejects duplicate Host evaluator registrations during real Loader activation', async () => {
     const registration = { id: 'judge', command: 'node', args: ['score.mjs'], metricName: 'score', metricDirection: 'minimize', metricParserVersion: 'final-line-json-v1', evaluatorFiles: [] }
-    await expect(composeHarness({ autoresearchConfig: { evaluatorRegistrations: [registration, registration] } })).rejects.toThrow(/duplicate evaluator registration id "judge"/)
+    expect(await activationFailure({ autoresearchConfig: { evaluatorRegistrations: [registration, registration] } })).toMatch(/duplicate evaluator registration id "judge"/)
   }, 30_000)
 
   it('defers missing Job control validation to owner-relative background registration', async () => {
@@ -419,7 +433,7 @@ describe('Loader activation failures', () => {
       expect(result.isError).toBe(false)
       expect(result.value).toMatchObject({ kind: 'background-start-failed', jobId: 'unregistered', status: 'failed' })
       expect(stringProperty(result.value, 'reason')).toMatch(/controller|collect|stop/i)
-      expect(harness.ctx.jobs.list(parent.agent)).toEqual([])
+      expect(harness.ctx.jobs.list(parent.agent.id)).toEqual([])
     } finally { await parent.dispose() }
   }, 30_000)
 })

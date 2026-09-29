@@ -1,10 +1,10 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentHandle, CreateAgentOptions } from '@deepseek-ai/dsh-agent'
-import type { JobSnapshot } from '@deepseek-ai/dsh-jobs'
-import { SessionId } from '@deepseek-ai/dsh-session'
+import { JobId, type JobView } from '@deepseek-ai/dsh-jobs'
+import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import { SessionId, type EpochHeader } from '@deepseek-ai/dsh-session'
 import type { SubprocessHandle, SubprocessOutcome, SubprocessOutputReader, SubprocessSpawnSpec } from '@deepseek-ai/dsh-subprocess'
-import type { ToolDefinition, ToolExecutionResult } from '@deepseek-ai/dsh-tools'
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it, vi, type Mock } from 'vitest'
 import { PROPOSAL_INHERITED_TOOLS, PROPOSAL_REPORT_TOOL, ProposalAgentError, requestProposal, type ProposalAgentRequest } from '../src/agent.ts'
 
 class TextReader implements SubprocessOutputReader {
@@ -42,12 +42,14 @@ interface HarnessFixture {
   readonly ctx: Context
   readonly parent: Agent
   readonly createOptions: CreateAgentOptions[]
+  readonly childSessions: Array<{ append: Mock }>
   readonly childTools: Map<string, ToolDefinition>
   readonly restrictions: unknown[]
   readonly presentations: string[]
   readonly sections: Array<{ name: string; order: number; text: string }>
   readonly order: string[]
   readonly prompts: string[]
+  readonly jobListCallers: SessionId[]
   readonly dispose: ReturnType<typeof vi.fn>
   readonly childId: { value?: ReturnType<typeof SessionId> }
   behavior: 'valid' | 'missing' | 'unknown' | 'duplicate' | 'stale' | 'wrong' | 'oversized' | 'normalized'
@@ -61,12 +63,14 @@ interface HarnessFixture {
 
 function fixture(): HarnessFixture {
   const createOptions: CreateAgentOptions[] = []
+  const childSessions: Array<{ append: Mock }> = []
   const childTools = new Map<string, ToolDefinition>()
   const restrictions: unknown[] = []
   const presentations: string[] = []
   const sections: Array<{ name: string; order: number; text: string }> = []
   const resultListeners: ResultListener[] = []
   const order: string[] = []
+  const jobListCallers: SessionId[] = []
   const prompts: string[] = []
   const live = new Map<string, Agent>()
   const dispose = vi.fn(async () => { order.push('dispose'); if (harness.disposeError) throw harness.disposeError; if (!harness.keepRegistered && childId.value !== undefined) live.delete(childId.value) })
@@ -76,6 +80,7 @@ function fixture(): HarnessFixture {
   const parentSession = {
     header: { id: SessionId('parent-session'), cwd: '/parent', delegationDepth: 2 },
     append: vi.fn(),
+    requestHeader: vi.fn<() => EpochHeader | undefined>(() => undefined),
   }
   const parentCtx = {
     get(name: string) {
@@ -96,12 +101,14 @@ function fixture(): HarnessFixture {
 
   const agents = {
     async create(options: CreateAgentOptions): Promise<AgentHandle> {
+      if (options.parentAgent?.session.header.id !== options.meta?.parentSession) throw new Error('Proposal child must be owned by its session-lineage parent')
       order.push('create')
       createOptions.push(options)
       childId.value = options.sessionId
       const childSession = { header: { id: options.sessionId, ...options.meta }, append: vi.fn() }
+      childSessions.push(childSession)
       const childCtx = {
-        agent: undefined as Agent | undefined,
+        // The setup context carries the causal parent; the unpublished child is its second argument.
         get(name: string) {
           if (name === 'agentPresets') return { composeFrom: vi.fn(() => order.push('preset')) }
           return undefined
@@ -114,6 +121,8 @@ function fixture(): HarnessFixture {
         },
         systemPrompt: {
           context() { order.push('delegation-context'); return () => undefined },
+          getContextOrder(name: string) { expect(name).toBe('SUBAGENT_DELEGATION'); return 100 },
+          getSectionOrder() { return 100 },
           section(value: { name: string; order: number; text: string }) { sections.push(value); order.push(`section:${value.order}`); return () => undefined },
         },
         on(name: string, listener: ResultListener) { if (name === 'tools/result') resultListeners.push(listener); return () => undefined },
@@ -156,8 +165,7 @@ function fixture(): HarnessFixture {
           if (harness.behavior === 'duplicate') await execute()
         },
       } as unknown as Agent
-      childCtx.agent = child
-      await options.setup?.(childCtx)
+      await options.setup?.(childCtx, child)
       live.set(options.sessionId, child)
       return { agent: child, dispose }
     },
@@ -167,9 +175,12 @@ function fixture(): HarnessFixture {
   const ctx = Object.assign(parentCtx as unknown as Record<string, unknown>, {
     agents,
     subprocess,
-    jobs: { list: () => harness.liveJob ? [{ status: 'running' }] as JobSnapshot[] : [] as JobSnapshot[] },
+    jobs: { list: (caller: SessionId) => {
+      jobListCallers.push(caller)
+      return harness.liveJob && caller === childId.value ? [{ id: JobId('proposal-job'), kind: 'autoresearch', label: 'proposal', owner: caller, status: 'running', startedAt: 0, output: { total: 0, earliest: 0 } }] satisfies JobView[] : []
+    } },
   }) as unknown as Context
-  Object.assign(harness, { ctx, parent, createOptions, childTools, restrictions, presentations, sections, order, prompts, dispose, childId, liveCount: () => live.size })
+  Object.assign(harness, { ctx, parent, createOptions, childTools, childSessions, restrictions, presentations, sections, order, prompts, dispose, childId, jobListCallers, liveCount: () => live.size })
   return harness
 }
 
@@ -205,19 +216,25 @@ describe('proposal-agent adapter', () => {
     expect(first).toEqual({ hypothesis: 'Change the hot path', intendedEdits: ['src/hot.ts'], implementationSummary: 'Reduced duplicate work', blockerClaim: null })
     expect(second).toEqual(first)
     expect(f.createOptions[0]?.sessionId).not.toBe(f.createOptions[1]?.sessionId)
+    expect(f.createOptions[0]?.parentAgent).toBe(f.parent)
     expect(f.createOptions[0]).toMatchObject({
-      meta: { cwd: '/tmp/proposal-worktree', parentSession: SessionId('parent-session'), origin: 'subagent', delegationDepth: 3, agentPreset: 'preset-generation-7' },
+      meta: { cwd: '/tmp/proposal-worktree', parentSession: SessionId('parent-session'), origin: 'subagent', delegationDepth: 3, isSeeded: false, agentPreset: 'preset-generation-7' },
       agentOptions: { provider: 'override-provider', model: 'override-model', maxTokens: 999, subagentDepth: 3 },
     })
     expect(f.createOptions[0]).not.toHaveProperty('seed')
     expect(f.restrictions).toEqual([{ allow: PROPOSAL_INHERITED_TOOLS }, { allow: PROPOSAL_INHERITED_TOOLS }])
     expect(f.presentations).toEqual(['native', 'native'])
+    expect(f.childSessions[0]?.append.mock.calls).toEqual([
+      ['sandbox/mode', { mode: 'workspace-write', source: 'delegation' }],
+      ['approval/policy', { policy: 'never', source: 'delegation' }],
+    ])
     expect(f.sections).toContainEqual(expect.objectContaining({ name: 'tool:autoresearch_report', order: 190 }))
     expect(f.childTools.has(PROPOSAL_REPORT_TOOL)).toBe(true)
     expect(f.order.indexOf('persist')).toBeLessThan(f.order.indexOf('create'))
     expect(f.order.indexOf('followup')).toBeLessThan(f.order.indexOf('whenIdle'))
     expect(f.order.indexOf('whenIdle')).toBeLessThan(f.order.indexOf('dispose'))
     expect(f.dispose).toHaveBeenCalledTimes(2)
+    expect(f.jobListCallers).toEqual([f.createOptions[0]!.sessionId, f.createOptions[1]!.sessionId])
   })
 
   it.each([
@@ -260,6 +277,24 @@ describe('proposal-agent adapter', () => {
     await requestProposal(f.ctx, { ...input, config: { maxHandoffChars: input.config.maxHandoffChars } })
     expect(f.createOptions[0]).toMatchObject({ agentOptions: { provider: 'inherited-provider', model: 'inherited-model', subagentDepth: 3 } })
     expect(f.createOptions[0]?.agentOptions).not.toHaveProperty('maxTokens')
+  })
+
+  it('inherits the latest request route and effort, not stale creation options, while retaining the creation token limit', async () => {
+    const f = fixture()
+    const parentSession = f.parent.session
+    vi.spyOn(parentSession, 'requestHeader').mockReturnValue({ config: { provider: 'latest-provider', model: 'latest-model', reasoningEffort: ReasoningEffortId('high') } })
+    const input = request(f.parent, vi.fn())
+    await requestProposal(f.ctx, { ...input, config: { maxHandoffChars: input.config.maxHandoffChars } })
+    expect(f.createOptions[0]?.agentOptions).toMatchObject({ provider: 'latest-provider', model: 'latest-model', reasoningEffort: 'high', maxTokens: 777, subagentDepth: 3 })
+  })
+
+  it('clears inherited reasoning effort when the proposal overrides the latest request route', async () => {
+    const f = fixture()
+    const parentSession = f.parent.session
+    vi.spyOn(parentSession, 'requestHeader').mockReturnValue({ config: { provider: 'latest-provider', model: 'latest-model', reasoningEffort: ReasoningEffortId('high') } })
+    await requestProposal(f.ctx, request(f.parent, vi.fn()))
+    expect(f.createOptions[0]?.agentOptions).toMatchObject({ provider: 'override-provider', model: 'override-model', maxTokens: 999, subagentDepth: 3 })
+    expect(f.createOptions[0]?.agentOptions).not.toHaveProperty('reasoningEffort')
   })
 
   it.each([
@@ -336,7 +371,8 @@ describe('proposal-agent adapter', () => {
     await expect(requestProposal(f.ctx, request(f.parent, vi.fn()))).resolves.toMatchObject({ hypothesis: 'Change the hot path' })
     expect(f.dispose).toHaveBeenCalledTimes(1)
     expect(f.liveCount()).toBe(0)
-    expect(f.ctx.jobs.list()).toEqual([])
+    expect(f.jobListCallers).toEqual([f.childId.value])
+    expect(f.ctx.jobs.list(f.childId.value!)).toEqual([])
   })
 
 })

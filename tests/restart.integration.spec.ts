@@ -10,7 +10,12 @@ import { LocalSubprocessRuntime } from '@deepseek-ai/dsh-subprocess-local'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { resolveConfig } from '../src/config.ts'
 import { AutoresearchRunController } from '../src/controller.ts'
+import type { AutoresearchRunResult } from '../src/types.ts'
 import { DurableTracker } from '../src/tracker.ts'
+
+// Real managed Git subprocesses make the restart/recovery flows longer than Vitest's 5s default.
+const RESTART_TEST_TIMEOUT_MS = 60_000
+const DESCENDANT_START_TIMEOUT_MS = 20_000
 
 const roots: string[] = []
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
@@ -52,7 +57,7 @@ describe('controller restart and repository concurrency integration', () => {
       const reused = controller(f, 'shared', 2, undefined, true); const reusedRun = reused.run(); const reusedReady = await reused.ready; expect(reusedReady.runId).not.toBe(a.runId)
       second.cancel('cleanup'); reused.cancel('cleanup'); await Promise.all([secondRun, reusedRun])
     } finally { await f.dispose() }
-  })
+  }, RESTART_TEST_TIMEOUT_MS)
 
   it('recovers a crash after local terminal release and before shared authority deletion', async () => {
     const f = await fixture()
@@ -87,7 +92,7 @@ describe('controller restart and repository concurrency integration', () => {
       expect(reusedIdentity.runId).not.toBe(identity.runId)
       reused.cancel('cleanup'); await running
     } finally { fault.mockRestore(); await f.dispose() }
-  })
+  }, RESTART_TEST_TIMEOUT_MS)
 
   it('requires explicit controller release before resuming the same durable lineage exactly once', async () => {
     const f = await fixture()
@@ -112,7 +117,7 @@ describe('controller restart and repository concurrency integration', () => {
       expect(tracker.database.prepare('SELECT COUNT(*) AS count FROM attempts WHERE run_id = ?').get(ready.runId)?.['count']).toBe(1)
       tracker.close()
     } finally { await f.dispose() }
-  })
+  }, RESTART_TEST_TIMEOUT_MS)
   it('resumes after a public controller interruption following actual lock and worktree allocation', async () => {
     const f = await fixture()
     const original = DurableTracker.prototype.transitionRun
@@ -133,13 +138,22 @@ describe('controller restart and repository concurrency integration', () => {
       expect(tracker.database.prepare('SELECT COUNT(*) AS count FROM attempts WHERE run_id = ?').get(identity.runId)?.['count']).toBe(1)
       tracker.close()
     } finally { fault.mockRestore(); await f.dispose() }
-  })
+  }, RESTART_TEST_TIMEOUT_MS)
 
   it('cancels a real evaluator descendant tree and resumes the terminal lineage without duplicate attempts', async () => {
     const f = await fixture(); const marker = join(f.root, 'descendant.json')
+    let interrupted: AutoresearchRunController | undefined
+    let running: Promise<AutoresearchRunResult> | undefined
+    let observedRunning: Promise<{ kind: 'completed' } | { kind: 'failed'; error: unknown }> | undefined
+    const failures: unknown[] = []
     try {
-      const interrupted = controller(f, 'descendant', 1, undefined, false, marker); const running = interrupted.run(); const ready = await interrupted.ready
-      for (let i = 0; i < 100 && !existsSync(marker); i++) await delay(10)
+      interrupted = controller(f, 'descendant', 1, undefined, false, marker)
+      running = interrupted.run()
+      observedRunning = running.then(() => ({ kind: 'completed' as const }), error => ({ kind: 'failed' as const, error }))
+      const ready = await interrupted.ready
+      const deadline = Date.now() + DESCENDANT_START_TIMEOUT_MS
+      while (!existsSync(marker) && Date.now() < deadline) await delay(25)
+      if (!existsSync(marker)) throw new Error(`evaluator descendant marker not published within ${DESCENDANT_START_TIMEOUT_MS}ms after worktree readiness`)
       const pids = JSON.parse(readFileSync(marker, 'utf8')) as { parent: number; descendant: number }
       interrupted.cancel('operator cancellation')
       const cancelled = await running
@@ -156,8 +170,17 @@ describe('controller restart and repository concurrency integration', () => {
       const tracker = DurableTracker.open(ready.tracker)
       expect(tracker.database.prepare('SELECT process_tree_quiescent FROM attempts WHERE run_id = ?').get(ready.runId)).toEqual({ process_tree_quiescent: 1 })
       tracker.close()
-    } finally { await f.dispose() }
-  })
+    } catch (error) { failures.push(error) } finally {
+      try { interrupted?.cancel('fixture teardown') } catch (error) { failures.push(error) }
+      if (observedRunning) {
+        const outcome = await observedRunning
+        if (outcome.kind === 'failed' && !failures.includes(outcome.error)) failures.push(outcome.error)
+      }
+      try { await f.dispose() } catch (error) { failures.push(error) }
+    }
+    if (failures.length === 1) throw failures[0]
+    if (failures.length > 1) throw new AggregateError(failures, 'descendant restart test and fixture cleanup failed')
+  }, RESTART_TEST_TIMEOUT_MS)
   it('reruns exactly once after a proven-quiescent attempt with no durable outcome', async () => {
     const f = await fixture(); const original = DurableTracker.prototype.recordAttemptOutcome; let interruptions = 0
     const fault = vi.spyOn(DurableTracker.prototype, 'recordAttemptOutcome').mockImplementation(function (attemptId, facts) {
@@ -184,7 +207,7 @@ describe('controller restart and repository concurrency integration', () => {
       expect(tracker.database.prepare('SELECT state, failure_code FROM experiments WHERE run_id = ?').get(identity.runId)).toEqual({ state: 'crashed', failure_code: 'recovery-rerun-exhausted' })
       tracker.close()
     } finally { fault.mockRestore(); await f.dispose() }
-  })
+  }, RESTART_TEST_TIMEOUT_MS)
 
 
 })

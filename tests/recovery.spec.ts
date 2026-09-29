@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { SubprocessHandle, SubprocessOutcome, SubprocessOutputReader, SubprocessSpawnSpec } from '@deepseek-ai/dsh-subprocess'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { acquireRunLock, allocateRunWorktree, captureGitConfigBaseline, checkoutCandidateForEvaluation, commitCandidate, discoverRepository, durableGitIdentity, makeRunGitIdentity, snapshotCandidate, validateCandidate } from '../src/git.ts'
 import type { EvaluatorFailureCode } from '../src/evaluator.ts'
 import { classifyDurableRegistration, reconcileRecovery, type RecoveredEvaluation, type RecoveryRequest } from '../src/recovery.ts'
@@ -241,10 +241,11 @@ class RecoveryReader implements SubprocessOutputReader {
   readFrom(fromByte: number) { const whole = this.bytes(); const retained = whole.subarray(Math.max(0, whole.length - this.cap)); return { text: retained.toString('utf8'), nextOffset: whole.length, lossy: fromByte < whole.length - retained.length } }
 }
 class RecoveryHandle implements SubprocessHandle {
-  readonly stdin = undefined; readonly stdout = undefined; readonly stderr = undefined; readonly pid: number; readonly collected; readonly done: Promise<SubprocessOutcome>
+  readonly stdin = undefined; readonly stdout = undefined; readonly stderr = undefined; readonly collected; readonly done: Promise<SubprocessOutcome>
+  private readonly childPid: number | undefined
   private exited = false
-  constructor(private readonly child: ReturnType<typeof spawn>, stdout: Buffer[], stderr: Buffer[], outCap: number, errCap: number) { this.pid = child.pid ?? -1; this.collected = { stdout: new RecoveryReader(() => Buffer.concat(stdout), outCap), stderr: new RecoveryReader(() => Buffer.concat(stderr), errCap) }; this.done = new Promise((resolve, reject) => { child.once('error', reject); child.once('close', (exitCode, signal) => { this.exited = true; resolve({ exitCode, signal }) }) }) }
-  terminate(): void { if (!this.exited && this.pid > 0) try { process.kill(-this.pid, 'SIGTERM') } catch {} }
+  constructor(private readonly child: ReturnType<typeof spawn>, stdout: Buffer[], stderr: Buffer[], outCap: number, errCap: number) { this.childPid = child.pid; this.collected = { stdout: new RecoveryReader(() => Buffer.concat(stdout), outCap), stderr: new RecoveryReader(() => Buffer.concat(stderr), errCap) }; this.done = new Promise((resolve, reject) => { child.once('error', reject); child.once('close', (exitCode, signal) => { this.exited = true; resolve({ exitCode, signal }) }) }) }
+  terminate(): void { if (!this.exited && this.childPid !== undefined) try { process.kill(-this.childPid, 'SIGTERM') } catch {} }
   async waitForExit(): Promise<boolean> { await this.done; return true }
 }
 class RecoverySubprocess {
@@ -288,9 +289,46 @@ describe('recovery nonterminal state matrix with real Git/SQLite', () => {
     expect(first).toMatchObject({ kind: 'blocked', code: 'attempt-uncertain', lock: 'retain' }); expect(second).toEqual(first); expect(f.tracker.database.prepare('SELECT COUNT(*) AS n FROM attempts').get()?.['n']).toBe(0)
     f.tracker.close()
   })
-  it('blocks an uncertain prior evaluator repeatedly without PID signalling or duplicate execution', async () => {
-    const f = await realFixture(); f.tracker.transitionRun(f.request.runId, 'baseline-running'); f.tracker.createExperiment({ experimentId: 'baseline', runId: f.request.runId, ordinal: 0, kind: 'baseline', parentCommit: f.request.discovery.startCommit, command: 'node', args: [] }); f.tracker.transitionExperiment('baseline', 'running'); f.tracker.createAttemptIntent({ attemptId: 'attempt-1', runId: f.request.runId, experimentId: 'baseline', ordinal: 1 }, { provenanceSha256: HASH }); f.tracker.recordAttemptObserved('attempt-1', { providerPid: 4242, spawnedAt: new Date().toISOString() })
-    const before = f.subprocess.specs.length; const first = await reconcileRecovery(f.ctx, f.request); const second = await reconcileRecovery(f.ctx, f.request); expect(first).toMatchObject({ kind: 'blocked', code: 'attempt-uncertain', lock: 'retain' }); expect(second).toEqual(first); expect(f.subprocess.specs.slice(before).every(spec => spec.argv[0] === f.request.gitExecutable)).toBe(true); expect(f.tracker.database.prepare('SELECT COUNT(*) AS n FROM attempts').get()?.['n']).toBe(1); f.tracker.close()
+  it('blocks a legacy PID-bearing uncertain evaluator repeatedly without signalling its stale PID or duplicating execution', async () => {
+    const f = await realFixture()
+    f.tracker.transitionRun(f.request.runId, 'baseline-running')
+    f.tracker.createExperiment({ experimentId: 'baseline', runId: f.request.runId, ordinal: 0, kind: 'baseline', parentCommit: f.request.discovery.startCommit, command: 'node', args: [] })
+    f.tracker.transitionExperiment('baseline', 'running')
+    f.tracker.createAttemptIntent({ attemptId: 'attempt-1', runId: f.request.runId, experimentId: 'baseline', ordinal: 1 }, { provenanceSha256: HASH })
+    f.tracker.recordAttemptObserved('attempt-1', { providerPid: 4242, spawnedAt: new Date().toISOString() })
+    const before = f.subprocess.specs.length
+    const kill = vi.spyOn(process, 'kill')
+    try {
+      const first = await reconcileRecovery(f.ctx, f.request)
+      const second = await reconcileRecovery(f.ctx, f.request)
+      expect(first).toMatchObject({ kind: 'blocked', code: 'attempt-uncertain', lock: 'retain' })
+      expect(second).toEqual(first)
+      expect(kill.mock.calls.every(([pid]) => pid !== 4242 && pid !== -4242)).toBe(true)
+      expect(f.subprocess.specs.slice(before).every(spec => spec.argv[0] === f.request.gitExecutable)).toBe(true)
+      expect(f.tracker.database.prepare('SELECT COUNT(*) AS n FROM attempts').get()?.['n']).toBe(1)
+    } finally { kill.mockRestore(); f.tracker.close() }
+  })
+
+  it('retains an uncertain spawnedAt-only attempt with NULL PID without rerunning the evaluator', async () => {
+    const f = await realFixture()
+    f.tracker.transitionRun(f.request.runId, 'baseline-running')
+    f.tracker.createExperiment({ experimentId: 'baseline', runId: f.request.runId, ordinal: 0, kind: 'baseline', parentCommit: f.request.discovery.startCommit, command: 'node', args: [] })
+    f.tracker.transitionExperiment('baseline', 'running')
+    f.tracker.createAttemptIntent({ attemptId: 'attempt-1', runId: f.request.runId, experimentId: 'baseline', ordinal: 1 }, { provenanceSha256: HASH })
+    const spawnedAt = new Date().toISOString()
+    f.tracker.recordAttemptObserved('attempt-1', { spawnedAt })
+    expect(f.tracker.database.prepare("SELECT provider_pid, spawned_at FROM attempts WHERE attempt_id='attempt-1'").get()).toEqual({ provider_pid: null, spawned_at: spawnedAt })
+    const before = f.subprocess.specs.length
+    const kill = vi.spyOn(process, 'kill')
+    try {
+      const first = await reconcileRecovery(f.ctx, f.request)
+      const second = await reconcileRecovery(f.ctx, f.request)
+      expect(first).toMatchObject({ kind: 'blocked', code: 'attempt-uncertain', lock: 'retain' })
+      expect(second).toEqual(first)
+      expect(kill).not.toHaveBeenCalled()
+      expect(f.subprocess.specs.slice(before).every(spec => spec.argv[0] === f.request.gitExecutable)).toBe(true)
+      expect(f.tracker.database.prepare('SELECT COUNT(*) AS n FROM attempts').get()?.['n']).toBe(1)
+    } finally { kill.mockRestore(); f.tracker.close() }
   })
 
   it('recovers the authoritative metric without reparsing redacted stdout', async () => {

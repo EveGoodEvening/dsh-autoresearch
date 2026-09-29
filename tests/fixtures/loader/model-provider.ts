@@ -1,7 +1,7 @@
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { LlmAdapter, type GenerateOptions, type LlmModelInfo, type LlmProviderInfo, type LlmResolvedModelInfo, type StreamChunk } from '@deepseek-ai/dsh-llm'
-import { CallId } from '@deepseek-ai/dsh-llm'
+import { ToolCallId } from '@deepseek-ai/dsh-llm'
 
 export const name = 'autoresearch-test-model'
 export const inject = ['llm']
@@ -16,6 +16,17 @@ export function holdModel(): void {
 export function releaseModel(): void {
   modelGate?.resolve()
   modelGate = undefined
+}
+async function waitForModelGate(signal: AbortSignal | undefined): Promise<void> {
+  const gate = modelGate
+  if (!gate) return
+  signal?.throwIfAborted()
+  await new Promise<void>((resolve, reject) => {
+    const abort = () => { signal?.removeEventListener('abort', abort); reject(signal?.reason ?? new Error('model request aborted')) }
+    signal?.addEventListener('abort', abort, { once: true })
+    gate.promise.then(() => { signal?.removeEventListener('abort', abort); resolve() })
+    if (signal?.aborted) abort()
+  })
 }
 interface ProposalHandoff {
   readonly identity: { readonly runId: string; readonly experimentId: string; readonly ordinal: number; readonly nonce: string }
@@ -50,23 +61,23 @@ function proposalHandoff(options: GenerateOptions): ProposalHandoff {
 }
 
 function toolCall(name: string, args: unknown, idText: string): StreamChunk[] {
-  const id = CallId(idText)
+  const id = ToolCallId(idText)
   const raw = JSON.stringify(args)
   return [
     { type: 'block-start', index: 0, blockType: 'tool-call' },
     { type: 'tool-call-delta', index: 0, id, name, argumentsDelta: raw },
     { type: 'block-end', index: 0, block: { type: 'tool-call', id, name, arguments: raw } },
-    { type: 'finish', reason: 'tool-calls' },
+    { type: 'finish', reason: { kind: 'tool-calls' } },
   ]
 }
 
 class BoundedAdapter extends LlmAdapter {
   providerInfo(provider: string): LlmProviderInfo { return { id: provider, name: 'Bounded test provider' } }
-  async listModels(): Promise<readonly LlmModelInfo[]> { return [{ id: 'bounded-model', name: 'Bounded model' }] }
+  async listModels(provider: string): Promise<readonly LlmModelInfo[]> { return [{ id: 'bounded-model', name: 'Bounded model', provider }] }
   async resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> { return { id: model, name: model, provider } }
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     calls.push({ provider: options.provider, model: options.model, tools: options.tools?.map(tool => tool.name) ?? [] })
-    await modelGate?.promise
+    await waitForModelGate(options.signal)
     const serialized = JSON.stringify(options.messages)
     const handoff = proposalHandoff(options)
     const releaseAccepted = serialized.includes('release accepted candidate')

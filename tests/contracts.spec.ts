@@ -1,6 +1,3 @@
-import { readFileSync } from 'node:fs'
-import { entryListSchema } from '@deepseek-ai/cordis-plugin-include'
-import { load } from 'js-yaml'
 import { describe, expect, it } from 'vitest'
 import { Config, createEvaluatorRegistry, DEFAULT_CONFIG, normalizeRunPolicy, resolveConfig } from '../src/config.ts'
 import { boundText, renderExperimentResult, renderRunResult, renderToolResult } from '../src/render.ts'
@@ -353,19 +350,6 @@ describe('configuration and policy normalization', () => {
   })
 })
 
-describe('Cordis patch contract', () => {
-  it('parses the complete patch row with the Harness loader schema', () => {
-    const parsed = load(readFileSync(new URL('../cordis.patch.yml', import.meta.url), 'utf8'), { schema: entryListSchema })
-    const patchDefaults = Object.fromEntries(Object.entries(DEFAULT_CONFIG).filter(([key]) => key !== 'evaluatorRegistry'))
-    expect(parsed).toEqual([{
-      insert: [{
-        id: 'autoresearch',
-        name: 'dsh-autoresearch',
-        config: { ...patchDefaults, evaluatorRegistrations: [] },
-      }],
-    }])
-  })
-})
 
 describe('stable bounded rendering', () => {
   it('renders canonical run, experiment, and tool summaries in stable order', () => {

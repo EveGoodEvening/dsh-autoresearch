@@ -51,7 +51,7 @@ function fakeRuntime(options: FakeOptions = {}) {
         if (options.settleOnAbort) next.signal?.addEventListener('abort', normal, { once: true })
         else queueMicrotask(normal)
         return {
-          pid: 4242, stdin: undefined, stdout: undefined, stderr: undefined, done,
+          stdin: undefined, stdout: undefined, stderr: undefined, done,
           collected: { stdout: { readFrom: () => options.stdout ?? reader('{"score":1.5}\n') }, stderr: { readFrom: () => options.stderr ?? reader('') } },
           terminate: () => { terminated += 1; normal() },
           waitForExit: async () => { waited += 1; return options.waitQuiescent ?? true },
@@ -77,14 +77,14 @@ class LocalHandle implements SubprocessHandle {
   readonly stdin = undefined
   readonly stdout = undefined
   readonly stderr = undefined
-  readonly pid: number
+  private readonly childPid: number | undefined
   readonly collected
   readonly done: Promise<SubprocessOutcome>
   private exited = false
   private escalation: ReturnType<typeof setTimeout> | undefined
 
   constructor(private readonly child: ReturnType<typeof spawn>, stdout: Buffer[], stderr: Buffer[], maxOut: number, maxErr: number, graceMs: number) {
-    this.pid = child.pid ?? -1
+    this.childPid = child.pid
     this.collected = { stdout: new LocalReader(stdout, maxOut), stderr: new LocalReader(stderr, maxErr) }
     this.done = new Promise((resolve, reject) => {
       child.once('error', reject)
@@ -101,10 +101,10 @@ class LocalHandle implements SubprocessHandle {
   private readonly graceMs: number
 
   terminate(): void {
-    if (this.exited || this.pid <= 0 || this.escalation !== undefined) return
-    try { process.kill(-this.pid, 'SIGTERM') } catch { return }
+    if (this.exited || this.childPid === undefined || this.escalation !== undefined) return
+    try { process.kill(-this.childPid, 'SIGTERM') } catch { return }
     this.escalation = setTimeout(() => {
-      if (!this.exited) try { process.kill(-this.pid, 'SIGKILL') } catch { /* tree already exited */ }
+      if (!this.exited && this.childPid !== undefined) try { process.kill(-this.childPid, 'SIGKILL') } catch { /* tree already exited */ }
     }, this.graceMs)
   }
 
@@ -290,7 +290,11 @@ describe('host-owned evaluator execution', () => {
   it('spawns exact argv/cwd/env, freezes provenance, persists facts in order, and retains bounded artifacts', async () => {
     const setup = options()
     const result = await runEvaluator(setup.value)
-    expect(result).toMatchObject({ kind: 'measured', metric: 1.5, exit: { providerPid: 4242, exitCode: 0, timedOut: false, cancelled: false, processTreeQuiescent: true } })
+    expect(result).toMatchObject({ kind: 'measured', metric: 1.5, exit: { exitCode: 0, timedOut: false, cancelled: false, processTreeQuiescent: true } })
+    expect(result.exit).not.toHaveProperty('providerPid')
+    expect(setup.value.persistence.events).toEqual(['intent', 'observed', 'outcome'])
+    expect(setup.value.persistence.observed).toEqual({ spawnedAt: result.exit.spawnedAt })
+    expect(result.exit.spawnedAt).toMatch(/^\d{4}-\d\d-\d\dT/)
     expect(setup.runtime.spec).toMatchObject({
       argv: ['node', 'evaluate.mjs'], cwd: join(setup.paths.root, 'bench'), env: { LANG: 'C' }, graceMs: 25,
       stdio: { stdin: 'ignore', stdout: { maxBytes: 128, spill: { maxBytes: 128 } }, stderr: { maxBytes: 64, spill: { maxBytes: 64 } } },
@@ -422,6 +426,9 @@ describe('host-owned evaluator execution', () => {
     const setup = options(fakeRuntime({ spawnError: new Error(secretProviderText) }))
     const result = await runEvaluator(setup.value)
     expect(result).toMatchObject({ kind: 'failed', code: 'spawn', message: 'evaluator provider spawn failed', exit: { failureCode: 'spawn', failureMessage: 'evaluator provider spawn failed' } })
+    expect(setup.value.persistence.events).toEqual(['intent', 'outcome'])
+    expect(result.exit).not.toHaveProperty('spawnedAt')
+    expect(result.exit).not.toHaveProperty('providerPid')
     expect(JSON.stringify(setup.value.persistence.outcome)).not.toContain(secretProviderText)
   })
 
@@ -566,17 +573,18 @@ describe('host-owned evaluator execution', () => {
       kind: 'failed',
       code: 'frozen-boundary',
       message: 'evaluator cwd changed during evaluator startup',
-      exit: { providerPid: expect.any(Number), processTreeQuiescent: true },
+      exit: { spawnedAt: expect.any(String), processTreeQuiescent: true },
     })
     expect(setup.runtime.terminated).toBe(1)
     expect(setup.runtime.waited).toBe(1)
     expect(setup.value.persistence.events).toEqual(['intent', 'observed', 'outcome'])
-    expect(setup.value.persistence.observed).toEqual({ providerPid: result.exit.providerPid, spawnedAt: result.exit.spawnedAt })
+    expect(setup.value.persistence.observed).toEqual({ spawnedAt: result.exit.spawnedAt })
+    expect(result.exit).not.toHaveProperty('providerPid')
     expect(setup.value.persistence.outcome?.[0]).toMatchObject({
       kind: 'failed',
       code: 'frozen-boundary',
       message: 'evaluator cwd changed during evaluator startup',
-      exit: { providerPid: result.exit.providerPid, processTreeQuiescent: true },
+      exit: { spawnedAt: result.exit.spawnedAt, processTreeQuiescent: true },
     })
   })
 
@@ -798,13 +806,14 @@ describe('host-owned evaluator execution', () => {
       return handle
     }
     const result = await runEvaluator(setup.value)
-    expect(result).toMatchObject({ kind: 'failed', code: 'frozen-boundary', exit: { providerPid: expect.any(Number), spawnedAt: expect.any(String), exitedAt: expect.any(String), processTreeQuiescent: true, cancelled: false, timedOut: false } })
+    expect(result).toMatchObject({ kind: 'failed', code: 'frozen-boundary', exit: { spawnedAt: expect.any(String), exitedAt: expect.any(String), processTreeQuiescent: true, cancelled: false, timedOut: false } })
+    expect(result.exit).not.toHaveProperty('providerPid')
     expect(setup.runtime.spec).toBeDefined()
     expect(setup.runtime.terminated).toBe(1)
     expect(setup.runtime.waited).toBe(1)
     expect(setup.value.persistence.events).toEqual(['intent', 'observed', 'outcome'])
-    expect(setup.value.persistence.observed).toEqual({ providerPid: result.exit.providerPid, spawnedAt: result.exit.spawnedAt })
-    expect(setup.value.persistence.outcome?.[0]).toMatchObject({ kind: 'failed', code: 'frozen-boundary', exit: { providerPid: result.exit.providerPid, processTreeQuiescent: true } })
+    expect(setup.value.persistence.observed).toEqual({ spawnedAt: result.exit.spawnedAt })
+    expect(setup.value.persistence.outcome?.[0]).toMatchObject({ kind: 'failed', code: 'frozen-boundary', exit: { spawnedAt: result.exit.spawnedAt, processTreeQuiescent: true } })
     expect(setup.value.persistence.outcome?.[1]).toEqual(result.artifacts)
     expect(result.artifacts.map(item => item.kind).sort()).toEqual(['stderr', 'stdout'])
     expect(result.artifacts.every(item => item.sizeBytes <= (item.kind === 'stdout' ? 128 : 64))).toBe(true)
@@ -830,7 +839,8 @@ describe('host-owned evaluator execution', () => {
 
     const result = await runEvaluator(setup.value)
 
-    expect(result).toMatchObject({ kind: 'failed', code: 'frozen-boundary', message: expect.stringContaining('data/train.json'), exit: { providerPid: 4242, processTreeQuiescent: true } })
+    expect(result).toMatchObject({ kind: 'failed', code: 'frozen-boundary', message: expect.stringContaining('data/train.json'), exit: { spawnedAt: expect.any(String), processTreeQuiescent: true } })
+    expect(result.exit).not.toHaveProperty('providerPid')
     expect(setup.runtime.terminated).toBe(1)
     expect(setup.runtime.waited).toBe(1)
     expect(setup.value.persistence.events).toEqual(['intent', 'observed', 'outcome'])

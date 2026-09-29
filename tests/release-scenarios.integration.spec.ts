@@ -2,10 +2,11 @@ import { createHash } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import { access, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
-import { pathToFileURL } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import { JobId } from '@deepseek-ai/dsh-jobs'
+import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { describe, expect, it, vi } from 'vitest'
 import { composeHarness, packageRoot } from './fixtures/harness-composition.ts'
@@ -16,8 +17,14 @@ const evidencePath = process.env.DSH_AUTORESEARCH_EVIDENCE
 const installedRoot = process.env.DSH_AUTORESEARCH_INSTALLED_ROOT
 const releaseDescribe = installedRoot === undefined ? describe.skip : describe
 if (installedRoot !== undefined && packageRoot !== installedRoot) throw new Error(`fixture resolved ${packageRoot}, expected installed package ${installedRoot}`)
-// The release test intentionally loads the runtime-selected packed installation rather than source modules.
-const installedModule = (name: string) => pathToFileURL(join(installedRoot!, 'lib', `${name}.js`)).href
+// Private installed modules are imported through the booted Host root Include,
+// whose profile-resolution service owns the installed dependency graph.
+const installedModule = (name: string) => join(installedRoot!, 'lib', `${name}.js`)
+async function installedImport(ctx: Context, name: string) {
+  const rootInclude = ctx.loader.resolve('include').subtree
+  if (!rootInclude) throw new Error('booted Host root Include is unavailable')
+  return await rootInclude.import(installedModule(name))
+}
 
 interface ReleaseRun {
   readonly status: string
@@ -70,13 +77,13 @@ async function parent(ctx: Context, cwd: string) {
   })
 }
 
-async function execute(ctx: Context, agent: Agent, args: unknown): Promise<ReleaseToolValue> {
+async function execute(ctx: Context, agent: Agent, args: unknown, signal: AbortSignal = new AbortController().signal): Promise<ReleaseToolValue> {
   const result = await ctx.tools.execute({
-    callId: `release-${crypto.randomUUID()}` as never,
+    callId: ToolCallId(`release-${crypto.randomUUID()}`),
     name: 'autoresearch',
     arguments: args,
     agent,
-    signal: new AbortController().signal,
+    signal,
   })
   if (result.isError) throw new Error(JSON.stringify(result))
   return result.value as unknown as ReleaseToolValue
@@ -141,8 +148,8 @@ releaseDescribe('packed release scenarios', () => {
     const owner = await parent(harness.ctx, cwd)
     const marker = join(harness.root, 'prepare-evaluator.marker')
     const before = snapshot(cwd)
-    const { AutoresearchRunController } = await import(installedModule('controller'))
-    const { resolveConfig } = await import(installedModule('config'))
+    const { AutoresearchRunController } = await installedImport(harness.ctx, 'controller')
+    const { resolveConfig } = await installedImport(harness.ctx, 'config')
     const args = request(cwd, 'release accepted candidate')
     const evaluatorRegistration = {
       id: 'judge',
@@ -216,77 +223,78 @@ releaseDescribe('packed release scenarios', () => {
     }
   }, 45_000)
 
-  it('runs accepted and rejected candidates with strict decisions and durable Git/tracker evidence', async () => {
+  it.each([
+    { name: 'accepted', objective: 'release accepted candidate', decision: 'accept', state: 'accepted', metric: 0 },
+    { name: 'tie', objective: 'release tie candidate', decision: 'reject', state: 'rejected', metric: 1 },
+    { name: 'rejected', objective: 'release rejected candidate', decision: 'reject', state: 'rejected', metric: 2 },
+  ])('runs $name candidate with strict decision and durable Git/tracker evidence', async scenario => {
     const harness = await composeHarness()
-    const scenarios = [
-      { name: 'accepted', objective: 'release accepted candidate', decision: 'accept', state: 'accepted', metric: 0 },
-      { name: 'tie', objective: 'release tie candidate', decision: 'reject', state: 'rejected', metric: 1 },
-      { name: 'rejected', objective: 'release rejected candidate', decision: 'reject', state: 'rejected', metric: 2 },
-    ]
     try {
-      for (const scenario of scenarios) {
-        const cwd = await repository(harness.root, scenario.name)
-        const owner = await parent(harness.ctx, cwd)
-        const before = snapshot(cwd)
-        try {
-          const value = await execute(harness.ctx, owner.agent, request(cwd, scenario.objective))
-          const run = value.run
-          expect(value.kind).toBe('foreground')
-          if (run.status !== 'budget-limited') throw new Error(JSON.stringify({ status: run.status, evidence: run.evidence }))
+      const cwd = await repository(harness.root, scenario.name)
+      const owner = await parent(harness.ctx, cwd)
+      const before = snapshot(cwd)
+      try {
+        const value = await execute(harness.ctx, owner.agent, request(cwd, scenario.objective))
+        const run = value.run
+        expect(value.kind).toBe('foreground')
+        if (run.status !== 'budget-limited') throw new Error(JSON.stringify({ status: run.status, evidence: run.evidence }))
 
-          expect(snapshot(cwd)).toEqual(before)
-          const durable = inspect(run.tracker, run.runId)
-          expect(durable.run.start_commit).toBe(before.head)
-          expect(durable.experiments[0]).toMatchObject({ kind: 'baseline', metric: 1, state: 'accepted' })
-          expect(durable.experiments[1]).toMatchObject({ kind: 'candidate', metric: scenario.metric, decision: scenario.decision, state: scenario.state })
+        expect(snapshot(cwd)).toEqual(before)
+        const durable = inspect(run.tracker, run.runId)
+        expect(durable.run.start_commit).toBe(before.head)
+        expect(durable.experiments[0]).toMatchObject({ kind: 'baseline', metric: 1, state: 'accepted' })
+        expect(durable.experiments[1]).toMatchObject({ kind: 'candidate', metric: scenario.metric, decision: scenario.decision, state: scenario.state })
 
-          const candidate = String(durable.experiments[1].candidate_commit)
-          expect(candidate).toMatch(/^[0-9a-f]{40}$/)
-          const auditRefs = git(cwd, ['for-each-ref', '--format=%(objectname)', `refs/autoresearch/runs/${run.runId}/candidates/`]).split('\n').filter(Boolean)
-          expect(auditRefs).toContain(candidate)
-          expect(String(durable.run.branch)).toContain(run.runId)
-          expect(String(durable.run.worktree)).toContain(run.runId)
-          expect(durable.transitions[0].scope).toBe('run')
-          expect(durable.transitions.some(row => row.scope === 'experiment' && row.to_state === 'baseline-pending')).toBe(true)
-          expect(durable.lock.released_at).not.toBeNull()
-          expect(durable.run.terminal_quiescent).toBe(1)
+        const candidate = String(durable.experiments[1].candidate_commit)
+        expect(candidate).toMatch(/^[0-9a-f]{40}$/)
+        const auditRefs = git(cwd, ['for-each-ref', '--format=%(objectname)', `refs/autoresearch/runs/${run.runId}/candidates/`]).split('\n').filter(Boolean)
+        expect(auditRefs).toContain(candidate)
+        expect(String(durable.run.branch)).toContain(run.runId)
+        expect(String(durable.run.worktree)).toContain(run.runId)
+        expect(durable.transitions[0].scope).toBe('run')
+        expect(durable.transitions.some(row => row.scope === 'experiment' && row.to_state === 'baseline-pending')).toBe(true)
+        expect(durable.lock.released_at).not.toBeNull()
+        expect(durable.run.terminal_quiescent).toBe(1)
 
-          const exportDirectory = join(dirname(run.tracker), 'exports')
-          const tsvPath = join(exportDirectory, `${run.runId}.tsv`)
-          const { DurableTracker } = await import(installedModule('tracker'))
-          const publisher = DurableTracker.open(run.tracker)
-          publisher.exportTsv(run.runId, tsvPath)
-          const first = await readFile(tsvPath)
-          publisher.exportTsv(run.runId, tsvPath)
-          const second = await readFile(tsvPath)
-          const firstHash = createHash('sha256').update(first).digest('hex'); const secondHash = createHash('sha256').update(second).digest('hex')
-          const lines = first.toString('utf8').trimEnd().split('\n')
-          const ordinals = lines.slice(1).map(line => Number(line.split('\t', 1)[0]))
-          const temporaryFiles = (await readdir(exportDirectory)).filter(name => name.startsWith(`${run.runId}.tsv.`) && name.endsWith('.tmp'))
-          expect(second).toEqual(first)
-          expect(firstHash).toBe(secondHash)
-          expect(ordinals).toEqual([...ordinals].sort((left, right) => right - left))
-          expect(lines).toHaveLength(durable.experiments.length + 1)
-          expect(first.toString('utf8')).toContain(candidate)
-          expect(temporaryFiles).toEqual([])
-          expect(harness.ctx.agents.list().map((agent: Agent) => agent.id)).toEqual([owner.agent.id])
-          evidence[scenario.name] = { ok: true, runId: run.runId, caller: before, identity: { branch: durable.run.branch, worktree: durable.run.worktree, startCommit: durable.run.start_commit }, baseline: durable.experiments[0], candidate: durable.experiments[1], auditCommit: candidate, strictDecision: scenario.decision, tsv: { location: tsvPath, firstSha256: firstHash, secondSha256: secondHash, equalBytes: first.equals(second), rowCount: lines.length - 1, ordinals, temporaryFiles, lowerLayerAtomicFaultTest: "tests/tracker.spec.ts: 'publishes deterministic run-scoped TSV atomically and retries independently from committed state'" }, terminalBeforeLockRelease: true, agentDisposed: true }
-        } finally {
-          await owner.dispose()
-        }
+        const exportDirectory = join(dirname(run.tracker), 'exports')
+        const tsvPath = join(exportDirectory, `${run.runId}.tsv`)
+        const { DurableTracker } = await installedImport(harness.ctx, 'tracker')
+        const publisher = DurableTracker.open(run.tracker)
+        publisher.exportTsv(run.runId, tsvPath)
+        const first = await readFile(tsvPath)
+        publisher.exportTsv(run.runId, tsvPath)
+        const second = await readFile(tsvPath)
+        const firstHash = createHash('sha256').update(first).digest('hex'); const secondHash = createHash('sha256').update(second).digest('hex')
+        const lines = first.toString('utf8').trimEnd().split('\n')
+        const ordinals = lines.slice(1).map(line => Number(line.split('\t', 1)[0]))
+        const temporaryFiles = (await readdir(exportDirectory)).filter(name => name.startsWith(`${run.runId}.tsv.`) && name.endsWith('.tmp'))
+        expect(second).toEqual(first)
+        expect(firstHash).toBe(secondHash)
+        expect(ordinals).toEqual([...ordinals].sort((left, right) => right - left))
+        expect(lines).toHaveLength(durable.experiments.length + 1)
+        expect(first.toString('utf8')).toContain(candidate)
+        expect(temporaryFiles).toEqual([])
+        expect(harness.ctx.agents.list().map((agent: Agent) => agent.id)).toEqual([owner.agent.id])
+        evidence[scenario.name] = { ok: true, runId: run.runId, caller: before, identity: { branch: durable.run.branch, worktree: durable.run.worktree, startCommit: durable.run.start_commit }, baseline: durable.experiments[0], candidate: durable.experiments[1], auditCommit: candidate, strictDecision: scenario.decision, tsv: { location: tsvPath, firstSha256: firstHash, secondSha256: secondHash, equalBytes: first.equals(second), rowCount: lines.length - 1, ordinals, temporaryFiles, lowerLayerAtomicFaultTest: "tests/tracker.spec.ts: 'publishes deterministic run-scoped TSV atomically and retries independently from committed state'" }, terminalBeforeLockRelease: true, agentDisposed: true }
+      } finally {
+        await owner.dispose()
       }
     } finally {
       await harness.dispose().catch(() => undefined)
     }
-  }, 60_000)
+  }, 45_000)
 
   it('continues through the installed package composition after a failed candidate and preserves restart evidence', async () => {
+    // Two candidate lifecycles (including a failed attempt) and a separate durable restart
+    // cost more than the single-run scenarios. Abort cooperatively before Vitest times out
+    // so the controller settles and releases its repository before fixture teardown.
+    const signal = AbortSignal.timeout(110_000)
     const harness = await composeHarness()
     try {
       const cwd = await repository(harness.root, 'continued-failure'); const owner = await parent(harness.ctx, cwd); const before = snapshot(cwd)
       try {
         const args = { ...request(cwd, 'release continued candidate failure'), max_experiments: 2 }
-        const value = await execute(harness.ctx, owner.agent, args)
+        const value = await execute(harness.ctx, owner.agent, args, signal)
         expect(value.kind).toBe('foreground')
         expect(value.run).toMatchObject({ status: 'budget-limited', counts: { experimentsStarted: 2, experimentsCompleted: 2, attempts: 3 }, best: { metric: 1, commit: before.head } })
         const durable = inspect(value.run.tracker, value.run.runId)
@@ -296,7 +304,7 @@ releaseDescribe('packed release scenarios', () => {
           { ordinal: 2, kind: 'candidate', state: 'rejected', metric: 2, decision: 'reject' },
         ])
         expect(snapshot(cwd)).toEqual(before)
-        const { run_tag: _tag, evaluator_id: _evaluatorId, ...stable } = args; const resumed = await execute(harness.ctx, owner.agent, { ...stable, resume_run_id: value.run.runId })
+        const { run_tag: _tag, evaluator_id: _evaluatorId, ...stable } = args; const resumed = await execute(harness.ctx, owner.agent, { ...stable, resume_run_id: value.run.runId }, signal)
         expect(resumed.run).toEqual(value.run)
         const after = inspect(value.run.tracker, value.run.runId)
         expect(after.experiments).toEqual(durable.experiments)
@@ -304,7 +312,7 @@ releaseDescribe('packed release scenarios', () => {
         evidence.continuedFailure = { ok: true, runId: value.run.runId, installedPackage: true, attempts: value.run.counts.attempts, candidates: durable.experiments.filter(row => row.kind === 'candidate').length, resumedEqual: true }
       } finally { await owner.dispose() }
     } finally { await harness.dispose().catch(() => undefined) }
-  }, 45_000)
+  }, 125_000)
 
   it('uses real deferred jobs, generic list/output/kill, and quiescent cancellation', async () => {
     const harness = await composeHarness()
@@ -316,19 +324,19 @@ releaseDescribe('packed release scenarios', () => {
         const started = await execute(harness.ctx, owner.agent, args)
         expect(started).toMatchObject({ kind: 'background', jobId: expect.any(String), runId: expect.any(String) })
 
-        const listed = await harness.ctx.tools.execute({ callId: 'list' as never, name: 'job_list', arguments: {}, agent: owner.agent, signal: new AbortController().signal })
+        const listed = await harness.ctx.tools.execute({ callId: ToolCallId('list'), name: 'job_list', arguments: {}, agent: owner.agent, signal: new AbortController().signal })
         expect(listed.isError).toBe(false)
         expect(listed.value).toEqual(expect.arrayContaining([expect.objectContaining({ id: started.jobId })]))
 
-        const output = await harness.ctx.tools.execute({ callId: 'output' as never, name: 'job_output', arguments: { job_id: started.jobId, wait: true, timeout_ms: 20_000 }, agent: owner.agent, signal: new AbortController().signal })
+        const output = await harness.ctx.tools.execute({ callId: ToolCallId('output'), name: 'job_output', arguments: { job_id: started.jobId, wait: true, timeout_ms: 20_000 }, agent: owner.agent, signal: new AbortController().signal })
         expect(output.isError).toBe(false)
         const outputValue = output.value as unknown as { text: string }
         const completed = JSON.parse(outputValue.text) as ReleaseRun
         if (completed.status !== 'budget-limited') throw new Error(JSON.stringify({ status: completed.status, evidence: completed.evidence }))
 
-        const kill = await harness.ctx.tools.execute({ callId: 'kill' as never, name: 'job_kill', arguments: { job_id: started.jobId }, agent: owner.agent, signal: new AbortController().signal })
+        const kill = await harness.ctx.tools.execute({ callId: ToolCallId('kill'), name: 'job_kill', arguments: { job_id: started.jobId }, agent: owner.agent, signal: new AbortController().signal })
         expect(kill.isError).toBe(false)
-        const noLiveJobs = harness.ctx.jobs.list(owner.agent).every(job => !['running', 'stopping'].includes(job.status))
+        const noLiveJobs = harness.ctx.jobs.list(owner.agent.id).every(job => !['running', 'stopping'].includes(job.status))
 
         const durable = inspect(started.tracker, started.runId); const resumeCwd = join(cwd, 'resume-cwd')
         await mkdir(resumeCwd); await writeFile(join(resumeCwd, 'caller.txt'), 'advance caller head\n')
@@ -361,8 +369,8 @@ releaseDescribe('packed release scenarios', () => {
         const args = request(cwd, 'release interruption resume', 'background')
         const started = await execute(harness.ctx, owner.agent, args); await waitUntil(async () => { try { await readFile(marker); return true } catch { return false } }, 'descendant evaluator did not start')
         const pids = JSON.parse(await readFile(marker, 'utf8')) as { parent: number; child: number }
-        const killed = await harness.ctx.tools.execute({ callId: 'interrupt-kill' as never, name: 'job_kill', arguments: { job_id: started.jobId }, agent: owner.agent, signal: new AbortController().signal }); expect(killed.isError).toBe(false)
-        await harness.ctx.jobs.wait(started.jobId, 20_000, owner.agent); await waitUntil(async () => await processGone(pids.parent) && await processGone(pids.child), 'provider-owned evaluator tree survived cancellation')
+        const killed = await harness.ctx.tools.execute({ callId: ToolCallId('interrupt-kill'), name: 'job_kill', arguments: { job_id: started.jobId }, agent: owner.agent, signal: new AbortController().signal }); expect(killed.isError).toBe(false)
+        await harness.ctx.jobs.wait(JobId(started.jobId), 20_000, owner.agent.id); await waitUntil(async () => await processGone(pids.parent) && await processGone(pids.child), 'provider-owned evaluator tree survived cancellation')
         const { run_tag: _tag, evaluator_id: _evaluatorId, mode: _mode, ...stable } = args; const resumed = await execute(harness.ctx, owner.agent, { ...stable, resume_run_id: started.runId, mode: 'foreground' })
         expect(resumed).toMatchObject({ kind: 'foreground', run: { runId: started.runId, status: 'cancelled' } })
         const durable = inspect(started.tracker, started.runId); const db = new DatabaseSync(started.tracker, { readOnly: true }); const attempts = Number(db.prepare('SELECT COUNT(*) n FROM attempts').get()?.n); const uncertain = Number(db.prepare('SELECT COUNT(*) n FROM attempts WHERE process_tree_quiescent IS NOT 1').get()?.n); db.close(); expect(attempts).toBe(1); expect(uncertain).toBe(0)
@@ -394,7 +402,7 @@ releaseDescribe('packed release scenarios', () => {
   }, 45_000)
 
   it('writes machine-readable evidence', async () => {
-    expect(evidence.prepareBarrier).toBeDefined(); expect(evidence.accepted).toBeDefined(); expect(evidence.tie).toBeDefined(); expect(evidence.rejected).toBeDefined(); expect(evidence.background).toBeDefined(); expect(evidence.interruptionResume).toBeDefined(); expect(evidence.uncertainRestart).toBeDefined()
+    for (const scenario of ['prepareBarrier', 'accepted', 'tie', 'rejected', 'continuedFailure', 'background', 'interruptionResume', 'uncertainRestart']) expect(evidence[scenario], `missing ${scenario} scenario`).toMatchObject({ ok: true })
     if (evidencePath) await writeFile(evidencePath, JSON.stringify({ ok: true, ...evidence }))
   })
 })

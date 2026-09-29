@@ -6,13 +6,13 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentHandle, CreateAgentOptions } from '@deepseek-ai/dsh-agent'
-import type { JobSnapshot } from '@deepseek-ai/dsh-jobs'
+import type { JobView } from '@deepseek-ai/dsh-jobs'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { SubprocessHandle, SubprocessOutcome, SubprocessOutputReader, SubprocessSpawnSpec } from '@deepseek-ai/dsh-subprocess'
 import type { ToolDefinition, ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import { describe, expect, it, vi, type MockInstance } from 'vitest'
 import { resolveConfig, type Config, type EvaluatorRegistrationConfig } from '../src/config.ts'
-import { AutoresearchRunController, type AutoresearchRunReady } from '../src/controller.ts'
+import { AutoresearchRunController, preflightAutoresearchRepository, type AutoresearchRunReady } from '../src/controller.ts'
 import { acquireControllerClaim, currentControllerProcessIdentity, GitBoundaryError, releaseControllerClaim } from '../src/git.ts'
 
 import { DurableTracker, TRACKER_SCHEMA_VERSION } from '../src/tracker.ts'
@@ -385,7 +385,7 @@ class ControllerSubprocess {
       const matrixStep = step as MatrixEvaluationStep
       if (this.matrixEvaluations && matrixStep.spawnError) throw matrixStep.spawnError
       step.edit?.(spec.cwd)
-      const script = step.hang ? 'setInterval(() => {}, 1000)' : step.signal ? `process.kill(process.pid, ${JSON.stringify(step.signal)})` : `process.stdout.write(${JSON.stringify(step.stdout ?? '')});process.stderr.write(${JSON.stringify(step.stderr ?? '')});process.exit(${step.exitCode ?? 0})`
+      const script = step.hang ? `process.stdout.write(${JSON.stringify(step.stdout ?? '')});process.stderr.write(${JSON.stringify(step.stderr ?? '')});setInterval(() => {}, 1000)` : step.signal ? `process.kill(process.pid, ${JSON.stringify(step.signal)})` : `process.stdout.write(${JSON.stringify(step.stdout ?? '')});process.stderr.write(${JSON.stringify(step.stderr ?? '')});process.exit(${step.exitCode ?? 0})`
       const afterOutcome = step.afterOutcome === undefined ? undefined : () => step.afterOutcome!(spec.cwd)
       const stdout: Buffer[] = []; const stderr: Buffer[] = []
       const child = spawn(process.execPath, ['-e', script], { cwd: spec.cwd, env: spec.env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] })
@@ -413,17 +413,18 @@ function controllerFixture(evaluations: EvaluationStep[], edits: Array<(worktree
   execFileSync('git', ['-C', root, 'add', '.']); execFileSync('git', ['-C', root, 'commit', '-m', 'base'])
   const creates: CreateAgentOptions[] = []; const order: string[] = []; const subprocess = new ControllerSubprocess(evaluations, () => order.push('evaluator-spawn'), matrix.evaluatorFailures === true, matrix.gitSpawnFailure); const live = new Map<string, Agent>(); let lastTracker = ''
   const parentCtx = { get(name: string) { if (name === 'agentPresets') return { composedPreset: () => 'preset' }; if (name === 'sandboxPolicy') return { overrideOf: () => 'workspace-write' }; if (name === 'approval') return {}; return undefined }, effect(execute: () => () => Promise<void>) { const cleanup = execute(); let released = false; return async () => { if (!released) { released = true; await cleanup() } } } } as unknown as Context
-  const parentAgent = { id: SessionId('parent'), options: { provider: 'provider', model: 'model', maxTokens: 123 }, session: { header: { id: SessionId('parent-session'), cwd: root, delegationDepth: 0 }, append: vi.fn() }, ctx: parentCtx } as unknown as Agent
+  const parentAgent = { id: SessionId('parent'), options: { provider: 'provider', model: 'model', maxTokens: 123 }, session: { header: { id: SessionId('parent-session'), cwd: root, delegationDepth: 0 }, requestHeader: () => undefined, append: vi.fn() }, ctx: parentCtx } as unknown as Agent
   const agents = {
     async create(options: CreateAgentOptions): Promise<AgentHandle> {
+      if (options.parentAgent !== parentAgent || options.meta?.parentSession !== parentAgent.session.header.id) throw new Error('Proposal child must retain its live session-lineage parent')
       creates.push(options); order.push(`child-${creates.length}-create`); const tools = new Map<string, ToolDefinition>(); const listeners: Array<(execution: { name: string }, result: Readonly<ToolExecutionResult>) => void> = []
-      const childCtx = { agent: undefined as Agent | undefined, get: (name: string) => name === 'agentPresets' ? { composeFrom: vi.fn() } : undefined, tools: { restrict: () => () => undefined, presentAs: () => () => undefined, register: (tool: ToolDefinition) => { tools.set(tool.name, tool); return () => undefined }, guard: () => () => undefined }, systemPrompt: { context: () => () => undefined, section: () => () => undefined }, on: (name: string, listener: (execution: { name: string }, result: Readonly<ToolExecutionResult>) => void) => { if (name === 'tools/result') listeners.push(listener); return () => undefined } } as unknown as Context
+      const childCtx = { get: (name: string) => name === 'agentPresets' ? { composeFrom: vi.fn() } : undefined, tools: { restrict: () => () => undefined, presentAs: () => () => undefined, register: (tool: ToolDefinition) => { tools.set(tool.name, tool); return () => undefined }, guard: () => () => undefined }, systemPrompt: { getContextOrder: () => 100, context: () => () => undefined, section: () => () => undefined }, on: (name: string, listener: (execution: { name: string }, result: Readonly<ToolExecutionResult>) => void) => { if (name === 'tools/result') listeners.push(listener); return () => undefined } } as unknown as Context
       let prompt = ''; const child = { id: options.sessionId, options: options.agentOptions ?? {}, session: { header: { id: options.sessionId, ...options.meta }, append: vi.fn() }, ctx: childCtx, status: 'idle', cancel: vi.fn(), followup(message: { content: Array<{ text?: string }> }) { prompt = message.content[0]?.text ?? ''; matrix.capturePrompts?.push(prompt) }, async whenIdle() { const payload = JSON.parse(prompt.slice(prompt.indexOf('{'))) as { identity: { runId: string; experimentId: string; ordinal: number; nonce: string }; workspace: { worktree: string } }; edits[payload.identity.ordinal - 1]?.(payload.workspace.worktree, payload.identity.ordinal); const tool = tools.get('autoresearch_report')!; const value = await tool.execute({ ...payload.identity, hypothesis: 'candidate', intendedEdits: ['src/code.ts'], implementationSummary: 'changed code', blockerClaim: matrix.blockerClaim ?? null }, { agent: child, concludeTurn: vi.fn() } as never); listeners.forEach(listener => listener({ name: tool.name }, { isError: false, value })); await lifecycle.afterReport?.(payload.workspace.worktree) } } as unknown as Agent
-      childCtx.agent = child; await options.setup?.(childCtx); live.set(String(options.sessionId), child)
+      await options.setup?.(childCtx, child); live.set(String(options.sessionId), child)
       return { agent: child, dispose: async () => { order.push(`child-${creates.length}-dispose-start`); await lifecycle.dispose?.(); live.delete(String(options.sessionId)); order.push(`child-${creates.length}-dispose-end`) } }
     }, get(id: SessionId) { return live.get(String(id)) },
   }
-  const ctx = Object.assign(parentCtx as unknown as Record<string, unknown>, { subprocess, agents, jobs: { list: () => [] as JobSnapshot[] } }) as unknown as Context
+  const ctx = Object.assign(parentCtx as unknown as Record<string, unknown>, { subprocess, agents, jobs: { list: () => [] as JobView[] } }) as unknown as Context
   parentAgent.ctx = ctx
   return { root, ctx, parent: parentAgent, subprocess, creates, order, trackerPath: () => lastTracker, liveCount: () => live.size }
 }
@@ -2091,10 +2092,42 @@ describe('controller real Git/SQLite outcomes', () => {
     } finally { rmSync(f.root, { recursive: true, force: true }) }
   })
 
-
   it('classifies a real evaluator timeout, awaits process-tree exit, retains artifacts, and spawns no child', async () => {
-    const f = controllerFixture([{ hang: true }])
-    try { const { result, tracker } = await runControllerCase(f, { timeout_ms: 25 }); expect(result.status).toBe('baseline-blocked'); expect(f.creates).toHaveLength(0); expect(tracker.database.prepare('SELECT state FROM experiments').get()?.['state']).toBe('timed-out'); expect(tracker.database.prepare('SELECT timed_out, process_tree_quiescent FROM attempts').get()).toEqual({ timed_out: 1, process_tree_quiescent: 1 }); tracker.close() } finally { rmSync(f.root, { recursive: true, force: true }) }
+    const markers = { stdout: 'evaluator-started-out\n', stderr: 'evaluator-started-err\n' }
+    const f = controllerFixture([{ hang: true, ...markers }])
+    try {
+      const config = resolveConfig({ stateRoot: '.autoresearch-test', cleanupWorktreesOnSuccess: false, retainWorktrees: true, exportTsv: false, evaluatorRegistrations: [evaluatorRegistration] })
+      const signal = new AbortController().signal
+      // Discover the actual repository with a Git deadline independent of the evaluator watchdog.
+      const repositoryPreflight = await preflightAutoresearchRepository(f.ctx, {
+        config, input: { ...input, repository: f.root, timeout_ms: 30_000 }, parent: f.parent, signal,
+      })
+      const controller = new AutoresearchRunController(f.ctx, {
+        config, input: { ...input, repository: f.root, timeout_ms: 1_000 }, parent: f.parent, signal, repositoryPreflight,
+      })
+      const result = await controller.run()
+      const ready = await controller.ready
+      const tracker = DurableTracker.open(ready.tracker)
+      try {
+        expect(result).toMatchObject({ status: 'baseline-blocked', counts: { experimentsStarted: 0, experimentsCompleted: 0, attempts: 1 }, exit: { timedOut: true } })
+        expect(f.subprocess.evaluatorSpawns).toBe(1)
+        expect(f.creates).toHaveLength(0)
+        expect(tracker.getRun(ready.runId)).toMatchObject({ state: 'baseline-blocked' })
+        expect(tracker.database.prepare('SELECT kind, state, timed_out FROM experiments').get()).toMatchObject({ kind: 'baseline', state: 'timed-out', timed_out: 1 })
+        expect(tracker.database.prepare('SELECT timed_out, process_tree_quiescent FROM attempts').get()).toEqual({ timed_out: 1, process_tree_quiescent: 1 })
+        if (result.status !== 'baseline-blocked') throw new Error('expected blocked baseline result')
+        expect(result.artifacts.map(artifact => artifact.kind).sort()).toEqual(['stderr', 'stdout'])
+        for (const [kind, marker] of Object.entries(markers)) {
+          const artifact = result.artifacts.find(item => item.kind === kind)!
+          expect(result.exit[kind as keyof typeof markers]).toEqual(artifact)
+          const record = tracker.database.prepare('SELECT run_id, experiment_id, attempt_id, kind, retention FROM artifacts WHERE artifact_id = ?').get(artifact.artifactId)!
+          expect(record).toMatchObject({ run_id: ready.runId, kind, retention: 'retain' })
+          const path = join(tracker.layout.root, 'artifacts', String(record['run_id']), String(record['experiment_id']), String(record['attempt_id']), `${kind}.log`)
+          expect(readFileSync(path, 'utf8')).toBe(marker)
+        }
+        expect(tracker.database.prepare('SELECT COUNT(*) AS n FROM artifacts').get()?.['n']).toBe(2)
+      } finally { tracker.close() }
+    } finally { rmSync(f.root, { recursive: true, force: true }) }
   })
 
   it('prunes failed-attempt artifact bytes while preserving terminal replay metadata', async () => {

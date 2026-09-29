@@ -1,6 +1,5 @@
 import type { Context } from '@deepseek-ai/cordis'
-import type { Agent } from '@deepseek-ai/dsh-agent'
-import type { JobOutcome } from '@deepseek-ai/dsh-jobs'
+import { JobId, type JobOutcome } from '@deepseek-ai/dsh-jobs'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolCallView } from '@deepseek-ai/dsh-tools'
@@ -62,11 +61,11 @@ function startupFailure(jobId: string, error: unknown, cancelled: boolean): Back
 }
 
 function jobOutcome(result: AutoresearchRunResult, maxResultChars: number): JobOutcome {
-  const output = JSON.stringify(result)
+  const serialized = JSON.stringify(result)
   const detail = result.status
-  if (result.status === 'cancelled') return { status: 'killed', detail, output }
-  if (result.status === 'baseline-blocked' || result.status === 'blocked' || result.status === 'round-failed') return { status: 'failed', detail, output }
-  return { status: 'completed', detail, output: output.length <= maxResultChars ? output : JSON.stringify({ status: result.status, runId: result.runId, tracker: result.tracker }) }
+  if (result.status === 'cancelled') return { status: 'killed', detail, result: serialized }
+  if (result.status === 'baseline-blocked' || result.status === 'blocked' || result.status === 'round-failed') return { status: 'failed', detail, result: serialized }
+  return { status: 'completed', detail, result: serialized.length <= maxResultChars ? serialized : JSON.stringify({ status: result.status, runId: result.runId, tracker: result.tracker }) }
 }
 
 function presentCall(args: ActivationAutoresearchToolInput): ToolCallView {
@@ -89,7 +88,7 @@ export function apply(ctx: Context, config: AutoresearchConfig = {}): void {
   requireServices(ctx)
   const resolved = resolveConfig(config)
   const active = new Set<AutoresearchRunController>()
-  const activeJobs = new Set<Promise<JobOutcome>>()
+  const activeJobs = new Set<Promise<void>>()
   const releasePrompt = ctx.systemPrompt.section({ name: 'tool:autoresearch', order: 116.25, text: GUIDANCE })
   const releaseTool = ctx.tools.register(defineTool({
     name: 'autoresearch',
@@ -150,7 +149,7 @@ export function apply(ctx: Context, config: AutoresearchConfig = {}): void {
         const id = ctx.jobs.start({
           kind: 'autoresearch',
           label: `autoresearch: ${input.objective}`,
-          owner: parent as Agent,
+          owner: parent.id,
           outputLimitBytes: resolved.maxResultChars,
           run: () => {
             controller = new AutoresearchRunController(ctx, { config: resolved, input, parent, signal: new AbortController().signal, repositoryPreflight })
@@ -168,12 +167,12 @@ export function apply(ctx: Context, config: AutoresearchConfig = {}): void {
                   readiness.resolve(startupFailure(jobId, error, cancelled))
                 }
                 const result = await running
-                if (cancelled) return { status: 'killed', detail: cancelReason, output: JSON.stringify(startupFailure(jobId, cancelReason, true)) }
+                if (cancelled) return { status: 'killed', detail: cancelReason, result: JSON.stringify(startupFailure(jobId, cancelReason, true)) }
                 return jobOutcome(result, resolved.maxResultChars)
               } catch (error) {
                 readiness.resolve(startupFailure(jobId || 'unregistered', error, cancelled))
                 const failure = startupFailure(jobId || 'unregistered', error, cancelled)
-                return { status: cancelled ? 'killed' : 'failed', detail: reason(error), output: JSON.stringify(failure) }
+                return { status: cancelled ? 'killed' : 'failed', detail: reason(error), result: JSON.stringify(failure) }
               } finally {
                 if (controller) {
                   await controller.dispose()
@@ -181,7 +180,6 @@ export function apply(ctx: Context, config: AutoresearchConfig = {}): void {
                 }
               }
             })()
-            activeJobs.add(done)
             hooks = {
               cancel(value?: string) {
                 if (cancellationApplied) return
@@ -202,10 +200,14 @@ export function apply(ctx: Context, config: AutoresearchConfig = {}): void {
         })
         jobId = String(id)
         const startedHooks = hooks
-        if (startedHooks) void startedHooks.done.then(
-          () => setImmediate(() => activeJobs.delete(startedHooks.done)),
-          () => setImmediate(() => activeJobs.delete(startedHooks.done)),
-        )
+        if (startedHooks) {
+          const settled = startedHooks.done.then(async () => {
+            const job = await ctx.jobs.wait(JobId(jobId), 30_000, parent.id)
+            if (job.status === 'running' || job.status === 'stopping') throw new Error(`autoresearch job ${job.id} remained ${job.status} after producer completion`)
+          })
+          activeJobs.add(settled)
+          void settled.then(() => activeJobs.delete(settled), () => undefined)
+        }
         if (!controller) throw new Error('job registry did not start the autoresearch controller')
         const preparing = controller.prepare(jobId)
         void preparing.catch(() => undefined)
@@ -241,6 +243,8 @@ export function apply(ctx: Context, config: AutoresearchConfig = {}): void {
     releasePrompt()
     const settling = [...active].map(async controller => { controller.cancel('autoresearch plugin disposed'); await controller.dispose() })
     await Promise.allSettled(settling)
-    await Promise.allSettled([...activeJobs])
+    const jobs = await Promise.allSettled([...activeJobs])
+    const failures = jobs.filter((job): job is PromiseRejectedResult => job.status === 'rejected')
+    if (failures.length) throw new AggregateError(failures.map(job => job.reason), 'autoresearch jobs did not settle during plugin disposal')
   }, 'autoresearch.lifecycle()')
 }

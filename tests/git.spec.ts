@@ -388,17 +388,17 @@ describe('host-owned Git boundary', () => {
     expect(ref(f.root, rejected.auditRef)).toBe(rejected.candidateCommit); expect(ref(f.root, accepted.auditRef)).toBe(accepted.candidateCommit)
   })
 
-  it('converges after faults at every acceptance and rejection mutation while retaining detached audits', async () => {
-    for (const [ordinal, step] of ['read-tree --reset -u', 'update-ref --stdin'].entries()) {
-      const f = await createRun(fixture(), `accept-${ordinal}`, `run-accept-${ordinal}`); const c = await candidate(f, 'candidate', 'export const n = 2\n'); const faulty = faultingGit(f.root, step)
-      await expect(reconcileAcceptedHead(f.ctx, faulty, f.identity.worktree, f.identity, c.candidateCommit, commandOptions)).rejects.toMatchObject({ code: 'git-command-failed' }); expect(ref(f.root, c.auditRef)).toBe(c.candidateCommit); expect(ref(f.root, f.identity.acceptedRef)).toBe(f.discovery.startCommit)
-      await reconcileAcceptedHead(f.ctx, 'git', f.identity.worktree, f.identity, c.candidateCommit, commandOptions); assertState(f, c.candidateCommit)
-    }
-    for (const [ordinal, step] of ['read-tree --reset -u', 'clean -ffdx'].entries()) {
-      const f = await createRun(fixture(), `reject-${ordinal}`, `run-reject-${ordinal}`); const c = await candidate(f, 'candidate', 'export const n = 2\n'); writeFileSync(join(f.identity.worktree, '.ignored-extra'), 'extra'); writeFileSync(join(f.identity.worktree, '.gitignore'), '.ignored-extra\n')
-      const faulty = faultingGit(f.root, step); await expect(reconcileRejectedHead(f.ctx, faulty, f.identity.worktree, f.identity, c.candidateCommit, f.discovery.startCommit, commandOptions)).rejects.toMatchObject({ code: 'git-command-failed' }); expect(ref(f.root, c.auditRef)).toBe(c.candidateCommit)
-      await reconcileRejectedHead(f.ctx, 'git', f.identity.worktree, f.identity, c.candidateCommit, f.discovery.startCommit, commandOptions); assertState(f, f.discovery.startCommit); expect(existsSync(join(f.identity.worktree, '.ignored-extra'))).toBe(false); expect(existsSync(join(f.identity.worktree, '.gitignore'))).toBe(false)
-    }
+  it.each(['read-tree --reset -u', 'update-ref --stdin'] as const)('converges after acceptance fault at %s while retaining detached audits', async (step) => {
+    const ordinal = step === 'read-tree --reset -u' ? 0 : 1
+    const f = await createRun(fixture(), `accept-${ordinal}`, `run-accept-${ordinal}`); const c = await candidate(f, 'candidate', 'export const n = 2\n'); const faulty = faultingGit(f.root, step)
+    await expect(reconcileAcceptedHead(f.ctx, faulty, f.identity.worktree, f.identity, c.candidateCommit, commandOptions)).rejects.toMatchObject({ code: 'git-command-failed' }); expect(ref(f.root, c.auditRef)).toBe(c.candidateCommit); expect(ref(f.root, f.identity.acceptedRef)).toBe(f.discovery.startCommit)
+    await reconcileAcceptedHead(f.ctx, 'git', f.identity.worktree, f.identity, c.candidateCommit, commandOptions); assertState(f, c.candidateCommit)
+  })
+  it.each(['read-tree --reset -u', 'clean -ffdx'] as const)('converges after rejection fault at %s while retaining detached audits', async (step) => {
+    const ordinal = step === 'read-tree --reset -u' ? 0 : 1
+    const f = await createRun(fixture(), `reject-${ordinal}`, `run-reject-${ordinal}`); const c = await candidate(f, 'candidate', 'export const n = 2\n'); writeFileSync(join(f.identity.worktree, '.ignored-extra'), 'extra'); writeFileSync(join(f.identity.worktree, '.gitignore'), '.ignored-extra\n')
+    const faulty = faultingGit(f.root, step); await expect(reconcileRejectedHead(f.ctx, faulty, f.identity.worktree, f.identity, c.candidateCommit, f.discovery.startCommit, commandOptions)).rejects.toMatchObject({ code: 'git-command-failed' }); expect(ref(f.root, c.auditRef)).toBe(c.candidateCommit)
+    await reconcileRejectedHead(f.ctx, 'git', f.identity.worktree, f.identity, c.candidateCommit, f.discovery.startCommit, commandOptions); assertState(f, f.discovery.startCommit); expect(existsSync(join(f.identity.worktree, '.ignored-extra'))).toBe(false); expect(existsSync(join(f.identity.worktree, '.gitignore'))).toBe(false)
   })
 
   it('repairs same-run lock checkpoints, releases only terminal quiescent locks, and cleanup preserves refs', async () => {

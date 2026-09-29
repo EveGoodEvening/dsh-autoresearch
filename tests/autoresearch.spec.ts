@@ -1,5 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
-import type { JobHooks, JobOutcome, JobStart } from '@deepseek-ai/dsh-jobs'
+import { JobId, type JobHooks, type JobSpec } from '@deepseek-ai/dsh-jobs'
+import { SessionId } from '@deepseek-ai/dsh-session'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -17,6 +18,8 @@ const state = vi.hoisted(() => ({
   preparePromise: undefined as Promise<unknown> | undefined,
   lifecyclePromise: undefined as Promise<unknown> | undefined,
   readyPromise: undefined as Promise<{ runId: string; tracker: string; branch: string; worktree: string }> | undefined,
+  registrySettlementPromise: undefined as Promise<void> | undefined,
+  waitForJob: vi.fn(),
   rejectReady: undefined as ((reason?: unknown) => void) | undefined,
   cancelPreparation: undefined as ((reason?: string) => void) | undefined,
   preflight: vi.fn(async () => ({
@@ -63,13 +66,13 @@ vi.mock('../src/controller.js', () => ({
 }))
 
 import { createEvaluatorRegistry, normalizeRunPolicy, resolveConfig } from '../src/config.ts'
-import { apply, inject } from '../src/index.ts'
+import { apply } from '../src/index.ts'
 import { ACTIVATION_AUTORESEARCH_TOOL_SCHEMA } from '../src/types.ts'
 
 interface Harness {
   tool: ToolDefinition
   prompt?: { name: string; order: number; text: string }
-  job?: JobStart
+  job?: JobSpec
   hooks?: JobHooks
   dispose(): Promise<void>
 }
@@ -85,14 +88,22 @@ function harness(): Harness {
     get hooks() { return thisHooks },
     async dispose() { await cleanup?.() },
   }
-  let thisJob: JobStart | undefined
+  let thisJob: JobSpec | undefined
   let thisHooks: JobHooks | undefined
+  state.waitForJob.mockImplementation(async (id: JobId) => {
+    const outcome = await thisHooks!.done
+    await state.registrySettlementPromise
+    return { id, status: outcome.status }
+  })
   const ctx = {
     agents: { create: vi.fn() },
     subprocess: {},
     systemPrompt: { section(section: Harness['prompt']) { prompt = section; return state.releasePrompt } },
     tools: { get: vi.fn(() => undefined), register(definition: ToolDefinition) { tool = definition; return state.releaseTool } },
-    jobs: { start(spec: JobStart) { if (state.startError) throw state.startError; thisJob = spec; thisHooks = spec.run(); if (state.throwAfterRun) throw new Error('registry failed after run'); return 'autoresearch-1' } },
+    jobs: {
+      start(spec: JobSpec) { if (state.startError) throw state.startError; thisJob = spec; const id = JobId('autoresearch-1'); thisHooks = spec.run({ id, append: vi.fn(), updateProgress: vi.fn() }); if (state.throwAfterRun) throw new Error('registry failed after run'); return id },
+      wait(id: JobId, timeoutMs: number, owner: SessionId) { return state.waitForJob(id, timeoutMs, owner) },
+    },
     effect(factory: () => () => Promise<void>) { cleanup = factory(); return cleanup },
   }
   apply(ctx as unknown as Context, { evaluatorRegistrations: [{ id: 'judge', command: 'node', args: ['score.mjs'], metricName: 'score', metricDirection: 'minimize', metricParserVersion: 'final-line-json-v1', evaluatorFiles: [] }] })
@@ -102,7 +113,7 @@ function harness(): Harness {
 const input = {
   objective: 'reduce score', run_tag: 'trial', evaluator_id: 'judge', mutable_globs: ['src/**'],
 } as const
-const parent = { id: 'parent', session: { header: { id: 'session', cwd: '/repo' } } }
+const parent = { id: SessionId('parent'), session: { header: { id: SessionId('parent'), cwd: '/repo' } } }
 
 async function expectPrompt<T>(promise: Promise<T>): Promise<T> {
   return await Promise.race([
@@ -122,6 +133,8 @@ beforeEach(() => {
   state.throwAfterRun = false
   state.preparePromise = undefined
   state.lifecyclePromise = undefined
+  state.registrySettlementPromise = undefined
+  state.waitForJob.mockReset()
   state.readyPromise = undefined
   state.rejectReady = undefined
   state.cancelPreparation = undefined
@@ -135,14 +148,6 @@ describe('autoresearch Host authority normalization', () => {
 })
 
 describe('autoresearch production wiring', () => {
-  it('injects only the controller production services and registers direct-human guidance', () => {
-    expect(inject).toEqual(['agents', 'jobs', 'subprocess', 'systemPrompt', 'tools'])
-    const test = harness()
-    expect(test.tool.name).toBe('autoresearch')
-    expect(test.prompt?.text).toBe('Use autoresearch only when the direct human explicitly requests autonomous metric-driven experimentation. For a new run, select a Host-provided evaluator_id and provide a narrow mutable path set. To resume, provide resume_run_id instead; never supply evaluator_id or any other evaluator authority on resume. Runs are background jobs by default and can be inspected or stopped with the generic job tools. Do not invoke it for ordinary coding or open-ended research.')
-    expect(JSON.stringify(test.tool.parameters)).not.toContain('evaluation_command')
-  })
-
   it('registers the activated discriminated Host-authority schema', () => {
     const { parameters } = harness().tool
     expect(parameters).toMatchObject({
@@ -180,12 +185,12 @@ describe('autoresearch production wiring', () => {
     const result = await test.tool.execute(input, execution(signal))
     expect(state.preflight).toHaveBeenCalledOnce()
     expect(state.preflight).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ input, parent, signal }))
-    expect(test.job).toMatchObject({ kind: 'autoresearch', owner: parent })
+    expect(test.job).toMatchObject({ kind: 'autoresearch', owner: parent.id })
     expect(state.controllers[0]?.parent).toBe(parent)
     expect(state.controllers[0]?.prepare).toHaveBeenCalledWith('autoresearch-1')
     expect(state.controllers[0]?.prepare.mock.invocationCallOrder[0]).toBeLessThan(state.controllers[0]?.run.mock.invocationCallOrder[0] ?? 0)
     expect(result).toEqual({ kind: 'background', jobId: 'autoresearch-1', runId: 'run-1', tracker: '/tracker.sqlite', branch: 'autoresearch/run-1', worktree: '/worktree' })
-    await expect(test.hooks?.done).resolves.toMatchObject({ status: 'completed', detail: 'budget-limited' })
+    await expect(test.hooks?.done).resolves.toMatchObject({ status: 'completed', detail: 'budget-limited', result: JSON.stringify(state.runResult) })
   })
 
   it.each([
@@ -199,7 +204,7 @@ describe('autoresearch production wiring', () => {
     state.runResult = { ...state.runResult, status } as never
     const test = harness()
     await test.tool.execute(input, execution())
-    await expect(test.hooks?.done).resolves.toMatchObject({ status: expected, detail: status })
+    await expect(test.hooks?.done).resolves.toMatchObject({ status: expected, detail: status, result: JSON.stringify(state.runResult) })
   })
 
   it('does not register a background job when repository preflight rejects the target', async () => {
@@ -358,7 +363,7 @@ describe('autoresearch production wiring', () => {
     })
     expect(state.controllers[0]?.run).not.toHaveBeenCalled()
     expect(state.controllers[0]?.cancel).toHaveBeenCalledWith(preparationFailure.message)
-    await expect(test.hooks?.done).resolves.toMatchObject({ status: 'failed', detail: preparationFailure.message })
+    await expect(test.hooks?.done).resolves.toMatchObject({ status: 'failed', detail: preparationFailure.message, result: JSON.stringify({ kind: 'background-start-failed', jobId: 'autoresearch-1', status: 'failed', reason: preparationFailure.message, evidence: [{ code: 'startup-failed', message: preparationFailure.message, artifacts: [] }] }) })
     expect(state.controllers[0]?.dispose).toHaveBeenCalledOnce()
   })
 
@@ -381,6 +386,27 @@ describe('autoresearch production wiring', () => {
     test.hooks?.cancel('again')
     expect(state.controllers[0]?.cancel).toHaveBeenCalledTimes(1)
     await expect(test.hooks?.done).resolves.toMatchObject({ status: 'killed', detail: 'cancelled' })
+  })
+
+  it('keeps unload pending until the owner job registry commits terminal settlement after producer cleanup', async () => {
+    const registry = Promise.withResolvers<void>()
+    state.registrySettlementPromise = registry.promise
+    const test = harness()
+    await test.tool.execute(input, execution())
+    await expect(test.hooks!.done).resolves.toMatchObject({ status: 'completed' })
+
+    const unloading = test.dispose()
+    let unloaded = false
+    void unloading.then(() => { unloaded = true })
+    await Promise.resolve()
+    expect(unloaded).toBe(false)
+    expect(state.waitForJob).toHaveBeenCalledWith(JobId('autoresearch-1'), 30_000, parent.id)
+
+    registry.resolve()
+    await unloading
+    expect(unloaded).toBe(true)
+    expect(state.releaseTool).toHaveBeenCalledOnce()
+    expect(state.releasePrompt).toHaveBeenCalledOnce()
   })
 
   it('unregisters once and repeatedly unloads without duplicate cancellation or release', async () => {

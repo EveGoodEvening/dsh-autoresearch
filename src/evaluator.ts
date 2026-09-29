@@ -123,7 +123,7 @@ export type EvaluatorResult = DurableAttemptOutcome & { readonly artifacts: read
 
 export interface EvaluatorPersistence {
   persistSpawnIntent(intent: Readonly<{ argv: readonly string[]; cwd: string; env: Readonly<Record<string, string>>; provenanceSha256: string }>): void
-  persistSpawnObserved(facts: Readonly<{ providerPid: number; spawnedAt: string }>): void
+  persistSpawnObserved(facts: Readonly<{ spawnedAt: string }>): void
   persistAttemptOutcome(outcome: DurableAttemptOutcome, artifacts: readonly EvaluatorArtifactInput[]): void
 }
 
@@ -330,7 +330,7 @@ export async function runEvaluator(options: EvaluatorRunOptions): Promise<Evalua
       },
     })
     spawnedAt = now().toISOString()
-    persistSafely(() => options.persistence.persistSpawnObserved({ providerPid: handle!.pid, spawnedAt: spawnedAt! }), secrets)
+    persistSafely(() => options.persistence.persistSpawnObserved({ spawnedAt: spawnedAt! }), secrets)
     try {
       assertPathIdentity(root, cwdIdentity, 'evaluator cwd')
       revalidateAttemptBoundary(root, options.boundary, options.frozenFiles)
@@ -367,7 +367,7 @@ export async function runEvaluator(options: EvaluatorRunOptions): Promise<Evalua
   const stderrRead = handle?.collected.stderr?.readFrom(0)
   const artifacts = artifactWriter.write(stdoutRead, stderrRead, secrets)
   const facts: EvaluatorAttemptFacts = {
-    ...(handle === undefined ? {} : { providerPid: handle.pid }), ...(spawnedAt === undefined ? {} : { spawnedAt }),
+    ...(spawnedAt === undefined ? {} : { spawnedAt }),
     exitedAt: now().toISOString(), exitCode: outcome.exitCode, signal: outcome.signal,
     timedOut: cause === 'timeout', cancelled: cause === 'cancelled', processTreeQuiescent: quiescent,
   }

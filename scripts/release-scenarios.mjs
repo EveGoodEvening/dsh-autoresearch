@@ -17,13 +17,16 @@ await run(vitest, ['run', 'tests/release-scenarios.integration.spec.ts', '--repo
   DSH_AUTORESEARCH_EVIDENCE: evidencePath,
 })
 const evidence = JSON.parse(await readFile(evidencePath, 'utf8'))
-const required = ['prepareBarrier', 'accepted', 'tie', 'rejected', 'background', 'interruptionResume', 'uncertainRestart']
+const required = ['prepareBarrier', 'accepted', 'tie', 'rejected', 'continuedFailure', 'background', 'interruptionResume', 'uncertainRestart']
+for (const key of required) {
+  if (!evidence[key]?.ok) throw new Error(`release scenario ${key} did not emit passing evidence`)
+}
 const prepare = evidence.prepareBarrier
 const tsv = evidence.accepted.tsv
 evidence.items = {
-  '840': { ok: true, scenario: 'temporary repositories executed from installed profile' },
+  '840': { ok: evidence.installedRoot === installedRoot && typeof evidence.accepted.runId === 'string' && evidence.accepted.runId.length > 0, scenario: 'temporary repositories executed from installed profile', installedRoot, runId: evidence.accepted.runId },
   '845': { ok: Boolean(evidence.accepted.caller && evidence.rejected.caller), accepted: evidence.accepted.caller, rejected: evidence.rejected.caller },
-  '846': { ok: true, accepted: evidence.accepted.identity, rejected: evidence.rejected.identity },
+  '846': { ok: [evidence.accepted, evidence.rejected].every(({ identity }) => identity && /^[0-9a-f]{40}$/u.test(identity.startCommit) && identity.branch?.includes('/') && identity.worktree?.includes('/')), accepted: evidence.accepted.identity, rejected: evidence.rejected.identity },
   '847': {
     ok: prepare?.prepared?.trackerExists === true && prepare.prepared.runExists === true && prepare.prepared.runState === 'initializing'
       && prepare.prepared.experiments === 0 && prepare.prepared.attempts === 0 && prepare.prepared.localLocks === 1 && prepare.prepared.sharedLocks === 1
@@ -45,14 +48,11 @@ evidence.items = {
   '853': { ok: evidence.background.listed === true && evidence.background.kill === true && evidence.background.noLiveJobs === true, background: evidence.background },
   '854': { ok: evidence.accepted.agentDisposed === true && evidence.accepted.terminalBeforeLockRelease === true && evidence.interruptionResume.processTreeQuiescent === true, retained: evidence.accepted },
   '855': { ok: evidence.interruptionResume.processTreeQuiescent === true, interruption: evidence.interruptionResume },
-  '856': { ok: evidence.background.resumedStatus === 'budget-limited' && evidence.background.resumeResultMatches === true && evidence.background.headAdvanced === true && evidence.background.resumeCwdChanged === true && evidence.interruptionResume.resumedStatus === 'cancelled' && evidence.interruptionResume.attempts === 1 && evidence.interruptionResume.duplicateCandidate === false, resume: { background: evidence.background, interruption: evidence.interruptionResume } },
-  '857': { ok: evidence.uncertainRestart.status === 'blocked' && evidence.uncertainRestart.pidSignalled === false && evidence.uncertainRestart.duplicateEvaluation === false, uncertain: evidence.uncertainRestart },
+  '856': { ok: evidence.background.resumedStatus === 'budget-limited' && evidence.background.resumeResultMatches === true && evidence.background.headAdvanced === true && evidence.background.resumeCwdChanged === true && evidence.interruptionResume.resumedStatus === 'cancelled' && evidence.interruptionResume.attempts === 1 && evidence.interruptionResume.duplicateCandidate === false && evidence.continuedFailure.attempts === 3 && evidence.continuedFailure.candidates === 2 && evidence.continuedFailure.resumedEqual === true, resume: { background: evidence.background, interruption: evidence.interruptionResume, continuedFailure: evidence.continuedFailure } },
+  '857': { ok: evidence.uncertainRestart.status === 'blocked' && evidence.uncertainRestart.pidSignalled === false && evidence.uncertainRestart.duplicateEvaluation === false && evidence.uncertainRestart.lockRetained === true, uncertain: evidence.uncertainRestart }
 }
 for (const [item, itemEvidence] of Object.entries(evidence.items)) {
   if (!itemEvidence.ok) throw new Error(`release checklist item ${item} failed`)
-}
-for (const key of required) {
-  if (!evidence[key]?.ok) throw new Error(`release scenario ${key} did not emit passing evidence`)
 }
 await writeFile(evidencePath, `${JSON.stringify(evidence, null, 2)}\n`)
 process.stdout.write(JSON.stringify(evidence))
