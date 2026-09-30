@@ -288,11 +288,11 @@ This supersedes all old “remains open”/authenticate-to-close prose above wit
 
 ## 2026-09-30 R5 preparation — current authoritative reconciliation
 
-The sole aggregate pointer remains [R5 planning in the reassessment ledger](handoff-2026-0903.md#r5--already-closed-issues-missing-comments-terminal-accounting). This section supersedes historical open/authentication-blocked assumptions, not their historical evidence or unchecked boxes. R4 closure is coordinator-observed `d1a12f1af225d3d1c17a6f8acdc8e3037aac9597`; its green packed/setup checks are recorded in R4, not rerun at this descendant.
+The sole aggregate pointer is the [current reassessment ledger](handoff-2026-0903.md#2026-09-29-full-reassessment-and-release-ledger): independent terminal R5/R7 accounting review → reviewed commit. Parent bg13 successor Success and bg14 all-three independent readbacks are verified below. Earlier preparation observations/pointers remain historical only; R4 closure `d1a12f1af225d3d1c17a6f8acdc8e3037aac9597` and its recorded gates are not rerun here.
 
 Fresh read-only observation at **2026-09-30T05:22:39.292180Z**, captured in `local://r5-current-issues.json`: canonical HTML HTTP200 embedded GraphQL reports #1–#3 CLOSED/COMPLETED, complete empty comment collections (zero), and prior owner EveGoodEvening closure timeline events at respectively **2026-09-03T03:44:08Z**, **03:44:21Z**, **03:44:27Z**. These are prior-owner facts, not this session's close actions. #2 historical REST `closed_at=03:44:20Z` and timeline `03:44:21Z` are distinct observations; fresh REST closed_at is unavailable, not newly reconfirmed. Nine fresh REST403 reads were rate-limited, not authentication-denial proof; logged-out viewerCanComment=false is not Actions-token evidence. No comment or issue mutation occurred.
 
-### All eleven original unchecked obligations, preserved verbatim
+### All eleven original unchecked obligations, preserved verbatim — historical preparation dispositions superseded by final mapping below
 
 The quoted obligations below remain historical text; dispositions govern current work without retroactively checking completion.
 
@@ -362,7 +362,7 @@ Current disposition: Corrected exact body independent approval, pre-post compari
 
 Current disposition: Prior closure refreshed read-back observed, final durable state/URLs/comment evidence/SHAs/risks/rollback/resume accounting pending; no session closure claimed.
 
-### Exact corrected Chinese comment bodies — independently approved; #1 now posted, #2/#3 pending
+### Exact corrected Chinese comment bodies — independently approved; all three posted and independently verified
 
 The following exact UTF-8 bodies are copied from `local://r5-comment-drafts.json`; coordinator-reported `handoff-r5-review-resumed-2` independently approves all three unchanged exact bodies and their recorded hashes; `handoff-r5-review-resumed-1` security review is CLEAN. Focused accounting rereview and implementation approval remain required before deploying any write mechanism. Issue-body digests hash canonical issue body exact UTF-8 bytes, without whitespace/newline normalization; comment-body digests hash the exact body including its final marker, with no extra trailing newline. Marker and body must both match for dedup. Gates 569/9 belong to E1 bg_40 / artifact://212 clean generated tree; R4 bg_46 independently proves the fresh local 0.2.1 packed artifact. Binding them to reviewed descendant d1a12 records retained evidence, not gates rerun there or a future release.
 
@@ -394,7 +394,7 @@ The following exact UTF-8 bodies are copied from `local://r5-comment-drafts.json
 - Expected issue-body digest: `sha256:33cbd35c1bf5765a1df1fbe8559576aff0cd1bb2806d70abd2d9e9b3f98a1b0f`.
 - Exact comment-body digest: `sha256:4187c797f3dd94da8fe5c6388b66629307a1e84b4e78235a6e604be2505373b9`.
 - Stable marker: `<!-- dsh-issues-r5-evidence-v1-2 -->`.
-- Approval: **independently approved**, coordinator-reported `handoff-r5-review-resumed-2`, exact body/hash unchanged; post/read-back: **pending**.
+- Approval: **independently approved**, coordinator-reported `handoff-r5-review-resumed-2`, exact body/hash unchanged; actual post **5909794040 at 2026-09-30T10:57:11Z**, independently VERIFIED parent bg14.
 
 ```text
 本次补充绑定已独立复审的不可变基线 `d1a12f1af225d3d1c17a6f8acdc8e3037aac9597`；不是重新关闭 issue，也不是宣布 0.2.2 已发布。既有关闭由 EveGoodEvening 于 9 月 3 日完成（closed/completed）。
@@ -417,7 +417,7 @@ The following exact UTF-8 bodies are copied from `local://r5-comment-drafts.json
 - Expected issue-body digest: `sha256:df6a6ce8712f8be1d41be7e261ee207ed796860d60f3a1d097bd79f907567a9b`.
 - Exact comment-body digest: `sha256:6fdfc30d733e2949c285d4ae0b1387a1966d36ea3b3dfc95977ba322ce05d918`.
 - Stable marker: `<!-- dsh-issues-r5-evidence-v1-3 -->`.
-- Approval: **independently approved**, coordinator-reported `handoff-r5-review-resumed-2`, exact body/hash unchanged; post/read-back: **pending**.
+- Approval: **independently approved**, coordinator-reported `handoff-r5-review-resumed-2`, exact body/hash unchanged; actual post **5909794588 at 2026-09-30T10:57:13Z**, independently VERIFIED parent bg14.
 
 ```text
 本次补充绑定已独立复审的不可变基线 `d1a12f1af225d3d1c17a6f8acdc8e3037aac9597`；不是重新关闭 issue，也不是宣布 0.2.2 已发布。既有关闭由 EveGoodEvening 于 9 月 3 日完成（closed/completed）。
@@ -455,7 +455,7 @@ Coordinator-observed LOCAL R5 preparation closure is `6364682d7bf9fd0df1af078ee6
 
 Parent executed the exact production inline script in VM/API-shaped smoke **bg1 / artifact://326**: **33/33 scenarios PASS**, **networkAttempts 0**, **simulated postAttempts 21**, **not real POSTs**. Script SHA-256: `2da188eccdf9f4cd8fefd9d59f505885fbc988339b7bab0d7d1dca3fdebafcfd`. Approved exact body hashes are unchanged. Exercised all-three preflight/sequential POST+readbacks, pagination/dedup/partial resume, ref/repo/event guards, drift/lock/title/body/closure/PR/marker wrong-author/duplicate rejection, raw/rendered readback failures, lost-response no-retry and safe rerun. This smoke establishes local decision behavior, not live GitHub token acceptance. Current public canonical evidence remains approximately 05:23 HTML200 complete GraphQL reads; REST403 is rate limiting. No external writes or publication occurred.
 
-Current action follows the sole handoff pointer: parent R6 closure commit → R7 candidate/final gates/tag/successful publish/comment job → independent external readbacks and resumed R5 final accounting. All original posting/readback/terminal checkboxes remain pending; immutable historical precommit exception remains unchecked. R6 reviews and local classification are complete, closure-ready; no parent closure SHA is yet claimed.
+Historical pre-release checkpoint only: the R6/R7 sequence and zero-comment status in this subsection are superseded by the terminal reconciliation below and sole aggregate pointer above. Local R5 preparation closed at `6364682d7bf9fd0df1af078ee67deb625c1a560d`; no historical proof or original unchecked obligation is rewritten.
 
 ### Rendered-autolink finding, resolution and current dry proof
 
@@ -476,7 +476,7 @@ H01–H15, seven September concerns/setup and technical issue boundaries are ind
 Final R6 accounting disposition supersedes earlier pending-review wording: coordinator-reported `handoff-r6-accounting-approval-1` and `handoff-r6-accounting-approval-2` are both CLEAN, alongside three CLEAN technical reviews. All pending-item classification and local accounting corrections are complete and approved; parent R6 closure commit is next and has not yet landed. Only verified R6 review/classification gates are checked in the aggregate ledger. All R7 candidate/gate/tag/publish/registry/final-accounting and actual R5 comment/readback/terminal duties remain unchecked awaiting actual outcomes; historic precommit exception remains explicit.
 
 
-## 2026-09-30 terminal publication and partial-comment recovery reconciliation
+## 2026-09-30 terminal publication and comment recovery reconciliation
 
 This current section supersedes earlier zero-comment/PENDING/local-only dispositions without changing historical quoted checkboxes or approved bodies. Retained exact evidence is `local://r7-release-evidence/0.2.2-9fc769af8b582813033d5df989bdc5da3e50e032-20260930T093613988894Z/evidence.json`, `/tmp/r7-issue-readback.json` and `agent://handoff-release-diagnosis-1:raw`.
 
@@ -496,21 +496,42 @@ Retain every existing all-three precheck, fresh per-target comparison, paginated
 
 Parent required proof: actual old #1 HTML fails old source, passes corrected successor with exact raw hash and zero #1 simulated POST; API-shaped cases cover #1 mandatory-existing, #2/#3 partial resume, pagination, drift/lock/closure/title/body/author/duplicate-marker failures, approved abbreviated/full links, hostile links/labels/active content/missing paragraph, raw/readback failures and lost response/no retries. No dry outcome means authentication success. After reviewed push, exact successor run/job must succeed; independently corrected public/API GET readbacks must verify all three comment IDs/URLs/times/raw hashes/rendered content/bot/edit facts and unchanged state/closure. Record actual current repository successor SHA separately from immutable release tag, then reviewed final R5/R7 tracker accounting commit. If genuinely denied, document actual run/HTTP/policy prerequisite and attempted routes, not speculative absent-token blockers.
 
-Current original-obligation disposition: **1** #1 POST and independently verified readback observed, final durable pre/post/accounting review pending; **2** corrected #1 independent readback VERIFIED parent bg8, recovery fresh revalidation pending; **4/6** #2/#3 post/readback pending; **10** partial, all-three complete evidence pending; **3/5/7** new close actions superseded by prior owner closure, never reclose; **8/11** terminal independent reviewed accounting pending; **9** historical missed precommit exception permanently unchecked. Historical combined-run Success box remains unchecked with failed-event disposition; release success separately observed publisher/registry proof plus required green successor current workflow/comment job. Existing #1 must not duplicate. No workflow/source edits, probes/gates/API writes/commits/push performed in this planning phase.
+Current original-obligation disposition supersedes every earlier pending/zero-comment disposition without changing original boxes/quotes: **1/2/4/6/10** approved precheck/post/readback completed, independently confirmed all three by bg14 after exact successor Success; **3/5/7** new close actions superseded by prior-owner closures, freshly state/REST/timeline read back, never reclosed; **8/11** terminal accounting draft-ready, independent staged review and commit pending; **9** permanent historical missed precommit exception. Historical combined-run Success remains unchecked Failure; publisher/npm and successor Success are separate observations.
 
-- [ ] R7C independently approved plan, bounded implementation/proof/reviews and focused commits before push.
-- [ ] Exact successor comment-only run/job successful; corrected independent #1 readback and #2/#3 append/readbacks complete, issue states unchanged.
+- [x] R7C independently approved plan, bounded implementation/proof, three CLEAN independent reviews and focused commits before ordinary reviewed push, recorded below.
+- [x] Exact successor comment-only run/job successful; independent #1 readback and #2/#3 append/readbacks complete, issue states unchanged, parent bg13/bg14.
 - [ ] Final R5/R7 accounting independently reviewed and committed; failed old-run and historical exception remain truthful.
 
-### R7C local implementation and dry proof — green draft-ready, external work pending
+### R7C implementation/dry proof and deployed successor — execution/readbacks verified, terminal review/commit pending
 
 Coordinator-observed approved plan commit **`60c24c2de37bc1b8c5e1748dd7a9dc1e764531e3`**; security plan CLEAN and corrected accounting `handoff-comment-recovery-approval-2` CLEAN. Parent reports new `.github/workflows/issue-assessment-recovery.yml` created and **only** obsolete/broken comment job removed from current `.github/workflows/publish.yml`; original publisher lines 1–68 preserved. Package/source/version/tag unchanged; immutable release workflow/run unchanged. Historical planning-only action limits remain historical, not a claim that implementation is still absent.
 
 Parent **bg11 / artifact://449 BEFORE** exercised exact old immutable production script on actual #1 HTML: **1 expected-defect case**, dedup/getComment rendered failure reproduced, **0 POST / 0 network**. Actual HTML SHA-256 **`6b1221794f8d63edf57e049956d3f36f9d28c2de28035819d183dc112b3e7090`**. AFTER exact successor script SHA-256 **`7d8b0b8f02ebf6c269cca735a810ae3bd44f9cb21c3a233fd6d5d80e9fe92991`** passed **53/53 executions**, **20 SIMULATED posts / 0 network**. Mandatory existing #1 preserved, only #2/#3 simulated posts; actual rendering, dedup/rerun/partial recovery, wrong SHA/repository/suffix/query/forged-label attacks and guards/drift/readback/uncertain-POST no-retry exercised. **Wrong-host rejection is source-reviewed exact-URL allowlist behavior, not a separately run 53-case scenario.** Earlier helper generic-error/partial-ID expectation failures were corrected, not counted green.
 
-Coordinator-observed green draft **`1953b75d7a61b6f0eef8d2fe2184d32aac41987b`** committed; independent implementation reviews **`handoff-comment-recovery-review-1` / `-2` / `-3` all CLEAN**. Review2 proof-wording qualification is corrected above, no code fix or new test required. Accounting is approval-ready, **not** actual #2/#3 posts, successor token acceptance or completion. Parent approval/accounting commit → ordinary reviewed master push triggering comment-only workflow → exact current successor workflow/run/job Success → independent all-three final comment/state readbacks → reviewed final R5/R7 accounting remain required. Independently verified #1 bg8 must fresh-dedup/readback without duplication; successful publication/registry and immutable old release/tag/package remain unchanged, historical combined run remains Failure. No future approval SHA claimed; no source edits/gates/commits performed by this accounting owner.
+Coordinator-observed draft **`1953b75d7a61b6f0eef8d2fe2184d32aac41987b`**, implementation reviews **`handoff-comment-recovery-review-1` / `-2` / `-3` CLEAN**. Review2 qualification is recorded above. Parent approval **`851d2a2a3d6b090ea38565065241f9e0834bdfcf`** and ordinary nonforced push advanced origin/master from release **`9fc769af8b582813033d5df989bdc5da3e50e032`**. Successor Success and all-three independent readbacks are verified; terminal accounting review/commit pending. Immutable package/tag and old combined Failure unchanged; no retag/republish/issue-close/edit/delete.
 
 - [x] Approved plan/observed commit and local implementation/parent actual-HTML BEFORE/AFTER/API-shaped dry proof recorded.
 - [x] Green draft committed/three independent implementation reviews CLEAN; proof wording qualified, parent approval accounting ready.
-- [ ] Parent approval/accounting commit, ordinary reviewed master push, exact successor Success, all-three independent final readbacks and final accounting still required; #2/#3 not done.
+- [x] Parent approval/accounting commit and ordinary reviewed master push; GET-only parent **bg13 / artifact://468** observed exact [run 36705519036](https://github.com/EveGoodEvening/dsh-autoresearch/actions/runs/36705519036), attempt 1, **completed/success**, at **2026-09-30T10:57:24.448736+00:00**: head **`851d2a2a3d6b090ea38565065241f9e0834bdfcf`**, push `refs/heads/master`, `.github/workflows/issue-assessment-recovery.yml`, created **10:57:01Z**, updated **10:57:17Z**; [job 109854719964](https://github.com/EveGoodEvening/dsh-autoresearch/actions/runs/36705519036/job/109854719964) `issue-assessment-comments` succeeded. This proves successor execution, not independent final comment readback.
+- [x] Independent all-three final comment/state/closure readbacks verify unchanged #1 ID and approved #2/#3 appended, parent bg14.
+
+### Final R5/R7 terminal accounting draft — review/commit pending
+
+Parent corrected GET-only **bg14**, `/tmp/r7-issue-readback-final.json`, **2026-09-30T10:58:52.205066Z–10:58:58.448604Z**, returned `ok:true`, all three `verified`, no problems. Canonical REST full-media comments, complete REST comment collections/timelines and HTML timeline observations verify raw hashes, one marker each, rendering/full-SHA href with legitimate `d1a12f1` prefix, author **github-actions[bot] / Bot41898282**. Each created/updated timestamp matches; no edit evidenced, but REST does not expose `lastEditedAt`, so complete edit-history absence is not claimed.
+
+| Canonical comment | Created = updated UTC | Exact approved raw SHA-256 |
+|---|---|---|
+| [#1 / 5908616021](https://github.com/EveGoodEvening/dsh-autoresearch/issues/1#issuecomment-5908616021) | 2026-09-30T09:44:53Z | `31248d9579591a48e43e59965dc6d2fd2a7f41202dbb01781f63c37a6b0be8b6` |
+| [#2 / 5909794040](https://github.com/EveGoodEvening/dsh-autoresearch/issues/2#issuecomment-5909794040) | 2026-09-30T10:57:11Z | `4187c797f3dd94da8fe5c6388b66629307a1e84b4e78235a6e604be2505373b9` |
+| [#3 / 5909794588](https://github.com/EveGoodEvening/dsh-autoresearch/issues/3#issuecomment-5909794588) | 2026-09-30T10:57:13Z | `6fdfc30d733e2949c285d4ae0b1387a1966d36ea3b3dfc95977ba322ce05d918` |
+
+Complete collections contain one comment per issue: #1 original ID/body/time unchanged, no duplicate; only #2/#3 appended. All current REST states **closed / completed**. Prior close actor **EveGoodEvening**; fresh REST closed_at / timeline event UTC: #1 **2026-09-03T03:44:08Z / 03:44:08Z**, #2 **03:44:20Z / 03:44:21Z**, #3 **03:44:27Z / 03:44:27Z**. #2's distinction is freshly observed, not normalized. No session issue-state mutation.
+
+Remaining actionable obligations: independent staged terminal review and reviewed commit (original **8/11**, current R5/R7/R7C terminal boxes). Historical original **9**, “Every tracker-only accounting or blocker record is complete and its staged diff is reviewed before commit,” stays unchecked: **`fc4df0cba016f64c19ba933106b8d44f4ce64b83`** missed precommit review; correction **`e9d3461da0540b55930e153afaa148b500a21abb`** cannot repair history. Historical combined Publish terminal Success criterion also remains unchecked because **36697115746 was Failure**; never redo publication or falsify history.
+
+Release proof is successful publisher109827609501 and independent npm exact/latest/SRI/decoded provenance at immutable release SHA, not cryptographic signature verification. Comment proof is successor36705519036/job109854719964 at approval851d2a2. Exact approved bodies, including historical not-publication wording, are unchanged. Completed delegated technical repairs/reviews require no new gates here. Real efficacy remains unproven without configured model/credentials, trusted benchmark and authorized compute; fairness/resource scheduling/full runtime binding/hostile-code isolation remain non-guarantees, not extension blockers.
+
+Residual risk/rollback: issues:write is repository-wide; fixed reviewed code bounds effects, not supply-chain/notification/precheck-POST races. Git rollback cannot erase comments; inaccuracies require approved append-only correction, never edit/delete. Package/tag remain immutable; future product repair rolls forward to a unique version. No runnable implementation task remains identified. **Resume only at independent staged terminal accounting review → reviewed commit**; future terminal self-SHA is not claimed.
+
+- [ ] Terminal draft independently reviewed/approved and committed; record actual results/landed checkpoint only when observed.
 
