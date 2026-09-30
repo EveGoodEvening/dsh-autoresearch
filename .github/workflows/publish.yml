@@ -66,3 +66,98 @@ jobs:
 
       - name: Publish with OIDC
         run: npm publish
+
+  issue-assessment-comments:
+    needs: publish
+    if: ${{ github.repository == 'EveGoodEvening/dsh-autoresearch' && github.event_name == 'push' && github.ref == 'refs/tags/v0.2.2' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      issues: write
+    concurrency:
+      group: issue-assessment-comments-v0.2.2
+      cancel-in-progress: false
+    steps:
+      - name: Append approved issue assessment evidence
+        id: comment-evidence
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          retries: 0
+          script: |
+            const { createHash } = require('node:crypto')
+            const owner = 'EveGoodEvening'
+            const repo = 'dsh-autoresearch'
+            const bot = { login: 'github-actions[bot]', id: 41898282, type: 'Bot' }
+            const targets = [{"number":1,"title":"模型可以把运行权限扩展到父 Agent 工作区之外","issueDigest":"93926230b91081bc58d26367cdccb093e6bc18f1e77a07e2eeadc5b8b40edf65","body":"本次补充绑定已独立复审的不可变基线 `d1a12f1af225d3d1c17a6f8acdc8e3037aac9597`；不是重新关闭 issue，也不是宣布 0.2.2 已发布。既有关闭由 EveGoodEvening 于 9 月 3 日完成（closed/completed）。\n\n#1 的范围是模型不能自行取得父仓库/workspace 外的仓库权限。canonical 父边界独立于模型目标派生，start/resume（包括后台路径）在仓库发现、tracker/Git/worktree、job、子 Agent、评估器、产物和清理效果前完成目标预检；拒绝 lexical、symlink、nested/sibling/external repository、linked-worktree 与 canonical-alias 逃逸。模型同一次调用不能同时选择并授权外部仓库。\n\n历史主修复 `75b13a81cff24f44637d605e4e715cd09ca20bfe`，后台与 resume 身份修正 `e05740d0c559f484286d473986511f6bd718d83f` / `342535bfd845daf17a0b1c17f9086ed350b13d38`，取消清理结算修正 `8f30f624f604a21f9c60599012b0ee5468c6ae9d`；完整历史链见 assessment 的 Chunk 01。新 E0/E1 修正不是替代此仓库授权边界。\n\n来源账本中的 E1 clean-generated-tree 检查（bg_40 / artifact://212）按 typecheck → build → coverage 顺序通过：569 passed / 9 既有 packed skips（11 files passed / 1 skipped），controller coverage 92.17%，阈值未降低。这是 E1 的实际门禁记录，绑定到已复审后继基线 d1a12f1af225d3d1c17a6f8acdc8e3037aac9597 表示证据保留，不表示在该 SHA 重新运行了门禁。\n\n另一次真实新打包的本地 `dsh-autoresearch-0.2.1.tgz` 在 checkout 外独立安装验证：复制 README 配置经真实 Config/Loader 运行，指标 7 → 0、accept，调用方与声明 scorer 字节不变；同一产物全部 8 个 installed 场景及真实 Web 401 → 303 → 200 HTML 通过（账本 bg_46 / artifact://242）。这些是限定场景的运行证据，不是模型研究效果或新 npm 发布证明。\n\n上述结论仅覆盖本 issue 的目标 containment 与非模型自授权要求，不声称所有 Host effects 的统一授权、无竞态文件系统能力或恶意代码 OS 隔离。\n\n<!-- dsh-issues-r5-evidence-v1-1 -->","marker":"<!-- dsh-issues-r5-evidence-v1-1 -->","commentDigest":"31248d9579591a48e43e59965dc6d2fd2a7f41202dbb01781f63c37a6b0be8b6","closedTimelineUTC":"2026-09-03T03:44:08Z"},{"number":2,"title":"模型提供的 evaluator argv 直接以宿主权限运行","issueDigest":"33cbd35c1bf5765a1df1fbe8559576aff0cd1bb2806d70abd2d9e9b3f98a1b0f","body":"本次补充绑定已独立复审的不可变基线 `d1a12f1af225d3d1c17a6f8acdc8e3037aac9597`；不是重新关闭 issue，也不是宣布 0.2.2 已发布。既有关闭由 EveGoodEvening 于 9 月 3 日完成（closed/completed）。\n\n#2 的模型 evaluator 原始 command/args/environment 权限已按正文的部署预注册 evaluator-ID 路线移至 Host：新 run 仅选择 opaque ID；模型契约不接受原始 command/args/cwd/environment；resume 恢复持久注册身份，不能重新指定 evaluator。注册内容/fingerprint 在 start、resume、recovery、terminal replay 和 spawn 保持绑定；注册移除或语义漂移在再次 spawn 前拒绝，子进程使用接受后的固定 shell-free argv、规范 cwd 和显式封闭环境。\n\n历史注册/身份/激活来源为 `cf3d0c33d24902fb558500dfcd176d23586c97a1`、`174ecb01d2834398c9b0c2496c0f53a679ed5730`、`4b9e93efcb343b9a9cf017ba47605dc44e867e6a`；完整 16 字段 lifecycle 漂移覆盖修正为 `ea90b9be3a3fac77fe33c60ce4ec4cc06de9bf76`。新 E1 `4d5516ba05f24f930106fb1b400eb963be7fd535` 修复普通环境值碰撞造成的公开 identity/semantics、权威时间戳/provenance digest 和可信 Git 快照损坏：精确保留机器事实及有意公开元数据，仅对允许的非权威显示/历史文本脱敏，未弱化注册或恢复校验。OMP_NUM_THREADS=1/4、CUDA_VISIBLE_DEVICES=0、公开 metric 同值及 70 文件场景经真实初始/恢复子 Agent 路径通过，另有精确 terminal replay 证据。公开字段不得承载凭据；这不是普遍保密承诺。\n\n来源账本中的 E1 clean-generated-tree 检查（bg_40 / artifact://212）按 typecheck → build → coverage 顺序通过：569 passed / 9 既有 packed skips（11 files passed / 1 skipped），controller coverage 92.17%，阈值未降低。这是 E1 的实际门禁记录，绑定到已复审后继基线 d1a12f1af225d3d1c17a6f8acdc8e3037aac9597 表示证据保留，不表示在该 SHA 重新运行了门禁。\n\n另一次真实新打包的本地 `dsh-autoresearch-0.2.1.tgz` 在 checkout 外独立安装验证：复制 README 配置经真实 Config/Loader 运行，指标 7 → 0、accept，调用方与声明 scorer 字节不变；同一产物全部 8 个 installed 场景及真实 Web 401 → 303 → 200 HTML 通过（账本 bg_46 / artifact://242）。这些是限定场景的运行证据，不是模型研究效果或新 npm 发布证明。\n\n本结论仅覆盖 Host/人类所有的 evaluator authority；不声称恶意候选代码的文件系统、进程、网络、凭据或 OS 隔离，也不追加 metric 所有权条件。\n\n<!-- dsh-issues-r5-evidence-v1-2 -->","marker":"<!-- dsh-issues-r5-evidence-v1-2 -->","commentDigest":"4187c797f3dd94da8fe5c6388b66629307a1e84b4e78235a6e604be2505373b9","closedTimelineUTC":"2026-09-03T03:44:21Z"},{"number":3,"title":"“评估器和数据集被冻结”这一承诺并未落地","issueDigest":"df6a6ce8712f8be1d41be7e261ee207ed796860d60f3a1d097bd79f907567a9b","body":"本次补充绑定已独立复审的不可变基线 `d1a12f1af225d3d1c17a6f8acdc8e3037aac9597`；不是重新关闭 issue，也不是宣布 0.2.2 已发布。既有关闭由 EveGoodEvening 于 9 月 3 日完成（closed/completed）。\n\n#3 的冻结边界是 Host 声明的 evaluator 与本地 dataset 文件，而非按文件名猜测：baseline 前从隔离 start_commit 记录 identity/SHA-256 并持久化 manifest；精确声明路径自动排除出 mutable surface；baseline、每个 candidate、resume/recovery 每次 provider spawn 前复验，并保留实际 spawn 紧邻的 pre/post 检查。\n\n历史哈希/精确路径保护来源为 `75949d0fe7aa504537e98b5941e14f7da364279e`，生产激活为 `4b9e93efcb343b9a9cf017ba47605dc44e867e6a`；`f511456436d2067a522e8e001f49dd8bdeb13603` 修复 typed boundary，`f4bf89f83d141b1f087689068badbe89d7e83df1` 补齐 local dataset 的实际 pre/post-spawn 缺口及 resume/recovery 拒绝覆盖。新 E0 `3c64db18f24c56ad761cf439e975f8c1303a6b35` 统一 declared manifest 的确定性排序，修复有效大小写混合路径被误拒绝；真实 Git/Loader 先复现 git-manifest-path-missing，后证明 baseline 10 → candidate 5、非终态 resume、声明文件改写拒绝及 fixture 内 manifest/fingerprint 等价。新 E1 `4d5516ba05f24f930106fb1b400eb963be7fd535` 保留权威 identity/digest/可信快照原值，不更改 canonical hash 格式或修补已损坏的历史行。\n\n来源账本中的 E1 clean-generated-tree 检查（bg_40 / artifact://212）按 typecheck → build → coverage 顺序通过：569 passed / 9 既有 packed skips（11 files passed / 1 skipped），controller coverage 92.17%，阈值未降低。这是 E1 的实际门禁记录，绑定到已复审后继基线 d1a12f1af225d3d1c17a6f8acdc8e3037aac9597 表示证据保留，不表示在该 SHA 重新运行了门禁。\n\n另一次真实新打包的本地 `dsh-autoresearch-0.2.1.tgz` 在 checkout 外独立安装验证：复制 README 配置经真实 Config/Loader 运行，指标 7 → 0、accept，调用方与声明 scorer 字节不变；同一产物全部 8 个 installed 场景及真实 Web 401 → 303 → 200 HTML 通过（账本 bg_46 / artifact://242）。这些是限定场景的运行证据，不是模型研究效果或新 npm 发布证明。\n\n本结论不覆盖同 UID 的 revalidate/use TOCTOU 竞态、OS 隔离、解释器/依赖/provider/运行时/镜像内容绑定或远程数据字节；这些不属于本 issue 声明文件冻结的限定要求。\n\n<!-- dsh-issues-r5-evidence-v1-3 -->","marker":"<!-- dsh-issues-r5-evidence-v1-3 -->","commentDigest":"6fdfc30d733e2949c285d4ae0b1387a1966d36ea3b3dfc95977ba322ce05d918","closedTimelineUTC":"2026-09-03T03:44:27Z"}]
+            const evidence = []
+            const digest = value => createHash('sha256').update(value, 'utf8').digest('hex')
+            const assert = (condition, message) => { if (!condition) throw new Error(message) }
+            const timestamp = value => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(value) && Number.isFinite(Date.parse(value))
+            const isBot = user => user?.login === bot.login && user?.id === bot.id && user?.type === bot.type
+            const params = target => ({ owner, repo, issue_number: target.number })
+            const issueURL = target => `https://github.com/${owner}/${repo}/issues/${target.number}`
+            async function precheck(target) {
+              const { data: issue } = await github.rest.issues.get(params(target))
+              assert(issue.number === target.number && !issue.pull_request && issue.html_url === issueURL(target) && issue.url === `https://api.github.com/repos/${owner}/${repo}/issues/${target.number}`, `Issue identity mismatch #${target.number}`)
+              assert(issue.title === target.title && typeof issue.body === 'string' && digest(issue.body) === target.issueDigest, `Issue content drift #${target.number}`)
+              assert(issue.state === 'closed' && issue.state_reason === 'completed' && issue.locked === false && timestamp(issue.closed_at), `Issue state drift #${target.number}`)
+              // Fresh REST closed_at is not known in the approved HTML observation.
+              // Capture its actual value separately; never equate #2's timeline21 with historical REST20.
+              const timeline = await github.paginate(github.rest.issues.listEventsForTimeline, { ...params(target), per_page: 100 })
+              const transitions = timeline.filter(event => event.event === 'closed' || event.event === 'reopened')
+              const latest = transitions.at(-1)
+              assert(latest?.event === 'closed' && latest.created_at === target.closedTimelineUTC && latest.actor?.login === owner && latest.actor?.id === 267954785, `Issue closure drift #${target.number}`)
+              const comments = await github.paginate(github.rest.issues.listComments, { ...params(target), per_page: 100 })
+              const matches = comments.filter(comment => typeof comment.body === 'string' && (comment.body.includes('<!-- dsh-issues-r5-evidence-v1-') || comment.body === target.body))
+              assert(matches.length <= 1, `Conflicting comments #${target.number}`)
+              const existing = matches[0]
+              if (existing) assert(isBot(existing.user) && existing.body === target.body && existing.body.split(target.marker).length === 2, `Comment conflict #${target.number}`)
+              return { existing, closedAt: issue.closed_at, timelineAt: latest.created_at, actor: latest.actor.login }
+            }
+            async function readback(target, commentId, closedAt) {
+              assert(Number.isSafeInteger(commentId) && commentId > 0, `Invalid comment ID #${target.number}`)
+              const { data: comment } = await github.rest.issues.getComment({ owner, repo, comment_id: commentId, headers: { accept: 'application/vnd.github.full+json' } })
+              assert(comment.id === commentId && comment.body === target.body && digest(comment.body) === target.commentDigest && isBot(comment.user), `Comment raw/author mismatch #${target.number}`)
+              assert(typeof comment.body_html === 'string' && comment.body_html.includes('d1a12f1af225d3d1c17a6f8acdc8e3037aac9597') && comment.body_html.includes('closed/completed') && !/<script\b/i.test(comment.body_html), `Comment rendered mismatch #${target.number}`)
+              for (const paragraph of target.body.split('\n\n').filter(value => !value.startsWith('<!--'))) {
+                assert(comment.body_html.includes(paragraph.split('`')[0].slice(0, 12)), `Comment rendered paragraph missing #${target.number}`)
+              }
+              assert(comment.html_url === `${issueURL(target)}#issuecomment-${commentId}` && comment.url === `https://api.github.com/repos/${owner}/${repo}/issues/comments/${commentId}` && comment.issue_url === `https://api.github.com/repos/${owner}/${repo}/issues/${target.number}`, `Comment URL mismatch #${target.number}`)
+              assert(timestamp(comment.created_at) && timestamp(comment.updated_at) && comment.created_at === comment.updated_at, `Comment timestamp mismatch #${target.number}`)
+              const canonical = await precheck(target)
+              assert(canonical.closedAt === closedAt && canonical.existing?.id === commentId, `Canonical readback drift #${target.number}`)
+              return { commentId, url: comment.html_url, author: comment.user.login, authorId: comment.user.id, createdAt: comment.created_at, updatedAt: comment.updated_at, rawDigest: digest(comment.body), renderedBody: comment.body_html, closedAtREST: canonical.closedAt, closedTimelineUTC: canonical.timelineAt, closedActor: canonical.actor, state: 'closed', stateReason: 'completed' }
+            }
+            try {
+              assert(context.repo.owner === owner && context.repo.repo === repo && context.payload.repository?.full_name === `${owner}/${repo}` && context.eventName === 'push' && context.ref === 'refs/tags/v0.2.2', 'Unapproved repository/event/ref')
+              assert(targets.length === 3 && targets.map(target => target.number).join(',') === '1,2,3', 'Invalid issue allowlist')
+              const approvedDigests = ['31248d9579591a48e43e59965dc6d2fd2a7f41202dbb01781f63c37a6b0be8b6', '4187c797f3dd94da8fe5c6388b66629307a1e84b4e78235a6e604be2505373b9', '6fdfc30d733e2949c285d4ae0b1387a1966d36ea3b3dfc95977ba322ce05d918']
+              for (const [index, target] of targets.entries()) {
+                assert(target.marker === `<!-- dsh-issues-r5-evidence-v1-${target.number} -->` && target.body.split(target.marker).length === 2 && digest(target.body) === approvedDigests[index] && target.commentDigest === approvedDigests[index] && /^[a-f0-9]{64}$/.test(target.issueDigest), 'Invalid approved payload binding')
+              }
+              const initial = new Map()
+              for (const target of targets) initial.set(target.number, await precheck(target))
+              for (const target of targets) {
+                const before = await precheck(target)
+                assert(before.closedAt === initial.get(target.number).closedAt, `REST closure changed after preflight #${target.number}`)
+                const entry = { issueNumber: target.number, action: before.existing ? 'deduplicated' : 'post-attempt', closedAtREST: before.closedAt, closedTimelineUTC: before.timelineAt }
+                evidence.push(entry)
+                let commentId = before.existing?.id
+                if (!before.existing) {
+                  // A failed or lost POST response ends this run. No write retry is permitted.
+                  const { data: created } = await github.rest.issues.createComment({ ...params(target), body: target.body })
+                  commentId = created.id
+                  entry.action = 'created'
+                  entry.commentId = commentId
+                }
+                Object.assign(entry, await readback(target, commentId, before.closedAt), { verified: true })
+                core.info(JSON.stringify(entry))
+              }
+            } catch (error) {
+              // Only a bounded status is logged; response bodies/headers and tokens are never logged.
+              evidence.push({ failure: true, status: Number.isInteger(error.status) ? error.status : null })
+              core.setFailed('Issue assessment comments failed; inspect partial structured evidence. No POST retries were performed.')
+            } finally {
+              core.info(JSON.stringify({ issueAssessmentEvidence: evidence }))
+              await core.summary.addHeading('Issue assessment comment evidence').addCodeBlock(JSON.stringify(evidence, null, 2), 'json').write()
+            }
