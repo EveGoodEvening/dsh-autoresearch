@@ -285,3 +285,166 @@ Read-only source reassessment reports canonical API issue objects, timelines and
 | [#3](https://github.com/EveGoodEvening/dsh-autoresearch/issues/3) | closed / completed | EveGoodEvening, 2026-09-03T03:44:27Z | 0; endpoint `[]` |
 
 This supersedes all old “remains open”/authenticate-to-close prose above without falsifying its historical observations. Current source inspection finds no scoped #1/#2/#3 defect; it is not fresh test proof. Original comment posting/read-back boxes remain genuinely pending external actions; old close-action boxes are superseded by independent prior closure and require durable refreshed read-back/accounting, not a repeated close. Terminal accounting is pending. The universal precommit assertion remains an unrepairable historical exception for `fc4df0cba016f64c19ba933106b8d44f4ce64b83`; corrective `e9d3461da0540b55930e153afaa148b500a21abb` never makes that missed gate performed. September R5 must independently approve corrected exact comment bodies, seek an available authenticated write route without credential disclosure, post/read back sequentially #1–#3 if accessible, and honestly record exact authentication prerequisites/attempts if inaccessible. Missing `gh` or read-only API403 alone does not prove every write route unavailable. No present checkmark asserts posting, current-session closure, terminal commit or fresh gates.
+
+## 2026-09-30 R5 preparation — current authoritative reconciliation
+
+The sole aggregate pointer remains [R5 planning in the reassessment ledger](handoff-2026-0903.md#r5--already-closed-issues-missing-comments-terminal-accounting). This section supersedes historical open/authentication-blocked assumptions, not their historical evidence or unchecked boxes. R4 closure is coordinator-observed `d1a12f1af225d3d1c17a6f8acdc8e3037aac9597`; its green packed/setup checks are recorded in R4, not rerun at this descendant.
+
+Fresh read-only observation at **2026-09-30T05:22:39.292180Z**, captured in `local://r5-current-issues.json`: canonical HTML HTTP200 embedded GraphQL reports #1–#3 CLOSED/COMPLETED, complete empty comment collections (zero), and prior owner EveGoodEvening closure timeline events at respectively **2026-09-03T03:44:08Z**, **03:44:21Z**, **03:44:27Z**. These are prior-owner facts, not this session's close actions. #2 historical REST `closed_at=03:44:20Z` and timeline `03:44:21Z` are distinct observations; fresh REST closed_at is unavailable, not newly reconfirmed. Nine fresh REST403 reads were rate-limited, not authentication-denial proof; logged-out viewerCanComment=false is not Actions-token evidence. No comment or issue mutation occurred.
+
+### All eleven original unchecked obligations, preserved verbatim
+
+The quoted obligations below remain historical text; dispositions govern current work without retroactively checking completion.
+
+**Original 1 (historical line 237):**
+
+> - [ ] External comment pre-post state read and posting complete for #1. **Blocked:** authentication is unavailable; the fresh unauthenticated read at `2026-09-02T16:40:03Z` found #1 open, and no comment was posted.
+
+Current disposition: Corrected exact body independent approval, pre-post comparison, post and canonical comment URL/time/body read-back remain pending; zero current comments.
+
+**Original 2 (historical line 238):**
+
+> - [ ] External comment read-back complete for #1, including canonical comment URL, timestamp, exact rendered body, and then-current issue state/reason. **Blocked:** no #1 comment exists.
+
+Current disposition: Corrected exact body independent approval, pre-post comparison, post and canonical comment URL/time/body read-back remain pending; zero current comments.
+
+**Original 3 (historical line 239):**
+
+> - [ ] External close action and mandatory post-action canonical state read-back complete for #1. **Blocked:** no close action occurred; #1 remains open.
+
+Current disposition: Close action superseded by existing prior completed closure. Fresh canonical state/timeline observed; durable refreshed accounting pending. Never close again.
+
+**Original 4 (historical line 240):**
+
+> - [ ] External comment pre-post state read, posting, and comment read-back complete for #2. **Blocked:** authentication is unavailable; no comment was posted and #2 remains open.
+
+Current disposition: Corrected exact body independent approval, pre-post comparison, post and canonical comment URL/time/body read-back remain pending; zero current comments.
+
+**Original 5 (historical line 241):**
+
+> - [ ] External close action and mandatory post-action canonical state read-back complete for #2. **Blocked:** no close action occurred; #2 remains open.
+
+Current disposition: Close action superseded by existing prior completed closure. Fresh canonical state/timeline observed; durable refreshed accounting pending. Never close again.
+
+**Original 6 (historical line 242):**
+
+> - [ ] External comment pre-post state read, posting, and comment read-back complete for #3. **Blocked:** authentication is unavailable; no comment was posted and #3 remains open.
+
+Current disposition: Corrected exact body independent approval, pre-post comparison, post and canonical comment URL/time/body read-back remain pending; zero current comments.
+
+**Original 7 (historical line 243):**
+
+> - [ ] External close action and mandatory post-action canonical state read-back complete for #3. **Blocked:** no close action occurred; #3 remains open.
+
+Current disposition: Close action superseded by existing prior completed closure. Fresh canonical state/timeline observed; durable refreshed accounting pending. Never close again.
+
+**Original 8 (historical line 245):**
+
+> - [ ] Terminal accounting record complete and staged tracker-only diff reviewed for commit. **Blocked:** external comment/read-back/close/post-action gates remain incomplete.
+
+Current disposition: Terminal tracker-only accounting and independent staged review pending after reachable approved comment actions or precisely evidenced capability blocker.
+
+**Original 9 (historical line 273):**
+
+> - [ ] Every tracker-only accounting or blocker record is complete and its staged diff is reviewed before commit; landed accounting SHAs are carried forward by the durable checkpoint protocol without self-reference. **Explicitly deferred historical exception; criterion cannot be retroactively checked:** predecessor `fc4df0cba016f64c19ba933106b8d44f4ce64b83` missed its pre-commit gate, and no repository-local action can make that historical commit compliant after the fact. The reviewed correction landed as durable blocked-state checkpoint `e9d3461da0540b55930e153afaa148b500a21abb`. The tracker-only commit containing this landed-state reconciliation becomes the successor checkpoint after independent staged review; its SHA will be carried forward by the next accounting checkpoint. This criterion remains unchecked solely for the immutable historical exception.
+
+Current disposition: Unrepairable historical exception: fc4df0cba016f64c19ba933106b8d44f4ce64b83 missed precommit review; e9d3461da0540b55930e153afaa148b500a21abb does not repair history.
+
+**Original 10 (historical line 274):**
+
+> - [ ] Every external comment passes its then-current pre-post state review, is posted and read back, and is explicitly corrected and re-accounted if inaccurate. **Blocked:** the exact approved bodies are now durable above, but no external comment action occurred because authentication is unavailable.
+
+Current disposition: Corrected exact body independent approval, pre-post comparison, post and canonical comment URL/time/body read-back remain pending; zero current comments.
+
+**Original 11 (historical line 275):**
+
+> - [ ] After every close action, the canonical issue is read back again; final state, state reason, UTC timestamp, canonical URLs, comment URLs, SHAs, evidence, residual risks, rollback, and the exact aggregate resume pointer are durably accounted. **Blocked:** fresh unauthenticated reads at `2026-09-02T16:40:03Z` found all three issues open; no close action occurred, and terminal accounting must wait.
+
+Current disposition: Prior closure refreshed read-back observed, final durable state/URLs/comment evidence/SHAs/risks/rollback/resume accounting pending; no session closure claimed.
+
+### Exact corrected Chinese comment bodies — independently approved, NOT posted
+
+The following exact UTF-8 bodies are copied from `local://r5-comment-drafts.json`; coordinator-reported `handoff-r5-review-resumed-2` independently approves all three unchanged exact bodies and their recorded hashes; `handoff-r5-review-resumed-1` security review is CLEAN. Focused accounting rereview and implementation approval remain required before deploying any write mechanism. Issue-body digests hash canonical issue body exact UTF-8 bytes, without whitespace/newline normalization; comment-body digests hash the exact body including its final marker, with no extra trailing newline. Marker and body must both match for dedup. Gates 569/9 belong to E1 bg_40 / artifact://212 clean generated tree; R4 bg_46 independently proves the fresh local 0.2.1 packed artifact. Binding them to reviewed descendant d1a12 records retained evidence, not gates rerun there or a future release.
+
+#### R5 candidate #1
+
+- Expected issue-body digest: `sha256:93926230b91081bc58d26367cdccb093e6bc18f1e77a07e2eeadc5b8b40edf65`.
+- Exact comment-body digest: `sha256:31248d9579591a48e43e59965dc6d2fd2a7f41202dbb01781f63c37a6b0be8b6`.
+- Stable marker: `<!-- dsh-issues-r5-evidence-v1-1 -->`.
+- Approval: **independently approved**, coordinator-reported `handoff-r5-review-resumed-2`, exact body/hash unchanged; post/read-back: **pending**.
+
+```text
+本次补充绑定已独立复审的不可变基线 `d1a12f1af225d3d1c17a6f8acdc8e3037aac9597`；不是重新关闭 issue，也不是宣布 0.2.2 已发布。既有关闭由 EveGoodEvening 于 9 月 3 日完成（closed/completed）。
+
+#1 的范围是模型不能自行取得父仓库/workspace 外的仓库权限。canonical 父边界独立于模型目标派生，start/resume（包括后台路径）在仓库发现、tracker/Git/worktree、job、子 Agent、评估器、产物和清理效果前完成目标预检；拒绝 lexical、symlink、nested/sibling/external repository、linked-worktree 与 canonical-alias 逃逸。模型同一次调用不能同时选择并授权外部仓库。
+
+历史主修复 `75b13a81cff24f44637d605e4e715cd09ca20bfe`，后台与 resume 身份修正 `e05740d0c559f484286d473986511f6bd718d83f` / `342535bfd845daf17a0b1c17f9086ed350b13d38`，取消清理结算修正 `8f30f624f604a21f9c60599012b0ee5468c6ae9d`；完整历史链见 assessment 的 Chunk 01。新 E0/E1 修正不是替代此仓库授权边界。
+
+来源账本中的 E1 clean-generated-tree 检查（bg_40 / artifact://212）按 typecheck → build → coverage 顺序通过：569 passed / 9 既有 packed skips（11 files passed / 1 skipped），controller coverage 92.17%，阈值未降低。这是 E1 的实际门禁记录，绑定到已复审后继基线 d1a12f1af225d3d1c17a6f8acdc8e3037aac9597 表示证据保留，不表示在该 SHA 重新运行了门禁。
+
+另一次真实新打包的本地 `dsh-autoresearch-0.2.1.tgz` 在 checkout 外独立安装验证：复制 README 配置经真实 Config/Loader 运行，指标 7 → 0、accept，调用方与声明 scorer 字节不变；同一产物全部 8 个 installed 场景及真实 Web 401 → 303 → 200 HTML 通过（账本 bg_46 / artifact://242）。这些是限定场景的运行证据，不是模型研究效果或新 npm 发布证明。
+
+上述结论仅覆盖本 issue 的目标 containment 与非模型自授权要求，不声称所有 Host effects 的统一授权、无竞态文件系统能力或恶意代码 OS 隔离。
+
+<!-- dsh-issues-r5-evidence-v1-1 -->
+```
+
+#### R5 candidate #2
+
+- Expected issue-body digest: `sha256:33cbd35c1bf5765a1df1fbe8559576aff0cd1bb2806d70abd2d9e9b3f98a1b0f`.
+- Exact comment-body digest: `sha256:4187c797f3dd94da8fe5c6388b66629307a1e84b4e78235a6e604be2505373b9`.
+- Stable marker: `<!-- dsh-issues-r5-evidence-v1-2 -->`.
+- Approval: **independently approved**, coordinator-reported `handoff-r5-review-resumed-2`, exact body/hash unchanged; post/read-back: **pending**.
+
+```text
+本次补充绑定已独立复审的不可变基线 `d1a12f1af225d3d1c17a6f8acdc8e3037aac9597`；不是重新关闭 issue，也不是宣布 0.2.2 已发布。既有关闭由 EveGoodEvening 于 9 月 3 日完成（closed/completed）。
+
+#2 的模型 evaluator 原始 command/args/environment 权限已按正文的部署预注册 evaluator-ID 路线移至 Host：新 run 仅选择 opaque ID；模型契约不接受原始 command/args/cwd/environment；resume 恢复持久注册身份，不能重新指定 evaluator。注册内容/fingerprint 在 start、resume、recovery、terminal replay 和 spawn 保持绑定；注册移除或语义漂移在再次 spawn 前拒绝，子进程使用接受后的固定 shell-free argv、规范 cwd 和显式封闭环境。
+
+历史注册/身份/激活来源为 `cf3d0c33d24902fb558500dfcd176d23586c97a1`、`174ecb01d2834398c9b0c2496c0f53a679ed5730`、`4b9e93efcb343b9a9cf017ba47605dc44e867e6a`；完整 16 字段 lifecycle 漂移覆盖修正为 `ea90b9be3a3fac77fe33c60ce4ec4cc06de9bf76`。新 E1 `4d5516ba05f24f930106fb1b400eb963be7fd535` 修复普通环境值碰撞造成的公开 identity/semantics、权威时间戳/provenance digest 和可信 Git 快照损坏：精确保留机器事实及有意公开元数据，仅对允许的非权威显示/历史文本脱敏，未弱化注册或恢复校验。OMP_NUM_THREADS=1/4、CUDA_VISIBLE_DEVICES=0、公开 metric 同值及 70 文件场景经真实初始/恢复子 Agent 路径通过，另有精确 terminal replay 证据。公开字段不得承载凭据；这不是普遍保密承诺。
+
+来源账本中的 E1 clean-generated-tree 检查（bg_40 / artifact://212）按 typecheck → build → coverage 顺序通过：569 passed / 9 既有 packed skips（11 files passed / 1 skipped），controller coverage 92.17%，阈值未降低。这是 E1 的实际门禁记录，绑定到已复审后继基线 d1a12f1af225d3d1c17a6f8acdc8e3037aac9597 表示证据保留，不表示在该 SHA 重新运行了门禁。
+
+另一次真实新打包的本地 `dsh-autoresearch-0.2.1.tgz` 在 checkout 外独立安装验证：复制 README 配置经真实 Config/Loader 运行，指标 7 → 0、accept，调用方与声明 scorer 字节不变；同一产物全部 8 个 installed 场景及真实 Web 401 → 303 → 200 HTML 通过（账本 bg_46 / artifact://242）。这些是限定场景的运行证据，不是模型研究效果或新 npm 发布证明。
+
+本结论仅覆盖 Host/人类所有的 evaluator authority；不声称恶意候选代码的文件系统、进程、网络、凭据或 OS 隔离，也不追加 metric 所有权条件。
+
+<!-- dsh-issues-r5-evidence-v1-2 -->
+```
+
+#### R5 candidate #3
+
+- Expected issue-body digest: `sha256:df6a6ce8712f8be1d41be7e261ee207ed796860d60f3a1d097bd79f907567a9b`.
+- Exact comment-body digest: `sha256:6fdfc30d733e2949c285d4ae0b1387a1966d36ea3b3dfc95977ba322ce05d918`.
+- Stable marker: `<!-- dsh-issues-r5-evidence-v1-3 -->`.
+- Approval: **independently approved**, coordinator-reported `handoff-r5-review-resumed-2`, exact body/hash unchanged; post/read-back: **pending**.
+
+```text
+本次补充绑定已独立复审的不可变基线 `d1a12f1af225d3d1c17a6f8acdc8e3037aac9597`；不是重新关闭 issue，也不是宣布 0.2.2 已发布。既有关闭由 EveGoodEvening 于 9 月 3 日完成（closed/completed）。
+
+#3 的冻结边界是 Host 声明的 evaluator 与本地 dataset 文件，而非按文件名猜测：baseline 前从隔离 start_commit 记录 identity/SHA-256 并持久化 manifest；精确声明路径自动排除出 mutable surface；baseline、每个 candidate、resume/recovery 每次 provider spawn 前复验，并保留实际 spawn 紧邻的 pre/post 检查。
+
+历史哈希/精确路径保护来源为 `75949d0fe7aa504537e98b5941e14f7da364279e`，生产激活为 `4b9e93efcb343b9a9cf017ba47605dc44e867e6a`；`f511456436d2067a522e8e001f49dd8bdeb13603` 修复 typed boundary，`f4bf89f83d141b1f087689068badbe89d7e83df1` 补齐 local dataset 的实际 pre/post-spawn 缺口及 resume/recovery 拒绝覆盖。新 E0 `3c64db18f24c56ad761cf439e975f8c1303a6b35` 统一 declared manifest 的确定性排序，修复有效大小写混合路径被误拒绝；真实 Git/Loader 先复现 git-manifest-path-missing，后证明 baseline 10 → candidate 5、非终态 resume、声明文件改写拒绝及 fixture 内 manifest/fingerprint 等价。新 E1 `4d5516ba05f24f930106fb1b400eb963be7fd535` 保留权威 identity/digest/可信快照原值，不更改 canonical hash 格式或修补已损坏的历史行。
+
+来源账本中的 E1 clean-generated-tree 检查（bg_40 / artifact://212）按 typecheck → build → coverage 顺序通过：569 passed / 9 既有 packed skips（11 files passed / 1 skipped），controller coverage 92.17%，阈值未降低。这是 E1 的实际门禁记录，绑定到已复审后继基线 d1a12f1af225d3d1c17a6f8acdc8e3037aac9597 表示证据保留，不表示在该 SHA 重新运行了门禁。
+
+另一次真实新打包的本地 `dsh-autoresearch-0.2.1.tgz` 在 checkout 外独立安装验证：复制 README 配置经真实 Config/Loader 运行，指标 7 → 0、accept，调用方与声明 scorer 字节不变；同一产物全部 8 个 installed 场景及真实 Web 401 → 303 → 200 HTML 通过（账本 bg_46 / artifact://242）。这些是限定场景的运行证据，不是模型研究效果或新 npm 发布证明。
+
+本结论不覆盖同 UID 的 revalidate/use TOCTOU 竞态、OS 隔离、解释器/依赖/provider/运行时/镜像内容绑定或远程数据字节；这些不属于本 issue 声明文件冻结的限定要求。
+
+<!-- dsh-issues-r5-evidence-v1-3 -->
+```
+
+### Bounded external implementation and proof contract
+
+Prepare only one isolated `issue-assessment-comments` job in existing `.github/workflows/publish.yml`; no additional product script/file. Keep the existing trigger, publish job permissions, gates and publication unchanged. Job depends on successful `publish`, never `always()`, and requires literal repository EveGoodEvening/dsh-autoresearch, push event, and exact `refs/tags/v0.2.2`. Coordinator selects 0.2.2 based on verified 05:30 UTC npm/local/authoritative remote absence and reviewed nonbreaking request/result/schema repairs; selection is not reservation or publication. R7 must freshly recheck released-contract semver and uniqueness before annotated atomic push; any candidate change requires independent rereview of the exact guard. No dummy tag, dispatch/branch trigger or placeholder implementation now. Use verified github-script v8 commit `ed597411d8f924073f98dfc5c65a23a2325f34cd`, never an invented action pin; actual ref-specific policy acceptance remains unproven.
+
+Only job-level `issues: write`; all unlisted permissions none. Clean hosted runner, bounded timeout and serialized job concurrency with cancel-in-progress false. No checkout, dependency/install/build/project execution, publish artifacts/output code, PAT, token export or auth-header logging. Trusted literal owner/repo, issue allowlist 1/2/3, approved bodies/markers/digests, titles and closure facts only; issue/event text is data, never executable interpolation. Preflight all three actual issues (not PRs), exact titles, issue UTF-8 body hashes, closed/completed, unlocked state and expected timeline actor/time before any POST; preserve #2 separate expected REST timestamp when available, never substitute it for timeline time. Paginate every comment list. Fresh issue/timeline/comments precheck again immediately before each write. Material drift or unavailable required read fails closed for independent reassessment, not automatic text adaptation.
+
+Dedup is author-bound to the independently reviewed GitHub Actions bot identity: exactly one matching marker and exact approved body from that author means read back and skip; wrong author/body or multiple matching markers stops. No match permits only POST `/repos/EveGoodEvening/dsh-autoresearch/issues/{1,2,3}/comments` with its exact approved body, in #1 → #2 → #3 order. Disable write retries (including action/client retry wrappers); uncertain POST outcome requires reread/dedup, never blind repeat. After each create/skip, GET comment by ID using full media type and verify exact raw body, inspect rendered body, author, URL and timestamps, then canonical issue state/reason/closure read-back before next issue. No close/reopen/update/delete operation. Independently public-read all three after the job; record actual IDs/URLs/times/raw and rendered bodies, bot attribution and prior closure. A failed/partial run remains partial; rerun only after review and read reconciliation.
+
+Named **R5SmokePreparationWorker** owns only `local://r5-comment-decision-smoke.mjs` (1 session-only path), PREPARING a throwaway API-shaped decision-logic smoke after implementation is available, with no product edits, execution, network writes or credentials. Assert allowlisted route/exact body/order, existing exact comment zero POST, later-page dedup, partial-success resume, state/body/title/closure/lock drift, wrong-author/body/multiple markers, lost POST response and raw/rendered/author/state readback failures. Parent EXECUTES the prepared smoke after owners settle and exercises real public GET comparison separately; no permanent wiring/text-copy tests. Independent security, exact-body/evidence and accounting implementation review plus green scoped proof precede green preparation commit. Local smoke does not prove token acceptance. Live proof requires successful authorized R7 tag/publish, actual write-job permission/run/head inspection and independent canonical readbacks. No local-token absence final blocked-auth conclusion.
+
+Accepted cross-phase dependency **for external actions only**: R5 locally green reviewed preparation commit → R6 technical/accounting review → R7 authorized unique tag and successful publish enables comments → independent readback → resume R5 final reviewed accounting, then final release accounting. Posts and terminal accounting stay unchecked until observed outcomes. Live acceptance remains unproven; exact policy/HTTP/run evidence may establish a real missing prerequisite, never speculative success or generic auth blocker.
+
+Residual tradeoffs: GitHub issues:write is repository-wide, not cryptographically comments-only or three-issue-only; fixed code allowlist bounds application behavior. Action/runtime supply chain, subscriber notification, permanent external side effects and issue-change race between precheck/POST remain. No atomic API transaction is claimed. Git rollback cannot erase comments; inaccurate posts require independently approved append-only correction, not deletion. Preserve the unrepairable historic precommit exception unchanged.
