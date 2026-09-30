@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process'
-import { readdirSync } from 'node:fs'
+import { readdirSync, watch } from 'node:fs'
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -20,9 +20,21 @@ const run = promisify(execFile)
 const active: RealHarness[] = []
 const evaluator = new URL('./fixtures/loader/evaluator.mjs', import.meta.url).pathname
 const holdingEvaluator = new URL('./fixtures/loader/evaluator-hold.mjs', import.meta.url).pathname
-async function evaluatorMarker(prefix: string): Promise<{ path: string; dispose(): Promise<void> }> {
+async function evaluatorMarker(prefix: string): Promise<{ path: string; ready: Promise<number>; dispose(): Promise<void> }> {
   const directory = await mkdtemp(join(tmpdir(), `${prefix}-`))
-  return { path: join(directory, 'evaluator.pid'), dispose: () => rm(directory, { recursive: true, force: true }) }
+  const path = join(directory, 'evaluator.pid')
+  const ready = Promise.withResolvers<number>()
+  const watcher = watch(directory, (_event, filename) => {
+    if (filename !== 'evaluator.pid') return
+    void readFile(path, 'utf8').then(text => {
+      const pid = Number(text.trim())
+      if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error('evaluator published an invalid PID')
+      ready.resolve(pid)
+    }).catch(ready.reject)
+  })
+  watcher.once('error', ready.reject)
+  void ready.promise.catch(() => undefined)
+  return { path, ready: ready.promise, dispose: async () => { watcher.close(); await rm(directory, { recursive: true, force: true }) } }
 }
 
 
@@ -93,13 +105,6 @@ async function waitUntil(predicate: () => boolean | Promise<boolean>, message: s
   }
 }
 
-async function evaluatorPid(marker: string): Promise<number> {
-  let text = ''
-  await waitUntil(async () => {
-    try { text = await readFile(marker, 'utf8'); return true } catch { return false }
-  }, 'evaluator did not publish its pid')
-  return Number(text.trim())
-}
 
 async function processState(pid: number): Promise<string | undefined> {
   try {
@@ -223,6 +228,7 @@ describe('real Loader/profile production composition', () => {
     active.push(harness)
     const cwd = await repository(harness.root)
     const parent = await parentAgent(harness, cwd, 'ordering')
+    const terminal = observeJobSettlement(harness.ctx, parent.agent.id)
     const events: string[] = []
     let evaluatorSignal: AbortSignal | undefined
     let evaluatorHandle: SubprocessHandle | undefined
@@ -264,7 +270,7 @@ describe('real Loader/profile production composition', () => {
       await waitUntil(() => events.some(event => event.startsWith('registry-start-return:')), 'job registry did not return an id')
       const returned = events.find(event => event.startsWith('registry-start-return:'))!
       const jobId = returned.slice('registry-start-return:'.length)
-      const pid = await evaluatorPid(marker.path)
+      const pid = await Promise.race([marker.ready, terminal.settled.then(event => { throw new Error(`evaluator job settled before PID readiness (${event.job.status})`) })])
       expect(events.slice(0, 4)).toEqual(['registry-start-enter', 'run-hook-enter', 'run-hook-return', `registry-start-return:${jobId}`])
       expect(persistedBackgroundJobIds(cwd)).toContain(jobId)
       expect(evaluatorSignal?.aborted).toBe(false)
@@ -290,7 +296,7 @@ describe('real Loader/profile production composition', () => {
     } finally {
       jobs.start = originalStart
       subprocess.spawn = originalSpawn
-      try { await parent.dispose() } finally { await marker.dispose() }
+      try { await parent.dispose() } finally { terminal.dispose(); await marker.dispose() }
     }
   }, 45_000)
 
@@ -412,9 +418,10 @@ describe('real Loader/profile production composition', () => {
     active.push(harness)
     const cwd = await repository(harness.root)
     const parent = await parentAgent(harness, cwd)
+    const terminal = observeJobSettlement(harness.ctx, parent.agent.id)
     try {
       const execution = execute(harness, 'autoresearch', request(cwd), parent.agent)
-      const pid = await evaluatorPid(marker.path)
+      const pid = await Promise.race([marker.ready, terminal.settled.then(event => { throw new Error(`evaluator job settled before PID readiness (${event.job.status})`) })])
       const initialProcessState = await processState(pid)
       expect(initialProcessState).toBeDefined()
       expect(initialProcessState).not.toBe('Z')
@@ -435,7 +442,7 @@ describe('real Loader/profile production composition', () => {
       expect(JSON.parse(result)).toMatchObject({ status: 'cancelled' })
       expect(harness.ctx.agents.list().map(agent => agent.id)).toEqual([parent.agent.id])
     } finally {
-      try { await parent.dispose() } finally { await marker.dispose() }
+      try { await parent.dispose() } finally { terminal.dispose(); await marker.dispose() }
     }
   }, 30_000)
 

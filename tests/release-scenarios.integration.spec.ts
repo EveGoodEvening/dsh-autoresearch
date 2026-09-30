@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
+import { watch } from 'node:fs'
 import { access, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -369,11 +370,15 @@ releaseDescribe('packed release scenarios', () => {
     try {
       const cwd = await repository(harness.root, 'candidate-cancellation'); const before = snapshot(cwd); const owner = await parent(harness.ctx, cwd)
       const terminal = observeJobSettlement(harness.ctx, owner.agent.id)
+      const candidateReady = Promise.withResolvers<void>()
+      const readinessWatcher = watch(dirname(marker), (_event, filename) => { if (filename === basename(marker)) candidateReady.resolve() })
+      readinessWatcher.once('error', candidateReady.reject)
+      void candidateReady.promise.catch(() => undefined)
       try {
         const args = request(cwd, 'release accepted candidate', 'background')
         const started = await execute(harness.ctx, owner.agent, args)
         await Promise.race([
-          waitUntil(() => pathExists(marker), 'candidate evaluator did not publish readiness'),
+          candidateReady.promise,
           terminal.settled.then(event => { throw new Error(`job settled before candidate readiness: ${JSON.stringify(event)}`) }),
         ])
         const ready = JSON.parse(await readFile(marker, 'utf8')) as { pid: number; head: string; score: number }
@@ -410,7 +415,7 @@ releaseDescribe('packed release scenarios', () => {
         expect(inspect(started.tracker, started.runId).experiments).toEqual(durable.experiments)
         expect(snapshot(cwd)).toEqual(before)
         evidence.candidateCancellation = { ok: true, readiness: ready, jobStatus: 'killed', status: durable.run.state, processTreeQuiescent: true, acceptedHeadRestored: true, localLockReleased: true, repositoryLocks, callerUnchanged: true, resumedStatus: resumed.run.status, attempts, duplicateEvaluation: false }
-      } finally { terminal.dispose(); await owner.dispose() }
+      } finally { readinessWatcher.close(); terminal.dispose(); await owner.dispose() }
     } finally { await harness.dispose().catch(() => undefined); await rm(marker, { force: true }); await rm(`${marker}.tmp`, { force: true }) }
   }, 45_000)
 
