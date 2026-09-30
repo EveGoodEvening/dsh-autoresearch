@@ -502,3 +502,14 @@ Current original-obligation disposition: **1** #1 POST and independently verifie
 - [ ] Exact successor comment-only run/job successful; corrected independent #1 readback and #2/#3 append/readbacks complete, issue states unchanged.
 - [ ] Final R5/R7 accounting independently reviewed and committed; failed old-run and historical exception remain truthful.
 
+### R7C local implementation and dry proof — green draft-ready, external work pending
+
+Coordinator-observed approved plan commit **`60c24c2de37bc1b8c5e1748dd7a9dc1e764531e3`**; security plan CLEAN and corrected accounting `handoff-comment-recovery-approval-2` CLEAN. Parent reports new `.github/workflows/issue-assessment-recovery.yml` created and **only** obsolete/broken comment job removed from current `.github/workflows/publish.yml`; original publisher lines 1–68 preserved. Package/source/version/tag unchanged; immutable release workflow/run unchanged. Historical planning-only action limits remain historical, not a claim that implementation is still absent.
+
+Parent **bg11 / artifact://449 BEFORE** exercised exact old immutable production script on actual #1 HTML: **1 expected-defect case**, dedup/getComment rendered failure reproduced, **0 POST / 0 network**. Actual HTML SHA-256 **`6b1221794f8d63edf57e049956d3f36f9d28c2de28035819d183dc112b3e7090`**. AFTER exact successor script SHA-256 **`7d8b0b8f02ebf6c269cca735a810ae3bd44f9cb21c3a233fd6d5d80e9fe92991`** passed **53/53 executions**, **20 SIMULATED posts / 0 network**. Mandatory existing #1 preserved, only #2/#3 simulated posts; actual rendering, dedup/rerun/partial recovery, link-forgery/host/repository/query/prefix attacks and guards/drift/readback/uncertain-POST no-retry exercised. Earlier helper generic-error/partial-ID expectation failures were corrected, not counted green.
+
+This is local green draft-ready proof, **not** actual #2/#3 posts, successor token acceptance or completion. Independently verified #1 bg8 and successful publication/registry remain observed; historical combined run remains Failure. Independent implementation/security/body/accounting reviews, focused green commits before reviewed push, exact successor current workflow/run/job Success, independent all-three final comment/state readbacks and final reviewed accounting remain pending. No source edits/gates/commits performed by this accounting owner.
+
+- [x] Approved plan/observed commit and local implementation/parent actual-HTML BEFORE/AFTER/API-shaped dry proof recorded.
+- [ ] Independent implementation reviews/focused green commits before push; live successor success and actual #2/#3 post/readbacks plus final accounting required.
+
