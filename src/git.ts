@@ -551,7 +551,7 @@ function parseDeclaredTreeEntries(value: string): Array<{ mode: string; type: st
     const header = record.slice(0, tab).split(' ')
     if (tab < 0 || header.length !== 3) throw new GitBoundaryError('git-manifest-tree-output', 'Git returned malformed declared-path tree metadata')
     return { mode: header[0]!, type: header[1]!, object: header[2]!, path: normalizeRepoPath(record.slice(tab + 1)) }
-  }).sort((left, right) => left.path.localeCompare(right.path))
+  }).sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0)
 }
 async function readOptionalRef(ctx: GitContext, executable: string, ref: string, cwd: string, options: Omit<GitCommandOptions, 'cwd'>): Promise<string | undefined> { try { return (await runGit(ctx, executable, ['rev-parse', '--verify', ref], { ...options, cwd })).stdout.trim() } catch (error) { if (error instanceof GitBoundaryError && error.code === 'git-command-failed') return undefined; throw error } }
 async function isAncestor(ctx: GitContext, executable: string, ancestor: string, descendant: string, cwd: string, options: Omit<GitCommandOptions, 'cwd'>): Promise<boolean> { try { await runGit(ctx, executable, ['merge-base', '--is-ancestor', ancestor, descendant], { ...options, cwd }); return true } catch (error) { if (error instanceof GitBoundaryError && error.code === 'git-command-failed') return false; throw error } }

@@ -7,6 +7,8 @@ import { basename, dirname, join, sep } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { SubprocessHandle, SubprocessOutputReader, SubprocessOutcome, SubprocessSpawnSpec } from '@deepseek-ai/dsh-subprocess'
 import { DurableTracker } from '../src/tracker.ts'
+import { captureFrozenFileAttempt, revalidateFrozenFileAttempt } from '../src/evaluator.ts'
+import { normalizeEvaluatorRegistration, registrationFingerprint } from '../src/types.ts'
 import { acquireControllerClaim, acquireRunLock, allocateRunWorktree, canonicalizeRepositoryTarget, captureGitConfigBaseline, commitCandidate, deriveRegistrationManifestAtStartCommit, discoverContainedRepository, discoverRepository, durableGitIdentity, GitBoundaryError, heartbeatControllerClaim, inspectRunGitState, makeRunGitIdentity, prepareCandidateTree, reconcileAcceptedHead, reconcileRejectedHead, recoverTerminalRunLock, recoverTerminalRunLockUnderControllerClaim, releaseControllerClaim, releaseTerminalRunLock, removeRunWorktree, resolveGitExecutable, runGit, snapshotCandidate, validateCandidate, validateFrozenCandidatePaths, verifyCandidateTree, verifyExactWorktree, type GitContext } from '../src/git.ts'
 
 const roots: string[] = []
@@ -272,8 +274,50 @@ describe('host-owned Git boundary', () => {
     const registration = { evaluatorId: 'fixture', command: 'node', args: ['scripts/score.mjs'], environment: {}, metricName: 'score', metricDirection: 'minimize' as const, evaluatorFiles: ['scripts/score.mjs'], dataset: { kind: 'local' as const, files: ['data/train.json'] } }
     const manifest = await deriveRegistrationManifestAtStartCommit(f.ctx, 'git', f.discovery, f.identity, registration, commandOptions)
     expect(Object.keys(manifest)).toEqual(['data/train.json', 'scripts/score.mjs'])
+    const expected = { 'data/train.json': createHash('sha256').update('{"rows":1}\n').digest('hex'), 'scripts/score.mjs': createHash('sha256').update('console.log(1)\n').digest('hex') }
+    expect(manifest).toEqual(expected)
+    expect(registrationFingerprint(registration, manifest)).toBe(registrationFingerprint(registration, expected))
     expect(manifest['scripts/score.mjs']).not.toBe(createHash('sha256').update('dirty caller evaluator\n').digest('hex'))
     await expect(deriveRegistrationManifestAtStartCommit(f.ctx, 'git', f.discovery, { ...f.identity, worktree: f.root }, registration, commandOptions)).rejects.toMatchObject({ code: 'git-manifest-worktree-not-isolated' })
+  })
+
+  it.each([
+    { label: 'mixed-case', evaluatorFiles: ['judge.mjs', 'PRIVATE.mjs'], datasetFiles: ['rows.json', 'ROWS.json'] },
+    { label: 'non-ASCII', evaluatorFiles: ['é-score.mjs', 'z-score.mjs'], datasetFiles: ['é-data.json', 'z-data.json'] },
+  ])('binds committed $label paths to exact immutable bytes and canonical registration identity', async ({ evaluatorFiles, datasetFiles }) => {
+    const base = fixture()
+    const paths = [...evaluatorFiles, ...datasetFiles]
+    const contents = Object.fromEntries(paths.map((path, index) => [path, `committed ${index}: ${path}\n`]))
+    for (const path of paths) writeFileSync(join(base.root, path), contents[path]!)
+    execFileSync('git', ['-C', base.root, 'add', '--', ...paths]); execFileSync('git', ['-C', base.root, 'commit', '-m', 'declare distinct frozen files'])
+    for (const path of paths) writeFileSync(join(base.root, path), `dirty caller: ${path}\n`)
+    const f = await createRun(base)
+    const callerStatus = execFileSync('git', ['-C', f.root, 'status', '--porcelain=v1', '-z']).toString()
+    const registration = { evaluatorId: 'fixture', command: 'node', args: [evaluatorFiles[0]!], environment: {}, metricName: 'score', metricDirection: 'minimize' as const, evaluatorFiles, dataset: { kind: 'local' as const, files: datasetFiles } }
+    const manifest = await deriveRegistrationManifestAtStartCommit(f.ctx, 'git', f.discovery, f.identity, registration, commandOptions)
+    const expected = Object.fromEntries([...paths].sort().map(path => [path, createHash('sha256').update(contents[path]!).digest('hex')]))
+    expect(manifest).toEqual(expected)
+    expect(Object.keys(manifest)).toEqual([...paths].sort())
+    for (const path of paths) {
+      expect(execFileSync('git', ['-C', f.root, 'show', `${f.discovery.startCommit}:${path}`]).toString()).toBe(contents[path])
+      expect(readFileSync(join(f.identity.worktree, path), 'utf8')).toBe(contents[path])
+      expect(readFileSync(join(f.root, path), 'utf8')).toBe(`dirty caller: ${path}\n`)
+    }
+    const reversed = { ...registration, evaluatorFiles: [...evaluatorFiles].reverse(), dataset: { kind: 'local' as const, files: [...datasetFiles].reverse() } }
+    const reversedManifest = await deriveRegistrationManifestAtStartCommit(f.ctx, 'git', f.discovery, f.identity, reversed, commandOptions)
+    expect(normalizeEvaluatorRegistration(reversed)).toEqual(normalizeEvaluatorRegistration(registration))
+    expect(reversedManifest).toEqual(expected)
+    expect(registrationFingerprint(reversed, reversedManifest)).toBe(registrationFingerprint(registration, expected))
+    expect(execFileSync('git', ['-C', f.root, 'status', '--porcelain=v1', '-z']).toString()).toBe(callerStatus)
+    assertState(f, f.discovery.startCommit)
+
+    const boundary = captureFrozenFileAttempt(f.identity.worktree, manifest)
+    const changedPath = datasetFiles[0]!
+    writeFileSync(join(f.identity.worktree, changedPath), 'changed frozen dataset\n')
+    expect(() => revalidateFrozenFileAttempt(f.identity.worktree, boundary)).toThrow(/frozen/i)
+    const snapshot = await snapshotCandidate(f.ctx, 'git', f.identity.worktree, f.gitConfig, commandOptions)
+    expect(() => validateFrozenCandidatePaths(snapshot, { evaluatorFiles, datasetFiles })).toThrowError(expect.objectContaining({ code: 'candidate-policy-violation', evidence: [`${changedPath}: frozen evaluator/dataset file`] }))
+    await expect(deriveRegistrationManifestAtStartCommit(f.ctx, 'git', f.discovery, f.identity, registration, commandOptions)).rejects.toMatchObject({ code: 'accepted-reconcile-dirty' })
   })
 
   it('rejects symlink aliases to the caller checkout as allocated manifest worktrees', async () => {
