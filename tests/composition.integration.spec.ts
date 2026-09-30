@@ -8,10 +8,11 @@ import { DatabaseSync } from 'node:sqlite'
 import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-preset-registry'
 import type { SubprocessHandle } from '@deepseek-ai/dsh-subprocess'
+import type {} from '@deepseek-ai/dsh-tool-jobs'
 import { JobId, type JobEvent } from '@deepseek-ai/dsh-jobs'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { COMPOSITION_TERMINATION_GRACE_MS, composeHarness, assembledPrompt, observeJobSettlement, type RealHarness } from './fixtures/harness-composition.ts'
 import { calls, holdModel, releaseModel } from './fixtures/loader/model-provider.ts'
 
@@ -350,28 +351,60 @@ describe('real Loader/profile production composition', () => {
     const parent = await parentAgent(harness, cwd)
     const terminal = Promise.withResolvers<Extract<JobEvent, { type: 'settled' }>>()
     let jobId: string | undefined
+    let settlements = 0
+    const injected = vi.spyOn(parent.agent, 'inject')
+    const followedUp = vi.spyOn(parent.agent, 'followup')
     const unsubscribe = harness.ctx.jobs.events.subscribe({ owner: parent.agent.id }, event => {
-      if (event.type === 'settled' && event.job.id === jobId) terminal.resolve(event)
+      if (event.type === 'settled' && event.job.id === jobId) {
+        settlements++
+        terminal.resolve(event)
+      }
     })
+    // The complete managed Git lifecycle has measured ~28s/236 subprocess calls
+    // without coverage. Bound this operation, not all composition cases, with
+    // coverage headroom and reserve the outer deadline for awaited Host cleanup.
+    const operation = new AbortController()
+    const deadline = Promise.withResolvers<never>()
+    const timer = setTimeout(() => {
+      const error = new Error('owner-notice managed lifecycle did not settle within 60000ms')
+      operation.abort(error)
+      deadline.reject(error)
+    }, 60_000)
     holdModel()
     try {
-      const started = await execute(harness, 'autoresearch', request(cwd), parent.agent)
-      expect(started.isError).toBe(false)
-      if (started.value && typeof started.value === 'object' && 'kind' in started.value && started.value.kind === 'background-start-failed') throw new Error(JSON.stringify(started.value))
-      expect(started.value).toMatchObject({ kind: 'background', jobId: expect.stringMatching(/^autoresearch-/) })
-      jobId = stringProperty(started.value, 'jobId')
-      releaseModel()
-      const event = await terminal.promise
-      expect(event.job).toMatchObject({ id: jobId, owner: parent.agent.id })
-      expect(event.cause).toBe('producer')
-      // A live internal wait marks this event awaited and suppresses job-tools' owner notice.
-      expect(event.awaited).toBe(false)
+      await Promise.race([deadline.promise, (async () => {
+        const started = await harness.ctx.tools.execute({
+          callId: ToolCallId(`call-${crypto.randomUUID()}`), name: 'autoresearch',
+          arguments: request(cwd), agent: parent.agent, signal: operation.signal,
+        })
+        expect(started.isError).toBe(false)
+        if (started.value && typeof started.value === 'object' && 'kind' in started.value && started.value.kind === 'background-start-failed') throw new Error(JSON.stringify(started.value))
+        expect(started.value).toMatchObject({ kind: 'background', jobId: expect.stringMatching(/^autoresearch-/) })
+        jobId = stringProperty(started.value, 'jobId')
+        releaseModel()
+        const event = await terminal.promise
+        expect(event.job).toMatchObject({ id: jobId, owner: parent.agent.id })
+        expect(event.cause).toBe('producer')
+        // Events do not consume completion, unlike a live registry wait.
+        expect(event.awaited).toBe(false)
+        const notices = [...injected.mock.calls, ...followedUp.mock.calls]
+          .filter(([message]) => message.source?.kind === 'tool-jobs' && message.source.form === 'notice')
+        expect(notices).toHaveLength(1)
+      })()])
     } finally {
+      clearTimeout(timer)
       releaseModel()
-      unsubscribe()
-      await parent.dispose()
+      // Tool signals only own startup. Host disposal also cancels an already
+      // returned background job and awaits controller/subprocess settlement.
+      try { await harness.dispose() } finally {
+        unsubscribe()
+        injected.mockRestore()
+        followedUp.mockRestore()
+        await parent.dispose()
+      }
     }
-  }, 30_000)
+    expect(settlements).toBe(1)
+  }, 90_000)
 
   it('terminates an active production evaluator and its job before HMR returns', async () => {
     const marker = await evaluatorMarker('hmr-evaluator')

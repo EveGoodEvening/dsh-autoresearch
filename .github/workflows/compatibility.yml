@@ -66,10 +66,10 @@ jobs:
         working-directory: ${{ runner.temp }}/upstream-compatibility
         run: pnpm run build
 
-      - name: Run full test suite
+      - name: Run full test suite with coverage gate
         id: tests
         working-directory: ${{ runner.temp }}/upstream-compatibility
-        run: pnpm run test
+        run: pnpm run test:coverage
 
       - name: Verify packed consumer and real Web profile
         id: smoke

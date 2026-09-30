@@ -1706,6 +1706,71 @@ describe('controller real Git/SQLite outcomes', { timeout: 30_000 }, () => {
     } finally { rmSync(f.root, { recursive: true, force: true }) }
   })
 
+  it.each(['accepted', 'failed'] as const)('settles a durable %s baseline after a crash without rerunning its evaluator', async outcome => {
+    const accepted = outcome === 'accepted'
+    const f = controllerFixture([accepted ? { stdout: '{"score":10}\n' } : { stdout: '{"score":10}\n', stderr: 'baseline failed\n', exitCode: 7 }])
+    const transition = DurableTracker.prototype.transitionRun
+    let interrupted = false
+    const barrier = vi.spyOn(DurableTracker.prototype, 'transitionRun').mockImplementation(function (runId, state, facts, at) {
+      const baselineMeasured = state === 'ready' && (facts?.outcome as { kind?: string } | undefined)?.kind === 'baseline-measured'
+      if (!interrupted && (accepted ? baselineMeasured : state === 'baseline-blocked')) {
+        interrupted = true
+        throw new Error('terminal baseline settlement crash')
+      }
+      return transition.call(this, runId, state, facts, at)
+    })
+    try {
+      const first = createCaseController(f, { max_experiments: 1, target: 10 })
+      await expect(first.run()).rejects.toThrow('terminal baseline settlement crash')
+      const ready = await first.ready
+      await first.dispose()
+      barrier.mockRestore()
+      const before = DurableTracker.openReadOnly(ready.tracker)
+      let startCommit: string
+      let baseline: Record<string, unknown>
+      let attempts: Record<string, unknown>[]
+      let artifacts: Record<string, unknown>[]
+      try {
+        const run = before.getRun(ready.runId)!
+        startCommit = String(run['start_commit'])
+        expect(run).toMatchObject({ state: 'baseline-running', best_metric: null, best_commit: null })
+        baseline = before.database.prepare("SELECT experiment_id, state, metric, decision, failure_code FROM experiments WHERE kind = 'baseline'").get()!
+        expect(baseline).toMatchObject(accepted ? { state: 'accepted', metric: 10, decision: 'accept', failure_code: null } : { state: 'crashed', metric: null, decision: null, failure_code: 'exit' })
+        attempts = before.database.prepare('SELECT * FROM attempts ORDER BY attempt_id').all()
+        expect(attempts).toEqual([expect.objectContaining({ ordinal: 1, exit_code: accepted ? 0 : 7, process_tree_quiescent: 1, exited_at: expect.any(String) })])
+        artifacts = before.database.prepare('SELECT * FROM artifacts ORDER BY artifact_id').all()
+        expect(before.database.prepare('SELECT released_at FROM active_locks WHERE run_id = ?').get(ready.runId)).toEqual({ released_at: null })
+      } finally { before.close() }
+      expect(f.subprocess.evaluatorSpawns).toBe(1)
+      expect(f.creates).toHaveLength(0)
+
+      const result = await createCaseController(f, { max_experiments: 1, target: 10 }, ready.runId).run()
+      expect(result).toMatchObject(accepted
+        ? { status: 'target-reached', target: 10, best: { metric: 10, commit: startCommit, experimentId: baseline['experiment_id'] }, counts: { experimentsStarted: 0, experimentsCompleted: 0, attempts: 1 } }
+        : { status: 'baseline-blocked', exit: { exitCode: 7 }, counts: { experimentsStarted: 0, experimentsCompleted: 0, attempts: 1 } })
+      const settled = DurableTracker.openReadOnly(ready.tracker)
+      let transitions: Record<string, unknown>[]
+      try {
+        expect(settled.getRun(ready.runId)).toMatchObject({ state: accepted ? 'completed' : 'baseline-blocked', terminal_quiescent: 1, ...(accepted ? { best_metric: 10, best_commit: startCommit } : { blocked_code: 'exit', best_metric: null, best_commit: null }) })
+        expect(settled.database.prepare('SELECT * FROM attempts ORDER BY attempt_id').all()).toEqual(attempts)
+        expect(settled.database.prepare('SELECT * FROM artifacts ORDER BY artifact_id').all()).toEqual(artifacts)
+        expect(settled.database.prepare("SELECT experiment_id, state, metric, decision, failure_code FROM experiments WHERE kind = 'baseline'").get()).toEqual(baseline)
+        expect(settled.database.prepare('SELECT released_at FROM active_locks WHERE run_id = ?').get(ready.runId)?.['released_at']).toEqual(expect.any(String))
+        transitions = settled.listTransitions(ready.runId)
+        expect(transitions.filter(row => row['scope'] === 'run' && row['from_state'] === 'baseline-running' && row['to_state'] !== row['from_state']).map(row => row['to_state'])).toEqual([accepted ? 'ready' : 'baseline-blocked'])
+        expect(controllerClaims(String(settled.getRun(ready.runId)!['git_common_dir']), ready.runId)).toEqual([])
+      } finally { settled.close() }
+      expect(execFileSync('git', ['-C', ready.worktree, 'rev-parse', 'HEAD']).toString().trim()).toBe(startCommit)
+      expect(await createCaseController(f, { max_experiments: 1, target: 10 }, ready.runId).run()).toEqual(result)
+      const replayed = DurableTracker.openReadOnly(ready.tracker)
+      try { expect(replayed.listTransitions(ready.runId)).toEqual(transitions) }
+      finally { replayed.close() }
+      expect(f.subprocess.evaluatorSpawns).toBe(1)
+      expect(f.creates).toHaveLength(0)
+      expect(f.liveCount()).toBe(0)
+    } finally { barrier.mockRestore(); rmSync(f.root, { recursive: true, force: true }) }
+  })
+
   it('reruns a proven-quiescent candidate evaluation exactly once from its recorded candidate commit', async () => {
     const f = controllerFixture([{ stdout: '{"score":10}\n' }, { stdout: '{"score":9}\n' }, { stdout: '{"score":8}\n' }], [(worktree) => writeFileSync(join(worktree, 'src', 'code.ts'), 'export const n = 2\n')])
     const original = DurableTracker.prototype.recordAttemptOutcome
