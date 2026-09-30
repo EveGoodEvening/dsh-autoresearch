@@ -362,6 +362,58 @@ releaseDescribe('packed release scenarios', () => {
     }
   }, 45_000)
 
+  it('kills an evaluator only after candidate checkout and durably cancels without duplicate evaluation', async () => {
+    const marker = join(process.cwd(), `.release-candidate-ready-${crypto.randomUUID()}.json`)
+    const code = `const fs=require('node:fs');const cp=require('node:child_process');const score=Number(fs.readFileSync('score.txt','utf8'));if(score===1){console.log(JSON.stringify({score}));}else{const marker=process.argv[1];fs.writeFileSync(marker+'.tmp',JSON.stringify({pid:process.pid,head:cp.execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim(),score}));fs.renameSync(marker+'.tmp',marker);setInterval(()=>{},1000);}`
+    const harness = await composeHarness({ autoresearchConfig: { evaluatorRegistrations: [{ id: 'judge', command: process.execPath, args: ['-e', code, marker], metricName: 'score', metricDirection: 'minimize', metricParserVersion: 'final-line-json-v1', evaluatorFiles: [] }] } })
+    try {
+      const cwd = await repository(harness.root, 'candidate-cancellation'); const before = snapshot(cwd); const owner = await parent(harness.ctx, cwd)
+      const terminal = observeJobSettlement(harness.ctx, owner.agent.id)
+      try {
+        const args = request(cwd, 'release accepted candidate', 'background')
+        const started = await execute(harness.ctx, owner.agent, args)
+        await Promise.race([
+          waitUntil(() => pathExists(marker), 'candidate evaluator did not publish readiness'),
+          terminal.settled.then(event => { throw new Error(`job settled before candidate readiness: ${JSON.stringify(event)}`) }),
+        ])
+        const ready = JSON.parse(await readFile(marker, 'utf8')) as { pid: number; head: string; score: number }
+        const running = inspect(started.tracker, started.runId)
+        expect(ready.score).toBe(0)
+        expect(ready.head).toBe(running.experiments.find(row => row.kind === 'candidate')?.candidate_commit)
+        expect(ready.head).not.toBe(before.head)
+        const killed = await harness.ctx.tools.execute({ callId: ToolCallId('candidate-kill'), name: 'job_kill', arguments: { job_id: started.jobId }, agent: owner.agent, signal: new AbortController().signal })
+        expect(killed.isError).toBe(false)
+        expect((await terminal.settled).job).toMatchObject({ id: started.jobId, status: 'killed' })
+        await waitUntil(() => processGone(ready.pid), 'candidate evaluator survived cancellation')
+        const output = await harness.ctx.tools.execute({ callId: ToolCallId('candidate-output'), name: 'job_output', arguments: { job_id: started.jobId }, agent: owner.agent, signal: new AbortController().signal })
+        expect(output.isError).toBe(false)
+        const outputValue = output.value
+        if (!outputValue || typeof outputValue !== 'object' || !('text' in outputValue) || typeof outputValue.text !== 'string') throw new Error('candidate cancellation job output is missing result text')
+        const cancelled = JSON.parse(outputValue.text)
+        expect(cancelled).toMatchObject({ runId: started.runId, status: 'cancelled', quiescent: true, counts: { attempts: 2 }, best: { metric: 1, commit: before.head } })
+        const durable = inspect(started.tracker, started.runId)
+        expect(durable.run.state).toBe('cancelled')
+        expect(durable.run.terminal_quiescent).toBe(1)
+        expect(durable.lock.released_at).not.toBeNull()
+        expect(git(String(durable.run.worktree), ['rev-parse', 'HEAD'])).toBe(before.head)
+        expect(git(cwd, ['rev-parse', `refs/autoresearch/runs/${started.runId}/accepted`])).toBe(before.head)
+        const authority = new DatabaseSync(join(git(cwd, ['rev-parse', '--path-format=absolute', '--git-common-dir']), 'dsh-autoresearch-locks.sqlite'), { readOnly: true })
+        const repositoryLocks = Number(authority.prepare('SELECT COUNT(*) n FROM active_locks WHERE run_id=?').get(started.runId)?.n); authority.close()
+        expect(repositoryLocks).toBe(0)
+        const db = new DatabaseSync(started.tracker, { readOnly: true })
+        const attempts = Number(db.prepare('SELECT COUNT(*) n FROM attempts').get()?.n)
+        const uncertain = Number(db.prepare('SELECT COUNT(*) n FROM attempts WHERE process_tree_quiescent IS NOT 1').get()?.n); db.close()
+        expect(attempts).toBe(2); expect(uncertain).toBe(0)
+        const { run_tag: _tag, evaluator_id: _evaluatorId, mode: _mode, ...stable } = args
+        const resumed = await execute(harness.ctx, owner.agent, { ...stable, resume_run_id: started.runId, mode: 'foreground' })
+        expect(resumed.run).toEqual(cancelled); expect(resumed.run.counts.attempts).toBe(attempts)
+        expect(inspect(started.tracker, started.runId).experiments).toEqual(durable.experiments)
+        expect(snapshot(cwd)).toEqual(before)
+        evidence.candidateCancellation = { ok: true, readiness: ready, jobStatus: 'killed', status: durable.run.state, processTreeQuiescent: true, acceptedHeadRestored: true, localLockReleased: true, repositoryLocks, callerUnchanged: true, resumedStatus: resumed.run.status, attempts, duplicateEvaluation: false }
+      } finally { terminal.dispose(); await owner.dispose() }
+    } finally { await harness.dispose().catch(() => undefined); await rm(marker, { force: true }); await rm(`${marker}.tmp`, { force: true }) }
+  }, 45_000)
+
   it('interrupts a real evaluator descendant tree and resumes without duplicate work', async () => {
     const marker = join(process.cwd(), `.release-descendants-${crypto.randomUUID()}.json`)
     const harness = await composeHarness({ autoresearchConfig: { evaluatorRegistrations: [{ id: 'judge', command: process.execPath, args: [descendantEvaluator, marker], metricName: 'score', metricDirection: 'minimize', metricParserVersion: 'final-line-json-v1', evaluatorFiles: [] }] } })
@@ -406,7 +458,7 @@ releaseDescribe('packed release scenarios', () => {
   }, 45_000)
 
   it('writes machine-readable evidence', async () => {
-    for (const scenario of ['prepareBarrier', 'accepted', 'tie', 'rejected', 'continuedFailure', 'background', 'interruptionResume', 'uncertainRestart']) expect(evidence[scenario], `missing ${scenario} scenario`).toMatchObject({ ok: true })
+    for (const scenario of ['prepareBarrier', 'accepted', 'tie', 'rejected', 'continuedFailure', 'background', 'candidateCancellation', 'interruptionResume', 'uncertainRestart']) expect(evidence[scenario], `missing ${scenario} scenario`).toMatchObject({ ok: true })
     if (evidencePath) await writeFile(evidencePath, JSON.stringify({ ok: true, ...evidence }))
   })
 })

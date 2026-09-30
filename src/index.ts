@@ -186,7 +186,7 @@ export function apply(ctx: Context, config: AutoresearchConfig = {}): void {
                   readiness.resolve(startupFailure(jobId, error, cancelled))
                 }
                 const result = await running
-                if (cancelled) return { status: 'killed', detail: cancelReason, result: JSON.stringify(startupFailure(jobId, cancelReason, true)) }
+                if (cancelled) return { status: 'killed', detail: cancelReason, result: JSON.stringify(result) }
                 return jobOutcome(result, resolved.maxResultChars)
               } catch (error) {
                 readiness.resolve(startupFailure(jobId || 'unregistered', error, cancelled))

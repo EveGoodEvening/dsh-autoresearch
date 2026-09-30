@@ -1902,6 +1902,96 @@ describe('controller real Git/SQLite outcomes', { timeout: 30_000 }, () => {
     } finally { fault.mockRestore(); rmSync(f.root, { recursive: true, force: true }) }
   })
 
+  it('cancels after candidate checkout but before evaluator spawn and restores accepted HEAD', async () => {
+    const f = controllerFixture([{ stdout: '{"score":10}\n' }], [worktree => writeFileSync(join(worktree, 'src', 'code.ts'), 'export const n = 2\n')])
+    let controller!: AutoresearchRunController
+    const transition = DurableTracker.prototype.transitionExperiment
+    const seam = vi.spyOn(DurableTracker.prototype, 'transitionExperiment').mockImplementation(function (experimentId, state, facts, at) {
+      if (experimentId.includes('-candidate-') && state === 'running') { controller.cancel('stop after candidate checkout'); throw new Error('checkout cancellation barrier') }
+      return transition.call(this, experimentId, state, facts, at)
+    })
+    try {
+      controller = createCaseController(f, { max_experiments: 1 })
+      const result = await controller.run(); const ready = await controller.ready
+      expect(result).toMatchObject({ status: 'cancelled', lastState: 'candidate-prepared' })
+      const tracker = DurableTracker.open(ready.tracker)
+      expect(execFileSync('git', ['-C', ready.worktree, 'rev-parse', 'HEAD']).toString().trim()).toBe(tracker.getRun(ready.runId)?.['best_commit'])
+      expect(tracker.database.prepare('SELECT released_at FROM active_locks').get()?.['released_at']).not.toBeNull()
+      tracker.close(); expect(f.subprocess.evaluatorSpawns).toBe(1)
+    } finally { await drainRealGitFixtures() }
+  })
+
+  it.each(['candidate-running', 'deciding'] as const)('settles cancellation at %s with candidate HEAD restored and no evaluator replay', async boundary => {
+    let controller!: AutoresearchRunController
+    const f = controllerFixture([{ stdout: '{"score":10}\n' }, { hang: true, edit: () => controller.cancel('candidate operator stop') }], [worktree => writeFileSync(join(worktree, 'src', 'code.ts'), 'export const n = 2\n')])
+    const transition = DurableTracker.prototype.transitionRun; let interrupted = false
+    const barrier = boundary === 'candidate-running' ? vi.spyOn(DurableTracker.prototype, 'transitionRun').mockImplementation(function (runId, state, facts, at) {
+      const outcome = facts?.outcome
+      if (!interrupted && state === 'deciding' && outcome && typeof outcome === 'object' && 'kind' in outcome && outcome.kind === 'candidate-evaluation-failed') { interrupted = true; throw new Error('cancel before deciding checkpoint') }
+      return transition.call(this, runId, state, facts, at)
+    }) : undefined
+    try {
+      controller = createCaseController(f, { max_experiments: 1 })
+      const result = await controller.run(); const ready = await controller.ready
+      expect(result.status).toBe('cancelled')
+      const tracker = DurableTracker.open(ready.tracker)
+      const run = tracker.getRun(ready.runId)!
+      expect(run).toMatchObject({ state: 'cancelled', terminal_quiescent: 1 })
+      expect(tracker.database.prepare("SELECT state FROM experiments WHERE kind='candidate'").get()?.['state']).toBe('cancelled')
+      expect(tracker.database.prepare('SELECT released_at FROM active_locks').get()?.['released_at']).not.toBeNull()
+      expect(execFileSync('git', ['-C', ready.worktree, 'rev-parse', 'HEAD']).toString().trim()).toBe(run['best_commit'])
+      tracker.close(); barrier?.mockRestore(); await controller.dispose()
+      const resumed = await createCaseController(f, { max_experiments: 1 }, ready.runId).run()
+      expect(resumed.status).toBe('cancelled'); expect(f.subprocess.evaluatorSpawns).toBe(2)
+    } finally { await drainRealGitFixtures() }
+  })
+
+  it.each(['before-best-update', 'after-accepted-experiment'] as const)('finishes an interrupted acceptance during cancellation at %s', async boundary => {
+    const f = controllerFixture([{ stdout: '{"score":10}\n' }, { stdout: '{"score":9}\n' }], [worktree => writeFileSync(join(worktree, 'src', 'code.ts'), 'export const n = 2\n')])
+    let controller!: AutoresearchRunController; let interrupted = false
+    const commit = DurableTracker.prototype.commitTerminalExperiment
+    const seam = vi.spyOn(DurableTracker.prototype, 'commitTerminalExperiment').mockImplementation(function (experimentId, state, facts, at) {
+      if (experimentId.includes('-candidate-') && state === 'accepted' && !interrupted) {
+        interrupted = true
+        if (boundary === 'after-accepted-experiment') commit.call(this, experimentId, state, facts, at)
+        controller.cancel('operator stop after accepted ref publication')
+        throw new Error('acceptance cancellation barrier')
+      }
+      return commit.call(this, experimentId, state, facts, at)
+    })
+    try {
+      controller = createCaseController(f, { max_experiments: 1 })
+      const result = await controller.run(); const ready = await controller.ready
+      expect(result).toMatchObject({ status: 'cancelled', best: { metric: 9 } })
+      const tracker = DurableTracker.open(ready.tracker)
+      const candidate = tracker.database.prepare("SELECT state,candidate_commit FROM experiments WHERE kind='candidate'").get()!
+      expect(candidate['state']).toBe('accepted')
+      expect(tracker.getRun(ready.runId)?.['best_commit']).toBe(candidate['candidate_commit'])
+      expect(execFileSync('git', ['-C', ready.worktree, 'rev-parse', 'HEAD']).toString().trim()).toBe(candidate['candidate_commit'])
+      expect(tracker.database.prepare('SELECT released_at FROM active_locks').get()?.['released_at']).not.toBeNull()
+      tracker.close()
+    } finally { await drainRealGitFixtures() }
+  })
+
+  it('retains cancellation authority rather than resetting an unexpected candidate branch commit', async () => {
+    let controller!: AutoresearchRunController; let unexpectedHead = ''
+    const f = controllerFixture([{ stdout: '{"score":10}\n' }, { hang: true, edit: worktree => {
+      execFileSync('git', ['-C', worktree, '-c', 'user.name=External', '-c', 'user.email=external@example.invalid', 'commit', '--allow-empty', '-qm', 'unexpected external commit'])
+      unexpectedHead = execFileSync('git', ['-C', worktree, 'rev-parse', 'HEAD']).toString().trim()
+      controller.cancel('operator cancellation with external ref mutation')
+    } }], [worktree => writeFileSync(join(worktree, 'src', 'code.ts'), 'export const n = 2\n')])
+    try {
+      controller = createCaseController(f, { max_experiments: 1 })
+      const result = await controller.run(); const ready = await controller.ready
+      expect(result.status).toBe('blocked')
+      expect(execFileSync('git', ['-C', ready.worktree, 'rev-parse', 'HEAD']).toString().trim()).toBe(unexpectedHead)
+      const tracker = DurableTracker.open(ready.tracker)
+      expect(tracker.database.prepare('SELECT released_at FROM active_locks').get()?.['released_at']).toBeNull()
+      expect(tracker.getRun(ready.runId)?.['state']).not.toBe('cancelled')
+      tracker.close(); expect(f.subprocess.evaluatorSpawns).toBe(2)
+    } finally { await drainRealGitFixtures() }
+  })
+
   it.each([
     ['accept', 9, 'before-publication'], ['accept', 9, 'after-publication'],
     ['reject', 11, 'before-publication'], ['reject', 11, 'after-publication'],

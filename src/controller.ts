@@ -593,7 +593,7 @@ export class AutoresearchRunController {
     r.tracker.transitionRun(r.runId, 'deciding', { outcome: { kind: 'candidate-evaluation-failed', code, message } })
   }
 
-  private async reconcileCandidate(r: Runtime, directive: Extract<RecoveryDirective, { kind: 'reconcile-candidate' }>): Promise<void> {
+  private async reconcileCandidate(r: Runtime, directive: Extract<RecoveryDirective, { kind: 'reconcile-candidate' }>, signal = this.aborter.signal): Promise<void> {
     const best = durableBest(r.tracker, r.runId)
     const experimentRow = r.tracker.database.prepare('SELECT state FROM experiments WHERE experiment_id = ?').get(directive.experiment.experimentId)
     const experimentTerminal = experimentRow && !['baseline-pending', 'running'].includes(String(experimentRow['state']))
@@ -601,7 +601,7 @@ export class AutoresearchRunController {
     if (r.tracker.getRun(r.runId)?.['state'] === 'candidate-running') r.tracker.transitionRun(r.runId, 'deciding', { outcome: { kind: 'terminal-experiment-recovered' } })
     r.tracker.checkpointRun(r.runId, { intent: { kind: 'git-reconciliation', outcome: directive.outcome } })
     if (directive.outcome.kind === 'accept') {
-      await reconcileAcceptedHead(this.ctx, r.gitExecutable, r.identity.worktree, r.identity, directive.candidateCommit, { ...r.gitOptions, signal: this.aborter.signal })
+      await reconcileAcceptedHead(this.ctx, r.gitExecutable, r.identity.worktree, r.identity, directive.candidateCommit, { ...r.gitOptions, signal })
       const next = { metric: directive.outcome.metric, commit: directive.candidateCommit, experimentId: directive.experiment.experimentId }
       if (!experimentTerminal) r.tracker.commitTerminalExperiment(directive.experiment.experimentId, 'accepted', { metric: next.metric, decision: 'accept' })
       const target = r.policy.target !== undefined && isTargetReached(r.policy.metricDirection, next.metric, r.policy.target)
@@ -609,7 +609,7 @@ export class AutoresearchRunController {
       return
     }
     try {
-      await reconcileRejectedHead(this.ctx, r.gitExecutable, r.identity.worktree, r.identity, directive.candidateCommit, directive.expectedAcceptedCommit, { ...r.gitOptions, signal: this.aborter.signal })
+      await reconcileRejectedHead(this.ctx, r.gitExecutable, r.identity.worktree, r.identity, directive.candidateCommit, directive.expectedAcceptedCommit, { ...r.gitOptions, signal })
     } catch (error) {
       if (!(error instanceof GitBoundaryError)) throw error
       return this.blockRejectedReconciliation(r, error)
@@ -669,12 +669,47 @@ export class AutoresearchRunController {
       throw new Error(`terminal cancellation reconciliation returned ${directive.kind}`)
     }
     this.persistCancellationIntent()
+    const cleanupSignal = new AbortController().signal
+    // Recovery also selects the latest terminal experiment: cancelled evaluator
+    // outcomes are no longer unresolved, and an interrupted acceptance must finish
+    // its validated transaction before choosing the accepted commit to restore.
+    if (state === 'candidate-prepared') {
+      const recovery = await reconcileRecovery(this.ctx, { ...r, signal: cleanupSignal })
+      if (recovery.kind === 'blocked') return this.block(r, recovery)
+      if (recovery.kind === 'evaluate' && !recovery.rerun && recovery.attemptOrdinal === 1) {
+        try {
+          await reconcileRejectedHead(this.ctx, r.gitExecutable, r.identity.worktree, r.identity, recovery.commit, durableBest(r.tracker, r.runId).commit, { ...r.gitOptions, signal: cleanupSignal })
+        } catch (error) {
+          if (!(error instanceof GitBoundaryError)) throw error
+          return this.block(r, { kind: 'blocked', runId: r.runId, code: 'git-external-mutation', evidence: [{ code: error.code, message: error.message, artifacts: [] }], lock: 'retain' })
+        }
+      } else if (recovery.kind !== 'commit-candidate') {
+        return this.block(r, { kind: 'blocked', runId: r.runId, code: 'attempt-uncertain', evidence: [{ code: 'attempt-uncertain', message: `prepared candidate cancellation lacks pre-spawn authority (${recovery.kind})`, artifacts: [] }], lock: 'retain' })
+      }
+    }
+    if (state === 'candidate-running' || state === 'deciding') {
+      let recovery = await reconcileRecovery(this.ctx, { ...r, signal: cleanupSignal })
+      if (recovery.kind === 'finalize-evaluation') {
+        await this.finalizeEvaluation(r, recovery.experiment, recovery.evaluation)
+        recovery = await reconcileRecovery(this.ctx, { ...r, signal: cleanupSignal })
+      }
+      if (recovery.kind === 'blocked') return this.block(r, recovery)
+      if (recovery.kind !== 'reconcile-candidate') return this.block(r, { kind: 'blocked', runId: r.runId, code: 'attempt-uncertain', evidence: [{ code: 'attempt-uncertain', message: `candidate cancellation lacks a durable reconciliation outcome (${recovery.kind})`, artifacts: [] }], lock: 'retain' })
+      try { await this.reconcileCandidate(r, recovery, cleanupSignal) }
+      catch (error) {
+        if (!(error instanceof RejectedReconciliationBlockedError)) throw error
+        return this.block(r, { kind: 'blocked', runId: r.runId, code: 'git-external-mutation', evidence: error.evidence.map(message => ({ code: error.code, message, artifacts: [] })), lock: 'retain' })
+      }
+      const settled = await reconcileRecovery(this.ctx, { ...r, signal: cleanupSignal })
+      if (settled.kind === 'blocked') return this.block(r, settled)
+      if (settled.kind === 'terminal') return this.returnTerminal(r, settled)
+    }
     const unresolved = r.tracker.recoveryState(r.runId).unresolvedExperiment
     const best = optionalBest(r.tracker, r.runId)
     if (unresolved && ['baseline-pending','running'].includes(String(unresolved['state']))) r.tracker.commitTerminalExperiment(String(unresolved['experiment_id']), 'cancelled', { failureCode: 'cancelled', failureMessage: this.cancelReason })
-    if (best) await restoreAcceptedWorktree(this.ctx, r.gitExecutable, r.identity.worktree, r.identity, best.commit, r.gitOptions)
+    if (best) await restoreAcceptedWorktree(this.ctx, r.gitExecutable, r.identity.worktree, r.identity, best.commit, { ...r.gitOptions, signal: cleanupSignal })
     r.tracker.transitionRun(r.runId, 'cancelled', { terminalReason: this.cancelReason, quiescent: true, ...(best ? { best } : {}) })
-    const directive = await reconcileRecovery(this.ctx, { ...r, signal: new AbortController().signal })
+    const directive = await reconcileRecovery(this.ctx, { ...r, signal: cleanupSignal })
     if (directive.kind === 'blocked') return this.block(r, directive)
     if (directive.kind !== 'terminal' || directive.state !== 'cancelled') throw new Error(`durable cancellation reconciliation returned ${directive.kind}`)
     return this.returnTerminal(r, directive)

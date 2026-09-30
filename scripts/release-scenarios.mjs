@@ -17,7 +17,7 @@ await run(vitest, ['run', 'tests/release-scenarios.integration.spec.ts', '--repo
   DSH_AUTORESEARCH_EVIDENCE: evidencePath,
 })
 const evidence = JSON.parse(await readFile(evidencePath, 'utf8'))
-const required = ['prepareBarrier', 'accepted', 'tie', 'rejected', 'continuedFailure', 'background', 'interruptionResume', 'uncertainRestart']
+const required = ['prepareBarrier', 'accepted', 'tie', 'rejected', 'continuedFailure', 'background', 'candidateCancellation', 'interruptionResume', 'uncertainRestart']
 for (const key of required) {
   if (!evidence[key]?.ok) throw new Error(`release scenario ${key} did not emit passing evidence`)
 }
@@ -45,7 +45,7 @@ evidence.items = {
       && tsv.temporaryFiles?.length === 0 && typeof tsv.lowerLayerAtomicFaultTest === 'string',
     tsv,
   },
-  '853': { ok: evidence.background.listed === true && evidence.background.kill === true && evidence.background.noLiveJobs === true, background: evidence.background },
+  '853': { ok: evidence.background.listed === true && evidence.background.kill === true && evidence.background.noLiveJobs === true && evidence.candidateCancellation?.jobStatus === 'killed' && evidence.candidateCancellation.status === 'cancelled' && evidence.candidateCancellation.processTreeQuiescent === true && evidence.candidateCancellation.acceptedHeadRestored === true && evidence.candidateCancellation.localLockReleased === true && evidence.candidateCancellation.repositoryLocks === 0 && evidence.candidateCancellation.callerUnchanged === true && evidence.candidateCancellation.resumedStatus === 'cancelled' && evidence.candidateCancellation.attempts === 2 && evidence.candidateCancellation.duplicateEvaluation === false, background: evidence.background, candidateCancellation: evidence.candidateCancellation },
   '854': { ok: evidence.accepted.agentDisposed === true && evidence.accepted.terminalBeforeLockRelease === true && evidence.interruptionResume.processTreeQuiescent === true, retained: evidence.accepted },
   '855': { ok: evidence.interruptionResume.processTreeQuiescent === true, interruption: evidence.interruptionResume },
   '856': { ok: evidence.background.resumedStatus === 'budget-limited' && evidence.background.resumeResultMatches === true && evidence.background.headAdvanced === true && evidence.background.resumeCwdChanged === true && evidence.interruptionResume.resumedStatus === 'cancelled' && evidence.interruptionResume.attempts === 1 && evidence.interruptionResume.duplicateCandidate === false && evidence.continuedFailure.attempts === 3 && evidence.continuedFailure.candidates === 2 && evidence.continuedFailure.resumedEqual === true, resume: { background: evidence.background, interruption: evidence.interruptionResume, continuedFailure: evidence.continuedFailure } },
