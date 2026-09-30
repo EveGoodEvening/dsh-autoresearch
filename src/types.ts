@@ -177,24 +177,6 @@ export interface ExceptionalPathPolicy {
   readonly gitConfig: readonly string[]
 }
 
-export interface AutoresearchToolInput {
-  readonly repository?: string
-  readonly run_tag?: string
-  readonly resume_run_id?: RunId
-  readonly objective: string
-  readonly constraints?: readonly string[]
-  readonly mutable_globs: readonly string[]
-  readonly exceptional_allowlists?: Partial<ExceptionalPathPolicy>
-  readonly evaluation: EvaluatorArgv
-  readonly metric_name: string
-  readonly metric_direction: MetricDirection
-  readonly timeout_ms?: number
-  readonly max_experiments?: number
-  readonly target?: number
-  readonly provenance?: ProvenanceInput
-  readonly environment?: Readonly<Record<string, string>>
-  readonly mode?: RunMode
-}
 
 export interface ActivationToolInputBase {
   readonly repository?: string
@@ -278,25 +260,6 @@ function activationRunTag(value: unknown): string { const result = text(value, '
 function deepFreezeActivation<T>(value: T): T { if (value !== null && typeof value === 'object' && !Object.isFrozen(value)) { for (const item of Object.values(value as Record<string, unknown>)) deepFreezeActivation(item); Object.freeze(value) } return value }
 
 
-/** Canonical model-tool input schema; nested objects reject unknown keys at the runtime decoder. */
-export const AUTORESEARCH_TOOL_PARAMETERS = {
-  repository: { type: 'string', description: 'Repository or cwd; defaults to the initiating agent cwd.' },
-  run_tag: { type: 'string', description: 'Fresh Git-safe exclusion tag; mutually exclusive with resume_run_id.' },
-  resume_run_id: { type: 'string', description: 'Durable run id to resume; mutually exclusive with run_tag.' },
-  objective: { type: 'string', required: true, description: 'Immutable optimization objective.' },
-  constraints: { type: 'array', items: { type: 'string' }, description: 'Immutable policy constraints.' },
-  mutable_globs: { type: 'array', required: true, items: { type: 'string' }, description: 'Narrow relative mutable paths or globs.' },
-  exceptional_allowlists: { type: 'object', additionalProperties: false, properties: { dependencies: { type: 'array', items: { type: 'string' } }, evaluators: { type: 'array', items: { type: 'string' } }, datasets: { type: 'array', items: { type: 'string' } }, submodules: { type: 'array', items: { type: 'string' } }, gitConfig: { type: 'array', items: { type: 'string' } } }, description: 'Explicit dependency, evaluator, dataset, submodule, and Git-config path exceptions.' },
-  evaluation: { type: 'object', required: true, additionalProperties: false, properties: { command: { type: 'string', required: true }, args: { type: 'array', required: true, items: { type: 'string' } }, cwd: { type: 'string' } }, description: 'Shell-free evaluator argv: { command, args, cwd? }.' },
-  metric_name: { type: 'string', required: true, description: 'Exact final-line JSON scalar key.' },
-  metric_direction: { type: 'string', required: true, enum: ['minimize', 'maximize'], description: 'Strict improvement direction.' },
-  timeout_ms: { type: 'number', description: 'Per-attempt timeout bounded by deployment policy.' },
-  max_experiments: { type: 'number', description: 'Candidate experiment cap; baseline is separate.' },
-  target: { type: 'number', description: 'Optional finite stopping threshold.' },
-  provenance: { type: 'object', additionalProperties: false, properties: { evaluator: { type: 'string' }, dataset: { type: 'string' } }, description: 'Evaluator and dataset provenance labels.' },
-  environment: { type: 'object', additionalProperties: true, description: 'Explicit evaluator environment overrides; every value must be a string.' },
-  mode: { type: 'string', enum: ['background', 'foreground'], description: 'Defaults to background.' },
-} as const
 
 const artifactSchema = { type: 'object', additionalProperties: false, properties: { artifactId: { type: 'string', required: true }, kind: { type: 'string', required: true }, location: { type: 'string', required: true }, sizeBytes: { type: 'number', required: true }, sha256: { type: 'string', required: true } } } as const
 const artifactsSchema = { type: 'array', items: artifactSchema } as const
