@@ -1,6 +1,6 @@
 # Handoff 2026-08-30 Remediation Checklist
 
-> 2026-09-29 current aggregate work is tracked only in [September full reassessment](handoff-2026-0903.md#2026-09-29-full-reassessment-and-release-ledger). H-01..H-15 boxes/SHAs below remain completed historical evidence, not fresh gates. H-02 exact compact lifecycle/trust documentation follow-up and unused H-01 raw contract cleanup are pending there. H-12/Chunk08 prose/version drift-test acceptance is superseded by higher-priority policy prohibiting incidental prose/version/script-copy tests: use manual source/packed truthfulness review and actual setup/runtime smoke, not new assertions. No closed history is reopened merely to add forbidden tests.
+> Current aggregate work is tracked only in [September full reassessment](handoff-2026-0903.md#2026-09-29-full-reassessment-and-release-ledger). H-01..H-15 boxes/SHAs below remain completed historical evidence, not fresh gates. H-01 unused raw contract cleanup is completed through R2 closure `a0627c80b435090d85308dc5171bdbc474f4d158`; H-02 compact lifecycle/trust/setup documentation is completed through R4 closure `d1a12f1af225d3d1c17a6f8acdc8e3037aac9597`, both coordinator-observed. H-12/Chunk08 prose/version drift-test acceptance is superseded by higher-priority policy prohibiting incidental prose/version/script-copy tests: use manual source/packed truthfulness review and actual setup/runtime smoke, not new assertions. No closed history is reopened merely to add forbidden tests.
 
 ## Purpose and invariants
 
