@@ -1,4 +1,4 @@
-import type { Context } from '@deepseek-ai/cordis'
+import { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentHandle, CreateAgentOptions } from '@deepseek-ai/dsh-agent'
 import { JobId, type JobView } from '@deepseek-ai/dsh-jobs'
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
@@ -57,7 +57,6 @@ interface HarnessFixture {
   liveJob?: boolean
   keepRegistered?: boolean
   ownerCleanup?: () => Promise<void>
-  unloadDuringIdle?: boolean
   readonly liveCount: () => number
 }
 
@@ -137,7 +136,6 @@ function fixture(): HarnessFixture {
         cancel: vi.fn(),
         followup(message: { content: Array<{ type: string; text?: string }> }) { prompt = message.content[0]?.text ?? ''; prompts.push(prompt); order.push('followup') },
         async whenIdle() {
-          if (harness.unloadDuringIdle) await harness.ownerCleanup?.()
           order.push('whenIdle')
           const tool = childTools.get(PROPOSAL_REPORT_TOOL)
           if (tool === undefined || harness.behavior === 'missing') return
@@ -489,13 +487,67 @@ describe('proposal-agent adapter', () => {
     await expect(requestProposal(f.ctx, { ...input, signal: aborter.signal })).rejects.toMatchObject({ code: 'cancelled' })
     expect(f.dispose).toHaveBeenCalledTimes(1)
   })
-  it('awaits owner-effect unload disposal exactly once and leaves no registered child or live job', async () => {
-    const f = fixture(); f.unloadDuringIdle = true
-    await expect(requestProposal(f.ctx, request(f.parent, vi.fn()))).resolves.toMatchObject({ hypothesis: 'Change the hot path' })
-    expect(f.dispose).toHaveBeenCalledTimes(1)
-    expect(f.liveCount()).toBe(0)
-    expect(f.jobListCallers).toEqual([f.childId.value])
-    expect(f.ctx.jobs.list(f.childId.value!)).toEqual([])
+  it.each([false, true])('waits for concurrent Cordis owner disposal before cancellation settles (dispose failure: %s)', async disposeFails => {
+    const f = fixture()
+    const owner = new Context()
+    f.ctx.effect = ((execute: () => () => Promise<void>, label: string) => {
+      const cleanup = owner.effect(execute, label)
+      f.ownerCleanup = cleanup as () => Promise<void>
+      return cleanup
+    }) as Context['effect']
+    const draining = Promise.withResolvers<void>()
+    const started = Promise.withResolvers<void>()
+    const teardownError = new Error('real teardown failed')
+    const originalDispose = f.dispose.getMockImplementation()!
+    f.liveJob = true
+    f.dispose.mockImplementationOnce(async () => {
+      started.resolve()
+      await draining.promise
+      if (disposeFails) throw teardownError
+      f.liveJob = false
+      await originalDispose()
+    })
+    f.behavior = 'missing'
+    let ownerDisposal: Promise<void> | undefined
+    const originalCreate = f.ctx.agents.create.bind(f.ctx.agents)
+    f.ctx.agents.create = async options => {
+      const handle = await originalCreate(options)
+      handle.agent.whenIdle = async () => {
+        ownerDisposal = f.ownerCleanup!()
+        // Cordis's first invocation is draining when request cleanup reenters.
+        void ownerDisposal.catch(() => undefined)
+      }
+      return handle
+    }
+    let settled = false
+    const result = requestProposal(f.ctx, request(f.parent, vi.fn()))
+    const observed = result.then(
+      value => { settled = true; return value },
+      error => { settled = true; return error as ProposalAgentError },
+    )
+    try {
+      await started.promise
+      await new Promise<void>(resolve => setImmediate(resolve))
+      expect(settled).toBe(false)
+      expect(f.liveCount()).toBe(1)
+      expect(f.ctx.jobs.list(f.childId.value!)).toMatchObject([{ status: 'running' }])
+      draining.resolve()
+      const outcome = await observed
+      expect(outcome).toMatchObject({ code: disposeFails ? 'dispose-failed' : 'cancelled' })
+      expect(f.dispose).toHaveBeenCalledTimes(1)
+      if (disposeFails) {
+        expect(outcome).toMatchObject({ cause: teardownError })
+        await expect(ownerDisposal).rejects.toBe(teardownError)
+      } else {
+        await ownerDisposal
+        expect(f.liveCount()).toBe(0)
+        expect(f.ctx.jobs.list(f.childId.value!)).toEqual([])
+      }
+    } finally {
+      draining.resolve()
+      await Promise.allSettled([result, ownerDisposal])
+      await owner.fiber.dispose()
+    }
   })
 
 })

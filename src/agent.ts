@@ -298,6 +298,7 @@ export async function requestProposal(ctx: Context, request: ProposalAgentReques
 
   let handle: AgentHandle | undefined
   let disposePromise: Promise<void> | undefined
+  let ownerCancelled = false
   let terminal = false
   let reportCalls = 0
   let pendingReport: WireReport | undefined
@@ -311,6 +312,7 @@ export async function requestProposal(ctx: Context, request: ProposalAgentReques
   }
 
   const releaseOwner = ctx.effect(() => async () => {
+    ownerCancelled = true
     handle?.agent.cancel({ kind: 'parent' })
     await dispose()
   }, 'autoresearch.proposalChild()')
@@ -363,23 +365,28 @@ export async function requestProposal(ctx: Context, request: ProposalAgentReques
       },
     })
 
-    if (request.signal.aborted) {
+    if (request.signal.aborted || ownerCancelled) {
       handle.agent.cancel({ kind: 'parent' })
       throw fail('cancelled', 'Proposal request was cancelled after child publication', request.signal.reason)
     }
     handle.agent.followup(createUserMessage({ content: [{ type: 'text', text: prompt }], source: { kind: 'autoresearch-proposal' } }))
     await handle.agent.whenIdle()
-    if (request.signal.aborted) throw fail('cancelled', 'Proposal request was cancelled', request.signal.reason)
+    if (request.signal.aborted || ownerCancelled) throw fail('cancelled', 'Proposal request was cancelled', request.signal.reason)
     if (reportError !== undefined) throw reportError
     if (reportCalls === 0 || committedReport === undefined) throw fail('report-missing', 'Proposal agent reached idle without one authoritative report')
     if (reportCalls !== 1) throw fail('report-duplicate', 'Proposal agent submitted more than one report')
   } catch (error) {
-    operationError = request.signal.aborted && !(error instanceof ProposalAgentError)
+    operationError = (request.signal.aborted || ownerCancelled) && !(error instanceof ProposalAgentError)
       ? fail('cancelled', 'Proposal request was cancelled', error)
       : error
   } finally {
     request.signal.removeEventListener('abort', abort)
-    try { await releaseOwner() } catch (error) { operationError = fail('dispose-failed', 'Proposal child disposal failed', error) }
+    try {
+      await releaseOwner()
+      // Cordis reentry may return before its first disposer invocation finishes.
+      // The memoized handle disposal is the authoritative teardown barrier.
+      await dispose()
+    } catch (error) { operationError = fail('dispose-failed', 'Proposal child disposal failed', error) }
   }
 
   if (operationError instanceof ProposalAgentError && operationError.code === 'dispose-failed') throw operationError

@@ -95,6 +95,7 @@ From that repository, ask the agent to call:
 - `repository` defaults to the agent's working directory. Use a fresh, Git-safe `run_tag` for each new run.
 - Runs are background jobs by default. Inspect or stop them with `job_list`, `job_output`, and `job_kill`; use `"mode": "foreground"` to wait for completion.
 - Cancellation waits for evaluator cleanup, reconciles the accepted Git state, and releases the run lock only after durable terminal settlement.
+- Plugin unload or hot reload cancels active runs and waits for proposal children and jobs to settle.
 - Optional inputs: `target` (stopping threshold), `timeout_ms` (per-attempt watchdog), and `constraints` (advisory guidance, not acceptance rules).
 - To resume, replace `run_tag` and `evaluator_id` with `resume_run_id` and retain the original run policy. The stored evaluator registration is revalidated before execution.
 
