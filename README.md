@@ -6,7 +6,7 @@ The `autoresearch` tool measures a baseline, lets an agent edit allowed files in
 
 ## Supported versions
 
-For **`dsh-autoresearch@0.2.2`**:
+For **`dsh-autoresearch@0.2.3`**:
 
 | Component | Supported | Tested |
 | --- | --- | --- |
@@ -19,7 +19,7 @@ Tested pairing observed on **2026-09-30**. Use the **scoped Cordis fork**, not u
 ## Install
 
 ```sh
-dsh plugin --profile <name> add dsh-autoresearch@0.2.2
+dsh plugin --profile <name> add dsh-autoresearch@0.2.3
 dsh --profile <name> --dump-config
 ```
 
