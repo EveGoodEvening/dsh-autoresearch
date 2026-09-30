@@ -52,7 +52,7 @@ interface HarnessFixture {
   readonly jobListCallers: SessionId[]
   readonly dispose: ReturnType<typeof vi.fn>
   readonly childId: { value?: ReturnType<typeof SessionId> }
-  behavior: 'valid' | 'missing' | 'unknown' | 'duplicate' | 'stale' | 'wrong' | 'oversized' | 'normalized'
+  behavior: 'valid' | 'missing' | 'unknown' | 'duplicate' | 'stale' | 'stale-nonce' | 'wrong' | 'wrong-experiment' | 'oversized' | 'normalized'
   disposeError?: Error
   liveJob?: boolean
   keepRegistered?: boolean
@@ -151,7 +151,9 @@ function fixture(): HarnessFixture {
           }
           if (harness.behavior === 'unknown') report.metric = 0
           if (harness.behavior === 'stale') report.runId = 'stale-run'
+          if (harness.behavior === 'stale-nonce') report.nonce = `${handoff.identity.nonce.slice(0, -1)}${handoff.identity.nonce.endsWith('0') ? '1' : '0'}`
           if (harness.behavior === 'wrong') report.ordinal = handoff.identity.ordinal + 1
+          if (harness.behavior === 'wrong-experiment') report.experimentId = 'other-experiment'
           if (harness.behavior === 'oversized') report.implementationSummary = 'x'.repeat(40_000)
           if (harness.behavior === 'normalized') report.hypothesis = ' not-normalized'
           const execute = async () => {
@@ -301,12 +303,15 @@ describe('proposal-agent adapter', () => {
 
   it.each([
     ['stale', 'report-stale'],
+    ['stale-nonce', 'report-stale'],
     ['wrong', 'report-wrong-experiment'],
+    ['wrong-experiment', 'report-wrong-experiment'],
     ['oversized', 'report-too-large'],
     ['normalized', 'report-malformed'],
   ] as const)('classifies %s report identity and size failures and disposes once', async (behavior, code) => {
     const f = fixture(); f.behavior = behavior
-    await expect(requestProposal(f.ctx, request(f.parent, vi.fn()))).rejects.toMatchObject({ code })
+    const input = request(f.parent, vi.fn())
+    await expect(requestProposal(f.ctx, { ...input, redactionSecrets: ['0', '1', '4'] })).rejects.toMatchObject({ code })
     expect(f.dispose).toHaveBeenCalledTimes(1)
   })
 
@@ -326,15 +331,30 @@ describe('proposal-agent adapter', () => {
     expect(handoff).not.toHaveProperty('redactionSecrets')
   })
 
-  it.each(['a', 'score', 'run-1', 'final-line-json-v1', 'non-authoritative', 'Keep behavior'])('rejects immutable secret collision %s before creating or publishing a child', async secret => {
-    const f = fixture(); const persist = vi.fn(); const input = request(f.parent, persist)
-    const error = await requestProposal(f.ctx, { ...input, redactionSecrets: [secret], evaluatorContext: { ...input.evaluatorContext, metricName: 'score' } }).catch(error => error)
-    expect(error).toBeInstanceOf(ProposalAgentError)
-    expect(error.code).toBe('handoff-secret-collision')
-    expect(error.cause).toBeUndefined()
-    expect(persist).not.toHaveBeenCalled()
-    expect(f.createOptions).toEqual([])
-    expect(f.prompts).toEqual([])
+  it.each(['1', '0', '4', 'a', 'score', 'run-0', '00000000-0000-4000-8000-000000000000', 'final-line-json-v1', 'non-authoritative', 'Keep behavior', 'minimize', 'maximize'])('accepts the original child report when public metadata overlaps configured value %s', async secret => {
+    const f = fixture(); const input = request(f.parent, vi.fn())
+    const workspace = { repositoryId: 'repo-0', branch: 'autoresearch/run-0', worktree: '/tmp/proposal-worktree-0', startCommit: '0'.repeat(40), acceptedCommit: 'a'.repeat(40) }
+    const runId = '00000000-0000-4000-8000-000000000000'
+    const experimentId = `${runId}:0`
+    const metricDirection = secret === 'maximize' ? 'maximize' : 'minimize'
+    const result = await requestProposal(f.ctx, {
+      ...input, runId, experimentId, workspace, redactionSecrets: [secret],
+      policySha256: '0'.repeat(64), provenanceSha256: '4'.repeat(64),
+      evaluatorContext: { ...input.evaluatorContext, metricName: 'score', metricDirection },
+    })
+    const handoff = JSON.parse(f.prompts[0]!.slice(f.prompts[0]!.indexOf('{')))
+    expect(result).toEqual({ hypothesis: 'Change the hot path', intendedEdits: ['src/hot.ts'], implementationSummary: 'Reduced duplicate work', blockerClaim: null })
+    expect(handoff.identity).toEqual({ runId, experimentId, ordinal: input.ordinal, nonce: expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u) })
+    expect(handoff.workspace).toEqual(workspace)
+    expect(handoff.policySha256).toBe('0'.repeat(64))
+    expect(handoff.provenanceSha256).toBe('4'.repeat(64))
+    expect(handoff.objective).toBe(input.policy.objective)
+    expect(handoff.mutableFiles).toEqual(input.policy.mutableGlobs)
+    expect(handoff.constraints).toEqual(input.policy.constraints)
+    expect(handoff.best).toEqual(input.best)
+    expect(handoff.evaluatorContext).toMatchObject({ metricName: 'score', metricDirection, metricParserVersion: 'final-line-json-v1' })
+    expect(f.liveCount()).toBe(0)
+    expect(f.dispose).toHaveBeenCalledTimes(1)
   })
 
   it('accepts a report copying the original identity and metric while structurally redacting escaped overlapping data secrets', async () => {
@@ -342,6 +362,7 @@ describe('proposal-agent adapter', () => {
     const secret = 'credential-"\\value'; const longer = `${secret}-suffix`
     const result = await requestProposal(f.ctx, {
       ...input, redactionSecrets: [secret, longer],
+      policy: { ...input.policy, evaluation: { command: 'private-evaluator-command', args: ['private-argv-marker', longer] }, environment: { PRIVATE_TOKEN: longer } },
       evaluatorContext: { ...input.evaluatorContext, metricName: 'score', localDatasetFiles: [`datasets/${longer}.json`, `datasets/${secret}.json`] },
       history: [{ ordinal: 0, experimentId: 'prior', state: 'rejected', annotation: { trust: 'untrusted-child-annotation', hypothesis: `${longer} then ${secret}`, intendedEdits: [`src/${secret}.ts`], implementationSummary: `quoted ${longer}` }, hostFacts: { changedPaths: [`src/${longer}.ts`] }, artifacts: 'available' }],
     })
@@ -350,8 +371,13 @@ describe('proposal-agent adapter', () => {
     expect(handoff.identity).toEqual({ runId: input.runId, experimentId: input.experimentId, ordinal: input.ordinal, nonce: expect.stringMatching(/^[0-9a-f-]{36}$/u) })
     expect(handoff.evaluatorContext).toMatchObject({ metricName: 'score', metricDirection: 'minimize', metricParserVersion: 'final-line-json-v1', localDatasetFiles: ['datasets/[REDACTED].json', 'datasets/[REDACTED].json'] })
     expect(handoff.researchMemory[0].untrustedClaims.hypothesis).toBe('[REDACTED] then [REDACTED]')
+    expect(handoff.researchMemory[0].untrustedClaims.intendedEdits).toEqual(['src/[REDACTED].ts'])
+    expect(handoff.researchMemory[0].untrustedClaims.implementationSummary).toBe('quoted [REDACTED]')
     expect(handoff.researchMemory[0].hostFacts.changedPaths).toEqual(['src/[REDACTED].ts'])
     expect(JSON.stringify(handoff)).not.toContain(JSON.stringify(secret).slice(1, -1))
+    expect(JSON.stringify(handoff)).not.toContain('private-evaluator-command')
+    expect(JSON.stringify(handoff)).not.toContain('private-argv-marker')
+    expect(JSON.stringify(handoff)).not.toContain('PRIVATE_TOKEN')
   })
 
   it('redacts before truncating declarations and annotations, and bounds the actual child prompt', async () => {

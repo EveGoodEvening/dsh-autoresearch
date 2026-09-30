@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -10,6 +11,7 @@ import type { EvaluatorPersistence } from '../src/evaluator.ts'
 import { EvaluatorArtifactWriter } from '../src/evaluator-artifacts.ts'
 import { StateLayout } from '../src/state-layout.ts'
 import { normalizeEvaluatorRegistration } from '../src/types.ts'
+import { DurableTracker } from '../src/tracker.ts'
 
 interface FakeOptions {
   stdout?: SubprocessOutputRead
@@ -287,6 +289,49 @@ describe('activated frozen registration files', () => {
 })
 
 describe('host-owned evaluator execution', () => {
+  it.each([
+    ['measured', {}, null, null],
+    ['signal', { signal: 'SIGTERM' as const, exitCode: null }, 'signal', 'evaluator terminated by [REDACTED]'],
+    ['exit', { exitCode: 1 }, 'exit', 'evaluator exited with code [REDACTED]'],
+  ] as const)('preserves typed %s facts and digests through durable outcome consumption', async (kind, runtimeOptions, failureCode, failureMessage) => {
+    const spawnedAt = '2026-09-30T12:01:00.000Z'
+    const exitedAt = '2026-09-30T12:01:01.000Z'
+    const environment = { COLON: ':', NUMBER: '1', CODE: 'signal', SIGNAL: 'SIGTERM' }
+    let clock = 0
+    const setup = options(fakeRuntime(runtimeOptions), { environment, now: () => new Date(clock++ === 0 ? spawnedAt : exitedAt) })
+    const provenance = freezeEvaluatorProvenance(setup.paths.root, {
+      evaluation: setup.value.boundary.normalizedEvaluation,
+      evaluatorFiles: setup.value.boundary.declaredFiles.map(file => file.path),
+      environment, dataset: setup.value.dataset, metricName: setup.value.metricName, metricDirection: setup.value.metricDirection,
+      policy: { normalizedPolicySha256: setup.value.boundary.normalizedPolicySha256, evaluationSha256: setup.value.boundary.evaluationSha256, policy: setup.value.policy },
+    })
+    const tracker = DurableTracker.open(join(setup.paths.artifacts, 'tracker.sqlite'))
+    try {
+      tracker.createRun({ runId: 'run', repositoryId: 'repo', repository: setup.paths.root, gitCommonDir: join(setup.paths.root, '.git'), callerCwd: setup.paths.root, startCommit: 'a'.repeat(40), runTag: 'tag', branch: 'autoresearch/tag', worktree: setup.paths.root, policy: {}, policySha256: 'a'.repeat(64), provenance, provenanceSha256: provenance.sha256 })
+      tracker.transitionRun('run', 'baseline-running')
+      tracker.createExperiment({ experimentId: 'experiment', runId: 'run', ordinal: 0, kind: 'baseline', parentCommit: 'a'.repeat(40), command: 'node', args: ['evaluate.mjs'] })
+      tracker.transitionExperiment('experiment', 'running')
+      const durable: EvaluatorPersistence = {
+        persistSpawnIntent: intent => tracker.createAttemptIntent({ attemptId: 'attempt-1', runId: 'run', experimentId: 'experiment', ordinal: 1 }, intent),
+        persistSpawnObserved: facts => tracker.recordAttemptObserved('attempt-1', facts),
+        persistAttemptOutcome: outcome => {
+          expect(outcome.provenanceSha256).toBe(provenance.sha256)
+          tracker.recordAttemptOutcome('attempt-1', { facts: outcome.exit, artifacts: [], result: outcome.kind === 'measured' ? { kind: 'measured', metric: outcome.metric } : { kind: 'failed', code: outcome.code, message: outcome.message } })
+        },
+      }
+      const result = await runEvaluator({ ...setup.value, persistence: durable })
+      const row = tracker.database.prepare('SELECT * FROM attempts WHERE attempt_id = ?').get('attempt-1')!
+      expect(row).toMatchObject({ spawned_at: spawnedAt, exited_at: exitedAt, exit_code: kind === 'measured' ? 0 : kind === 'exit' ? 1 : null, signal: kind === 'signal' ? 'SIGTERM' : null, timed_out: 0, process_tree_quiescent: 1, failure_code: failureCode, failure_message: failureMessage })
+      expect(result.exit).toMatchObject({ spawnedAt, exitedAt, timedOut: false, cancelled: false, processTreeQuiescent: true })
+      expect(new Date(String(row['exited_at'])).toISOString()).toBe(exitedAt)
+      expect(JSON.parse(String(row['outcome_json']))).toEqual(kind === 'measured' ? { kind: 'measured', metric: 1.5 } : { kind: 'failed', code: failureCode, message: failureMessage })
+      const intent = JSON.parse(String(row['spawn_intent_json'])) as { env: Record<string, string>; provenanceSha256: string }
+      expect(intent.provenanceSha256).toBe(createHash('sha256').update(provenance.canonical).digest('hex'))
+      expect(intent.env).toEqual(Object.fromEntries(Object.entries(environment).map(([key, value]) => [key, `sha256:${createHash('sha256').update(value).digest('hex')}`])))
+      expect(setup.runtime.waited).toBe(1)
+    } finally { tracker.close() }
+  })
+
   it('spawns exact argv/cwd/env, freezes provenance, persists facts in order, and retains bounded artifacts', async () => {
     const setup = options()
     const result = await runEvaluator(setup.value)

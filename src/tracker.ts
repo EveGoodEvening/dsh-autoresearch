@@ -257,7 +257,7 @@ export class DurableTracker {
       if (this.database.prepare(`SELECT 1 FROM experiments WHERE run_id = ? AND state IN ('baseline-pending','running')`).get(record.runId)) throw new TrackerTransitionError('a run may not prepare a candidate while another is unresolved')
       this.insertExperiment(record, at)
       this.database.prepare('UPDATE runs SET state = ?, updated_at = ? WHERE run_id = ?').run('candidate-prepared', at, record.runId)
-      this.insertTransition(record.runId, record.experimentId, 'run', from, 'candidate-prepared', redactExactSecrets(facts, record.redactionSecrets ?? []) as TransitionFacts, at)
+      this.insertTransition(record.runId, record.experimentId, 'run', from, 'candidate-prepared', facts, at)
     })
   }
   recordCandidateCommit(experimentId: string, candidateCommit: string, hostFacts: Omit<HostResearchFacts, 'candidateCommit'> = {}, redactionSecrets: readonly string[] = [], updatedAt = new Date().toISOString()): void {
@@ -764,12 +764,6 @@ function normalizeUntrustedResearchAnnotation(value: UntrustedResearchAnnotation
   if (value.redaction !== undefined && value.redaction !== 'exact-configured-secrets-only') throw new TrackerTransitionError('research annotation redaction semantics are invalid')
   if (!Array.isArray(value.intendedEdits) || value.intendedEdits.length > 64) throw new TrackerTransitionError('intended edits exceed the bounded annotation limit')
   return { trust: value.trust, redaction: 'exact-configured-secrets-only', hypothesis: text(value.hypothesis, 'hypothesis', 4096), intendedEdits: value.intendedEdits.map((item, index) => text(item, `intendedEdits[${index}]`, 512)), implementationSummary: text(value.implementationSummary, 'implementationSummary', 4096) }
-}
-function redactExactSecrets(value: unknown, secrets: readonly string[]): unknown {
-  if (typeof value === 'string') return redactConfiguredSecrets(value, secrets)
-  if (Array.isArray(value)) return value.map(item => redactExactSecrets(item, secrets))
-  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, redactExactSecrets(item, secrets)]))
-  return value
 }
 function normalizeHostResearchFacts(value: HostResearchFacts, secrets: readonly string[] = []): HostResearchFacts {
   const uniquePaths = value.changedPaths === undefined ? undefined : [...new Set(value.changedPaths.map(path => redactConfiguredSecrets(path, secrets)))].sort()

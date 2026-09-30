@@ -35,7 +35,7 @@ export const PROPOSAL_REPORT_TOOL = 'autoresearch_report' as const
 export const PROPOSAL_INHERITED_TOOLS = ['read', 'write', 'edit', 'glob', 'grep'] as const
 
 export type ProposalAgentErrorCode =
-  | 'route-unavailable' | 'capability-unavailable' | 'handoff-too-large' | 'handoff-secret-collision' | 'cancelled'
+  | 'route-unavailable' | 'capability-unavailable' | 'handoff-too-large' | 'cancelled'
   | 'report-missing' | 'report-duplicate' | 'report-malformed' | 'report-stale'
   | 'report-wrong-experiment' | 'report-too-large' | 'not-quiescent' | 'dispose-failed'
 
@@ -216,14 +216,8 @@ function buildPrompt(request: ProposalAgentRequest, nonce: string): string {
     reportContract: 'Report only hypothesis, intended edits, implementation summary, and an optional blocker claim. Never report metrics, status, commands, Git identities, decisions, acceptance, targets, or budgets.',
   }
   const prefix = 'AUTORESEARCH PROPOSAL ROUND\n\n'
-  // Declared paths and prior-round data may be redacted; current authority and
-  // protocol must remain exact. Reject collisions rather than changing either.
-  const immutable = { ...fixed, evaluatorContext: { ...evaluatorContext, evaluatorFiles: [], localDatasetFiles: [] } }
-  const collides = (value: unknown): boolean => typeof value === 'string'
-    ? request.redactionSecrets.some(secret => secret.length > 0 && value.includes(secret))
-    : Array.isArray(value) ? value.some(collides)
-      : value !== null && typeof value === 'object' ? Object.entries(value).some(([key, item]) => collides(key) || collides(item)) : false
-  if (collides([immutable, prefix, REPORT_DESCRIPTION, REPORT_INSTRUCTION, REPORT_SCHEMA, REPORT_OUTPUT_SCHEMA, PROPOSAL_REPORT_TOOL, PROPOSAL_INHERITED_TOOLS, 'truncated', 'older-entries-truncated', 'detail-unavailable-size-limit', '[truncated]', '[REDACTED]'])) throw fail('handoff-secret-collision', 'Configured secret conflicts with required proposal context')
+  // Host-designated public identity, protocol and operational metadata stay exact.
+  // Only declared display paths and prior-round data receive known-value redaction.
   const size = (value: unknown): number => prefix.length + JSON.stringify(value).length
   while (size({ ...fixed, researchMemory: [], historyStatus: 'detail-unavailable-size-limit' }) > request.config.maxHandoffChars && (evaluatorFiles.length > 0 || localDatasetFiles.length > 0)) {
     if (evaluatorFiles.length >= localDatasetFiles.length) { evaluatorFiles.pop(); evaluatorContext.evaluatorFilesStatus = 'truncated' }

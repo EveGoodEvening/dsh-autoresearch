@@ -281,11 +281,11 @@ export async function runEvaluator(options: EvaluatorRunOptions): Promise<Evalua
   })
   const failedOutcome = (code: EvaluatorFailureCode | ControllerAttemptFailureCode, message: string, facts: EvaluatorAttemptFacts): Extract<DurableAttemptOutcome, { kind: 'failed' }> => {
     const safeMessage = redact(message, secrets)
-    const exit = deepFreeze(durableSerialize({ ...facts, failureCode: code, failureMessage: safeMessage }, secrets)) as EvaluatorAttemptFacts
+    const exit = deepFreeze({ ...facts, failureCode: code, failureMessage: safeMessage })
     return deepFreeze({ kind: 'failed', code, message: safeMessage, provenanceSha256: provenance.sha256, exit })
   }
   const measuredOutcome = (metric: number, facts: EvaluatorAttemptFacts): Extract<EvaluatorOutcome, { kind: 'measured' }> => {
-    const exit = deepFreeze(durableSerialize(facts, secrets)) as EvaluatorAttemptFacts
+    const exit = deepFreeze({ ...facts })
     return deepFreeze({ kind: 'measured', metric, provenanceSha256: provenance.sha256, exit })
   }
   const persistOutcome = (outcome: DurableAttemptOutcome, artifacts: readonly EvaluatorArtifactInput[]): EvaluatorResult => {
@@ -293,7 +293,7 @@ export async function runEvaluator(options: EvaluatorRunOptions): Promise<Evalua
     return deepFreeze({ ...outcome, artifacts }) as EvaluatorResult
   }
   const argv = Object.freeze([options.evaluation.command, ...options.evaluation.args])
-  const durableIntent = durableSerialize({ argv, cwd, env: persistedEnv, provenanceSha256: provenance.sha256 }, secrets) as Parameters<EvaluatorPersistence['persistSpawnIntent']>[0]
+  const durableIntent = deepFreeze({ argv: argv.map(value => redact(value, secrets)), cwd: redact(cwd, secrets), env: persistedEnv, provenanceSha256: provenance.sha256 })
   persistSafely(() => options.persistence.persistSpawnIntent(durableIntent), secrets)
   const artifactWriter = options.artifactWriterFactory()
   const controller = new AbortController()

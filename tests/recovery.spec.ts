@@ -331,6 +331,45 @@ describe('recovery nonterminal state matrix with real Git/SQLite', () => {
     } finally { kill.mockRestore(); f.tracker.close() }
   })
 
+  it.each([
+    ['nonterminal', 'c'.repeat(64)],
+    ['nonterminal', '[REDACTED]'],
+    ['terminal', 'c'.repeat(64)],
+    ['terminal', '[REDACTED]'],
+  ] as const)('retains the lock and refuses authority for %s altered attempt provenance %s', async (state, alteredHash) => {
+    const f = await realFixture(); const { tracker, request } = f
+    try {
+      tracker.transitionRun(request.runId, 'baseline-running')
+      tracker.createExperiment({ experimentId: 'baseline', runId: request.runId, ordinal: 0, kind: 'baseline', parentCommit: request.discovery.startCommit, command: 'node', args: [] })
+      tracker.transitionExperiment('baseline', 'running')
+      persistOutcome(tracker, request, 'baseline', 'attempt-1', 1, '', 'failed\n', true)
+      if (state === 'terminal') {
+        tracker.commitTerminalExperiment('baseline', 'crashed', { failureCode: 'exit', failureMessage: 'baseline failed' })
+        tracker.transitionRun(request.runId, 'baseline-blocked', { terminalReason: 'baseline failed', blockedCode: 'exit', quiescent: true })
+      }
+      const trigger = tracker.database.prepare("SELECT sql FROM sqlite_schema WHERE name = 'attempts_immutable_intent'").get()!['sql']
+      tracker.database.exec('DROP TRIGGER attempts_immutable_intent')
+      tracker.database.prepare('UPDATE attempts SET spawn_intent_json = ? WHERE attempt_id = ?').run(JSON.stringify({ provenanceSha256: alteredHash }), 'attempt-1')
+      tracker.database.exec(String(trigger))
+      const before = {
+        run: tracker.getRun(request.runId),
+        transitions: tracker.listTransitions(request.runId),
+        lock: tracker.recoveryState(request.runId).activeLock,
+        attempts: tracker.database.prepare('SELECT * FROM attempts ORDER BY ordinal').all(),
+        spawns: f.subprocess.specs.length,
+      }
+      expect(before.lock).toBeDefined()
+      const first = await reconcileRecovery(f.ctx, request)
+      expect(first).toMatchObject({ kind: 'blocked', code: 'provenance-mismatch', lock: 'retain' })
+      expect(await reconcileRecovery(f.ctx, request)).toEqual(first)
+      expect(tracker.getRun(request.runId)).toEqual(before.run)
+      expect(tracker.listTransitions(request.runId)).toEqual(before.transitions)
+      expect(tracker.recoveryState(request.runId).activeLock).toEqual(before.lock)
+      expect(tracker.database.prepare('SELECT * FROM attempts ORDER BY ordinal').all()).toEqual(before.attempts)
+      expect(f.subprocess.specs.slice(before.spawns).every(spec => spec.argv[0] === request.gitExecutable)).toBe(true)
+    } finally { tracker.close() }
+  })
+
   it('recovers the authoritative metric without reparsing redacted stdout', async () => {
     const f = await realFixture(); f.tracker.transitionRun(f.request.runId, 'baseline-running')
     f.tracker.createExperiment({ experimentId: 'baseline', runId: f.request.runId, ordinal: 0, kind: 'baseline', parentCommit: f.request.discovery.startCommit, command: 'node', args: [] }); f.tracker.transitionExperiment('baseline', 'running')

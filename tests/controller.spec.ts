@@ -1179,6 +1179,56 @@ describe('controller real Git/SQLite outcomes', { timeout: 30_000 }, () => {
   })
 
   it.each([
+    ['numeric', { THREADS: '1', SEED: '2' }],
+    ['colon and timestamp', { DELIMITER: ':', CLOCK_VALUE: '2026-09-03T12:34:56.789Z' }],
+  ] as const)('completes and resumes measured evaluations with allowed %s environment values', async (_label, environment) => {
+    const timestamp = '2026-09-03T12:34:56.789Z'
+    const clock = vi.spyOn(Date.prototype, 'toISOString').mockReturnValue(timestamp)
+    const f = controllerFixture([{ stdout: '{"score":10}\n' }, { stdout: '{"score":9}\n' }], [worktree => writeFileSync(join(worktree, 'src', 'code.ts'), 'export const n = 2\n')])
+    const config = { evaluatorRegistrations: [{ ...evaluatorRegistration, environment }] }
+    const transition = DurableTracker.prototype.transitionRun
+    let interrupted = false
+    const barrier = vi.spyOn(DurableTracker.prototype, 'transitionRun').mockImplementation(function (runId, state, facts, at) {
+      const result = transition.call(this, runId, state, facts, at)
+      if (!interrupted && state === 'ready') { interrupted = true; throw new Error('measured baseline resume barrier') }
+      return result
+    })
+    try {
+      const initial = createCaseController(f, { max_experiments: 1 }, undefined, config)
+      await expect(initial.run()).rejects.toThrow('measured baseline resume barrier')
+      const ready = await initial.ready
+      barrier.mockRestore()
+      await initial.dispose()
+      expect(f.subprocess.evaluatorSpawns).toBe(1)
+      const resumed = await createCaseController(f, { max_experiments: 1 }, ready.runId, config).run()
+      expect(resumed).toMatchObject({ status: 'budget-limited', best: { metric: 9 }, counts: { experimentsStarted: 1, experimentsCompleted: 1, attempts: 2 } })
+      const tracker = DurableTracker.openReadOnly(ready.tracker)
+      try {
+        const run = tracker.getRun(ready.runId)!
+        expect(run['provenance_sha256']).toMatch(/^[0-9a-f]{64}$/u)
+        expect(tracker.database.prepare('SELECT ordinal, kind, state, metric FROM experiments ORDER BY ordinal').all()).toEqual([
+          { ordinal: 0, kind: 'baseline', state: 'accepted', metric: 10 },
+          { ordinal: 1, kind: 'candidate', state: 'accepted', metric: 9 },
+        ])
+        const attempts = tracker.database.prepare('SELECT ordinal, spawn_intent_json, spawned_at, exited_at, exit_code, signal, timed_out, process_tree_quiescent, outcome_json FROM attempts ORDER BY experiment_id').all()
+        expect(attempts).toHaveLength(2)
+        for (const attempt of attempts) {
+          expect(attempt).toMatchObject({ ordinal: 1, spawned_at: timestamp, exited_at: timestamp, exit_code: 0, signal: null, timed_out: 0, process_tree_quiescent: 1 })
+          const intent = JSON.parse(String(attempt['spawn_intent_json'])) as { provenanceSha256: string; env: Record<string, string> }
+          expect(intent.provenanceSha256).toBe(run['provenance_sha256'])
+          expect(intent.env).toEqual(Object.fromEntries(Object.entries(environment).map(([key, value]) => [key, `sha256:${createHash('sha256').update(value).digest('hex')}`])))
+          expect(JSON.parse(String(attempt['outcome_json']))).toMatchObject({ kind: 'measured' })
+        }
+      } finally { tracker.close() }
+      const bytes = readFileSync(ready.tracker)
+      expect(await createCaseController(f, { max_experiments: 1 }, ready.runId, config).run()).toEqual(resumed)
+      expect(readFileSync(ready.tracker).equals(bytes)).toBe(true)
+      expect(f.subprocess.evaluatorSpawns).toBe(2)
+      expect(f.creates).toHaveLength(1)
+    } finally { barrier.mockRestore(); clock.mockRestore(); rmSync(f.root, { recursive: true, force: true }) }
+  })
+
+  it.each([
     ['minimize', 5, 5, 'target-reached'],
     ['maximize', 5, 5, 'target-reached'],
   ] as const)('short-circuits a %s baseline target with artifacts, no child, and zero candidate budget', async (direction, metric, target, status) => {
