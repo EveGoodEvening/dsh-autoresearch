@@ -6,7 +6,7 @@ The `autoresearch` tool measures a baseline, lets an agent edit allowed files in
 
 ## Supported versions
 
-For **`dsh-autoresearch@0.2.1`**:
+For **`dsh-autoresearch@0.2.2`**:
 
 | Component | Supported | Tested |
 | --- | --- | --- |
@@ -14,12 +14,12 @@ For **`dsh-autoresearch@0.2.1`**:
 | Cordis (`@deepseek-ai/cordis`) | **`~4.0.4`** | `4.0.4` |
 | Node.js | `^22.19.0 \|\| >=24.2.0` | `24.21.0` |
 
-Verified on **2026-09-29**. Use the **scoped Cordis fork**, not unscoped `cordis`. DSH is a prerelease pairing; other DSH versions are not declared supported. Daily [upstream compatibility checks](https://github.com/EveGoodEvening/dsh-autoresearch/blob/master/.github/workflows/compatibility.yml) do not automatically expand these ranges.
+Tested pairing observed on **2026-09-30**. Use the **scoped Cordis fork**, not unscoped `cordis`. DSH is a prerelease pairing; other DSH versions are not declared supported. Daily [upstream compatibility checks](https://github.com/EveGoodEvening/dsh-autoresearch/blob/master/.github/workflows/compatibility.yml) do not automatically expand these ranges.
 
 ## Install
 
 ```sh
-dsh plugin --profile <name> add dsh-autoresearch@0.2.1
+dsh plugin --profile <name> add dsh-autoresearch@0.2.2
 dsh --profile <name> --dump-config
 ```
 
