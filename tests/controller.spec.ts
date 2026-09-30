@@ -355,7 +355,7 @@ class IntegrationHandle implements SubprocessHandle {
     this.collected = { stdout: new IntegrationReader(() => Buffer.concat(stdout), outCap), stderr: new IntegrationReader(() => Buffer.concat(stderr), errCap) }
     this.done = new Promise((resolve, reject) => { child.once('error', reject); child.once('close', (exitCode, signal) => { this.exited = true; afterOutcome?.(); resolve({ exitCode, signal }) }) })
   }
-  terminate(): void { if (!this.exited && this.pid > 0) try { process.kill(-this.pid, 'SIGTERM') } catch {} }
+  terminate(signal: NodeJS.Signals = 'SIGTERM'): void { if (!this.exited && this.pid > 0) try { process.kill(-this.pid, signal) } catch {} }
   async waitForExit(): Promise<boolean> { await this.done; return true }
 }
 
@@ -364,6 +364,7 @@ interface MatrixEvaluationStep extends EvaluationStep { spawnError?: Error; stdo
 type GitSpawnFailure = (spec: SubprocessSpawnSpec) => Error | undefined
 class ControllerSubprocess {
   readonly specs: SubprocessSpawnSpec[] = []
+  readonly handles = new Set<IntegrationHandle>()
   evaluatorSpawns = 0
   constructor(private readonly evaluations: EvaluationStep[], private readonly onEvaluatorSpawn?: () => void, private readonly matrixEvaluations = false, private readonly gitSpawnFailure?: GitSpawnFailure) {}
   async resolveExecutable(command: string): Promise<string> { return command === 'git' ? execFileSync('which', ['git']).toString().trim() : command }
@@ -376,7 +377,8 @@ class ControllerSubprocess {
         const child = spawn(process.execPath, ['-e', `process.stderr.write(${JSON.stringify(failure.message)});process.exit(1)`], { cwd: spec.cwd, env: spec.env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] })
         child.stdout.on('data', (chunk: Buffer) => stdout.push(chunk)); child.stderr.on('data', (chunk: Buffer) => stderr.push(chunk))
         const handle = new IntegrationHandle(child, stdout, stderr, typeof spec.stdio.stdout === 'object' ? spec.stdio.stdout.maxBytes : 0, typeof spec.stdio.stderr === 'object' ? spec.stdio.stderr.maxBytes : 0)
-        spec.signal?.addEventListener('abort', () => handle.terminate(), { once: true }); return handle
+        this.handles.add(handle)
+        spec.signal?.addEventListener('abort', () => handle.terminate(), { once: true }); if (spec.signal?.aborted) handle.terminate(); return handle
       }
     }
     if (spec.argv[0] === 'fake-evaluator') {
@@ -392,20 +394,75 @@ class ControllerSubprocess {
       child.stdout.on('data', (chunk: Buffer) => stdout.push(chunk)); child.stderr.on('data', (chunk: Buffer) => stderr.push(chunk))
       const stdoutCap = this.matrixEvaluations && matrixStep.stdoutLimitBytes !== undefined ? matrixStep.stdoutLimitBytes : typeof spec.stdio.stdout === 'object' ? spec.stdio.stdout.maxBytes : 0
       const handle = new IntegrationHandle(child, stdout, stderr, stdoutCap, typeof spec.stdio.stderr === 'object' ? spec.stdio.stderr.maxBytes : 0, afterOutcome)
-      spec.signal?.addEventListener('abort', () => handle.terminate(), { once: true }); return handle
+      this.handles.add(handle)
+      spec.signal?.addEventListener('abort', () => handle.terminate(), { once: true }); if (spec.signal?.aborted) handle.terminate(); return handle
     }
     const stdout: Buffer[] = []; const stderr: Buffer[] = []
     const child = spawn(spec.argv[0]!, spec.argv.slice(1), { cwd: spec.cwd, env: spec.env, detached: true, stdio: [typeof spec.stdio.stdin === 'object' ? 'pipe' : 'ignore', 'pipe', 'pipe'] })
     if (typeof spec.stdio.stdin === 'object') child.stdin.end(spec.stdio.stdin.data)
     child.stdout.on('data', (chunk: Buffer) => stdout.push(chunk)); child.stderr.on('data', (chunk: Buffer) => stderr.push(chunk))
     const handle = new IntegrationHandle(child, stdout, stderr, typeof spec.stdio.stdout === 'object' ? spec.stdio.stdout.maxBytes : 0, typeof spec.stdio.stderr === 'object' ? spec.stdio.stderr.maxBytes : 0)
-    spec.signal?.addEventListener('abort', () => handle.terminate(), { once: true }); return handle
+    this.handles.add(handle)
+    spec.signal?.addEventListener('abort', () => handle.terminate(), { once: true }); if (spec.signal?.aborted) handle.terminate(); return handle
   }
 }
 
 interface ControllerFixture { root: string; ctx: Context; parent: Agent; subprocess: ControllerSubprocess; creates: CreateAgentOptions[]; order: string[]; trackerPath: () => string; liveCount: () => number }
 interface ProposalLifecycle { afterReport?: (worktree: string) => Promise<void> | void; dispose?: () => Promise<void> | void }
 interface MatrixFixtureOptions { capturePrompts?: string[]; receiveHandoff?: (prompt: string) => void; blockerClaim?: string | null; evaluatorFailures?: boolean; gitSpawnFailure?: GitSpawnFailure }
+// Real Git cases may perform several complete start/resume cycles. Keep their
+// operation budget below the case deadline, leaving ten seconds for owned cleanup.
+const realGitFixtures = new Set<ControllerFixture>()
+const fixtureControllers = new WeakMap<ControllerFixture, Set<AutoresearchRunController>>()
+const fixtureDeadlines = new WeakMap<ControllerFixture, NodeJS.Timeout>()
+const closingFixtures = new WeakSet<ControllerFixture>()
+
+function ownFixtureController(f: ControllerFixture, controller: AutoresearchRunController): AutoresearchRunController {
+  fixtureControllers.get(f)!.add(controller)
+  if (closingFixtures.has(f)) controller.cancel('real Git fixture deadline exceeded')
+  return controller
+}
+
+async function drainRealGitFixtures(): Promise<void> {
+  const fixtures = [...realGitFixtures]
+  for (const f of fixtures) {
+    closingFixtures.add(f)
+    clearTimeout(fixtureDeadlines.get(f))
+    for (const controller of fixtureControllers.get(f)!) controller.cancel('real Git fixture cleanup')
+  }
+  // dispose awaits both preparation and run settlement. Drain again if a resumed
+  // controller was allocated by an already-running test continuation.
+  for (const f of fixtures) {
+    let drained = 0
+    const controllers = fixtureControllers.get(f)!
+    while (drained !== controllers.size) {
+      drained = controllers.size
+      await Promise.all([...controllers].map(controller => controller.dispose()))
+    }
+  }
+  // Include direct preflight subprocesses, which have no controller to dispose.
+  // One second of graceful termination, then kill; always await close before
+  // removing the repository or reusing mocks in the next case.
+  for (const f of fixtures) {
+    const handles = [...f.subprocess.handles]
+    for (const handle of handles) handle.terminate()
+    const force = setTimeout(() => { for (const handle of handles) handle.terminate('SIGKILL') }, 1_000)
+    try { await Promise.allSettled(handles.map(handle => handle.done)) }
+    finally { clearTimeout(force) }
+  }
+  // Let rejected assertion continuations execute their finally blocks before
+  // restoring shared prototype spies or allowing another case to capture them.
+  await new Promise<void>(resolve => setImmediate(resolve))
+  vi.restoreAllMocks()
+  for (const f of fixtures) {
+    rmSync(f.root, { recursive: true, force: true })
+    realGitFixtures.delete(f)
+  }
+}
+
+function expectExactBytes(actual: Buffer | null, expected: Buffer | null): void {
+  expect(actual === null ? expected === null : expected !== null && actual.equals(expected)).toBe(true)
+}
 function controllerFixture(evaluations: EvaluationStep[], edits: Array<(worktree: string, ordinal: number) => void> = [], lifecycle: ProposalLifecycle = {}, matrix: MatrixFixtureOptions = {}): ControllerFixture {
   const root = mkdtempSync(join(tmpdir(), 'autoresearch-controller-e2e-'))
   execFileSync('git', ['init', '-b', 'main', root]); execFileSync('git', ['-C', root, 'config', 'user.name', 'Test']); execFileSync('git', ['-C', root, 'config', 'user.email', 'test@example.invalid'])
@@ -426,7 +483,14 @@ function controllerFixture(evaluations: EvaluationStep[], edits: Array<(worktree
   }
   const ctx = Object.assign(parentCtx as unknown as Record<string, unknown>, { subprocess, agents, jobs: { list: () => [] as JobView[] } }) as unknown as Context
   parentAgent.ctx = ctx
-  return { root, ctx, parent: parentAgent, subprocess, creates, order, trackerPath: () => lastTracker, liveCount: () => live.size }
+  const fixture = { root, ctx, parent: parentAgent, subprocess, creates, order, trackerPath: () => lastTracker, liveCount: () => live.size }
+  realGitFixtures.add(fixture)
+  fixtureControllers.set(fixture, new Set())
+  fixtureDeadlines.set(fixture, setTimeout(() => {
+    closingFixtures.add(fixture)
+    for (const controller of fixtureControllers.get(fixture)!) controller.cancel('real Git fixture deadline exceeded')
+  }, 20_000))
+  return fixture
 }
 function matrixControllerFixture(evaluations: MatrixEvaluationStep[], edits: Array<(worktree: string, ordinal: number) => void> = [], options: Omit<MatrixFixtureOptions, 'capturePrompts' | 'evaluatorFailures'> = {}) {
   const prompts: string[] = []
@@ -443,12 +507,12 @@ function createCaseController(f: ControllerFixture, overrides: Partial<typeof in
   const { metric_direction: hostDirection, ...toolOverrides } = overrides
   const identity = resumeRunId ? { resume_run_id: resumeRunId } : { run_tag: input.run_tag, evaluator_id: input.evaluator_id }
   const registration = { ...evaluatorRegistration, metricDirection: hostDirection === 'maximize' ? 'maximize' as const : 'minimize' as const }
-  return new AutoresearchRunController(f.ctx, {
+  return ownFixtureController(f, new AutoresearchRunController(f.ctx, {
     config: resolveConfig({ stateRoot: '.autoresearch-test', cleanupWorktreesOnSuccess: false, retainWorktrees: true, exportTsv: false, evaluatorRegistrations: [registration], ...configOverrides }),
     input: { ...baseInput, ...identity, repository: f.root, mutable_globs: ['src/**'], ...toolOverrides } as never,
     parent: f.parent,
     signal: new AbortController().signal,
-  })
+  }))
 }
 
 function candidateAuditCommits(root: string, runId: string): string[] {
@@ -493,15 +557,15 @@ function registrationResumeEffects(f: ControllerFixture, ready: AutoresearchRunR
   }
   expect(before.claims).toEqual([])
   return () => {
-    expect(readFileSync(ready.tracker)).toEqual(before.tracker)
+    expect(readFileSync(ready.tracker).equals(before.tracker)).toBe(true)
     const inspection = DurableTracker.openReadOnly(ready.tracker)
     expect(inspection.listTransitions(ready.runId)).toHaveLength(transitionCount)
     inspection.close()
     expect(controllerClaims(gitCommonDir, ready.runId)).toEqual(before.claims)
-    if (before.authority !== undefined) expect(readFileSync(authorityPath)).toEqual(before.authority)
-    expect(execFileSync('git', ['-C', ready.worktree, 'rev-parse', 'HEAD'])).toEqual(before.head)
-    expect(execFileSync('git', ['-C', f.root, 'show-ref'])).toEqual(before.refs)
-    expect(execFileSync('git', ['-C', ready.worktree, 'status', '--porcelain=v1'])).toEqual(before.status)
+    if (before.authority !== undefined) expect(readFileSync(authorityPath).equals(before.authority)).toBe(true)
+    expect(execFileSync('git', ['-C', ready.worktree, 'rev-parse', 'HEAD']).equals(before.head)).toBe(true)
+    expect(execFileSync('git', ['-C', f.root, 'show-ref']).equals(before.refs)).toBe(true)
+    expect(execFileSync('git', ['-C', ready.worktree, 'status', '--porcelain=v1']).equals(before.status)).toBe(true)
     expect(f.subprocess.evaluatorSpawns).toBe(before.evaluatorSpawns)
     expect(f.creates).toHaveLength(before.childCount)
   }
@@ -602,7 +666,8 @@ async function expectRegistrationResumeRejected(mode: 'nonterminal' | 'terminal'
   } finally { await cleanup() }
 }
 
-describe('controller real Git/SQLite outcomes', () => {
+describe('controller real Git/SQLite outcomes', { timeout: 30_000 }, () => {
+  afterEach(drainRealGitFixtures, 10_000)
   it('activates Host registration authority and atomically persists its identity', async () => {
     const f = controllerFixture([{ stdout: '{"score":1}\n' }])
     const controller = createCaseController(f)
@@ -640,7 +705,7 @@ describe('controller real Git/SQLite outcomes', () => {
       const trackerBytes = readFileSync(ready.tracker); const discoveryStart = f.subprocess.specs.length; const creates = f.creates.length
       const resumed = createCaseController(f, { repository: external.root }, ready.runId)
       await expect(resumed.run()).rejects.toMatchObject({ code: 'repository-target-outside-parent' })
-      expect(readFileSync(ready.tracker)).toEqual(trackerBytes)
+      expect(readFileSync(ready.tracker).equals(trackerBytes)).toBe(true)
       expect(f.subprocess.specs.slice(discoveryStart).every(spec => spec.cwd === f.root)).toBe(true)
       expect(f.creates).toHaveLength(creates)
       expect(existsSync(join(external.root, '.git', '.autoresearch-test'))).toBe(false)
@@ -718,8 +783,8 @@ describe('controller real Git/SQLite outcomes', () => {
       const sidecarExistenceBefore = [`${ready.tracker}-wal`, `${ready.tracker}-shm`].map(existsSync)
       const resumed = await createCaseController(f, { max_experiments: 1, target: 1 }, ready.runId).run()
       expect(resumed).toMatchObject({ evidence: [expect.objectContaining({ code: 'provenance-mismatch' })] })
-      expect(readFileSync(ready.tracker)).toEqual(bytesBefore)
-      expect(existsSync(`${ready.tracker}-wal`) ? readFileSync(`${ready.tracker}-wal`) : null).toEqual(walBefore)
+      expectExactBytes(readFileSync(ready.tracker), bytesBefore)
+      expectExactBytes(existsSync(`${ready.tracker}-wal`) ? readFileSync(`${ready.tracker}-wal`) : null, walBefore)
       expect([`${ready.tracker}-wal`, `${ready.tracker}-shm`].map(existsSync)).toEqual(sidecarExistenceBefore)
       const inspection = DurableTracker.openReadOnly(ready.tracker)
       expect(inspection.schemaVersion()).toBe(versionBefore)
@@ -755,8 +820,8 @@ describe('controller real Git/SQLite outcomes', () => {
       const sidecarExistenceBefore = [`${trackerPath}-wal`, `${trackerPath}-shm`].map(existsSync)
       const resumed = await createCaseController(f, {}, first.ready.runId).run()
       expect(resumed).toMatchObject({ evidence: [expect.objectContaining({ code: 'registration-corrupt' })] })
-      expect(readFileSync(trackerPath)).toEqual(bytesBefore)
-      expect(existsSync(`${trackerPath}-wal`) ? readFileSync(`${trackerPath}-wal`) : null).toEqual(walBefore)
+      expectExactBytes(readFileSync(trackerPath), bytesBefore)
+      expectExactBytes(existsSync(`${trackerPath}-wal`) ? readFileSync(`${trackerPath}-wal`) : null, walBefore)
       expect([`${trackerPath}-wal`, `${trackerPath}-shm`].map(existsSync)).toEqual(sidecarExistenceBefore)
       const inspection = DurableTracker.openReadOnly(trackerPath)
       expect(inspection.schemaVersion()).toBe(versionBefore)
@@ -1003,7 +1068,7 @@ describe('controller real Git/SQLite outcomes', () => {
       const before = readFileSync(first.ready.tracker)
       const replay = await createCaseController(f, {}, first.ready.runId, { evaluatorRegistrations: [] }).run()
       expect(replay).toMatchObject({ status: 'blocked', evidence: [{ code: 'artifact-incomplete' }] })
-      expect(readFileSync(first.ready.tracker)).toEqual(before)
+      expectExactBytes(readFileSync(first.ready.tracker), before)
       expect(f.subprocess.evaluatorSpawns).toBe(1)
     } finally { rmSync(f.root, { recursive: true, force: true }) }
   })
@@ -1095,8 +1160,8 @@ describe('controller real Git/SQLite outcomes', () => {
 
       const resumed = await createCaseController(f, {}, first.ready.runId, { evaluatorRegistrations: [] }).run()
       expect(resumed).toMatchObject({ status: 'blocked', evidence: [expect.objectContaining({ code: 'legacy-evaluator-policy-unsupported' })] })
-      expect(readFileSync(trackerPath)).toEqual(bytesBefore)
-      expect(existsSync(`${trackerPath}-wal`) ? readFileSync(`${trackerPath}-wal`) : null).toEqual(walBefore)
+      expectExactBytes(readFileSync(trackerPath), bytesBefore)
+      expectExactBytes(existsSync(`${trackerPath}-wal`) ? readFileSync(`${trackerPath}-wal`) : null, walBefore)
       expect([`${trackerPath}-wal`, `${trackerPath}-shm`].map(existsSync)).toEqual(sidecarExistenceBefore)
       const inspection = DurableTracker.openReadOnly(trackerPath)
       expect({
@@ -1222,7 +1287,7 @@ describe('controller real Git/SQLite outcomes', () => {
     const f = controllerFixture([])
     const close = vi.spyOn(DurableTracker.prototype, 'close')
     try {
-      const controller = new AutoresearchRunController(f.ctx, { config: resolveConfig({ stateRoot: '.autoresearch-test', cleanupWorktreesOnSuccess: false, retainWorktrees: true, exportTsv: false, evaluatorRegistrations: [evaluatorRegistration] }), input: { ...input, repository: f.root }, parent: f.parent, signal: new AbortController().signal })
+      const controller = ownFixtureController(f, new AutoresearchRunController(f.ctx, { config: resolveConfig({ stateRoot: '.autoresearch-test', cleanupWorktreesOnSuccess: false, retainWorktrees: true, exportTsv: false, evaluatorRegistrations: [evaluatorRegistration] }), input: { ...input, repository: f.root }, parent: f.parent, signal: new AbortController().signal }))
       const prepared = await controller.prepare('autoresearch-7')
       const tracker = DurableTracker.open(prepared.tracker)
       expect(tracker.database.prepare("SELECT outcome_json FROM transitions WHERE run_id = ? AND outcome_json IS NOT NULL ORDER BY sequence DESC LIMIT 1").get(prepared.runId)?.['outcome_json']).toContain('autoresearch-7')
@@ -1256,7 +1321,7 @@ describe('controller real Git/SQLite outcomes', () => {
   it.each(['missing-cancellation', 'duplicate-cancellation', 'malformed-cancellation', 'missing-creation', 'malformed-creation', 'duplicate-creation'] as const)('read-only blocks initializing cancellation with %s evidence before claim, recovery, retention, mutation, or spawn', async fault => {
     const f = controllerFixture([])
     try {
-      const controller = new AutoresearchRunController(f.ctx, { config: resolveConfig({ stateRoot: '.autoresearch-test', cleanupWorktreesOnSuccess: false, retainWorktrees: true, exportTsv: false, evaluatorRegistrations: [evaluatorRegistration] }), input: { ...input, repository: f.root }, parent: f.parent, signal: new AbortController().signal })
+      const controller = ownFixtureController(f, new AutoresearchRunController(f.ctx, { config: resolveConfig({ stateRoot: '.autoresearch-test', cleanupWorktreesOnSuccess: false, retainWorktrees: true, exportTsv: false, evaluatorRegistrations: [evaluatorRegistration] }), input: { ...input, repository: f.root }, parent: f.parent, signal: new AbortController().signal }))
       const prepared = await controller.prepare(`corrupt-${fault}`)
       controller.cancel('terminal preflight corruption')
       await controller.run()
@@ -1284,10 +1349,10 @@ describe('controller real Git/SQLite outcomes', () => {
       const resumed = await createCaseController(f, {}, prepared.runId).run()
       expect(resumed).toMatchObject({ status: 'round-failed', evidence: [expect.objectContaining({ code: 'state-ambiguous' })] })
       expect('best' in resumed).toBe(false)
-      expect(readFileSync(prepared.tracker)).toEqual(durableBefore)
-      expect(existsSync(`${prepared.tracker}-wal`) ? readFileSync(`${prepared.tracker}-wal`) : null).toEqual(walBefore)
+      expectExactBytes(readFileSync(prepared.tracker), durableBefore)
+      expectExactBytes(existsSync(`${prepared.tracker}-wal`) ? readFileSync(`${prepared.tracker}-wal`) : null, walBefore)
       expect([`${prepared.tracker}-wal`, `${prepared.tracker}-shm`].map(existsSync)).toEqual(sidecarsBefore)
-      expect(readFileSync(authorityPath)).toEqual(authorityBefore)
+      expectExactBytes(readFileSync(authorityPath), authorityBefore)
       expect(existsSync(artifactRoot) ? readdirSync(artifactRoot, { recursive: true }).map(String).sort() : []).toEqual(artifactsBefore)
       expect(f.subprocess.evaluatorSpawns).toBe(evaluatorSpawns)
       expect(f.creates).toHaveLength(childCount)
@@ -1635,8 +1700,8 @@ describe('controller real Git/SQLite outcomes', () => {
       const artifactsBefore = readdirSync(artifactRoot, { recursive: true }).map(String).sort()
       const resumed = await createCaseController(f, { max_experiments: 1 }, ready.runId).run()
       expect(resumed).toMatchObject({ status: 'blocked', evidence: [expect.objectContaining({ code: 'artifact-incomplete' })] })
-      expect(readFileSync(ready.tracker)).toEqual(durableBefore)
-      expect(readFileSync(authorityPath)).toEqual(authorityBefore)
+      expectExactBytes(readFileSync(ready.tracker), durableBefore)
+      expectExactBytes(readFileSync(authorityPath), authorityBefore)
       expect(readdirSync(artifactRoot, { recursive: true }).map(String).sort()).toEqual(artifactsBefore)
     } finally { rmSync(f.root, { recursive: true, force: true }) }
   })
@@ -2133,7 +2198,7 @@ describe('controller real Git/SQLite outcomes', () => {
       return transitionId
     })
     try {
-      controller = new AutoresearchRunController(f.ctx, { config: resolveConfig({ stateRoot: '.autoresearch-test', cleanupWorktreesOnSuccess: false, retainWorktrees: true, exportTsv: false, evaluatorRegistrations: [evaluatorRegistration] }), input: { ...input, repository: f.root, mutable_globs: ['src/**'] }, parent: f.parent, signal: new AbortController().signal })
+      controller = ownFixtureController(f, new AutoresearchRunController(f.ctx, { config: resolveConfig({ stateRoot: '.autoresearch-test', cleanupWorktreesOnSuccess: false, retainWorktrees: true, exportTsv: false, evaluatorRegistrations: [evaluatorRegistration] }), input: { ...input, repository: f.root, mutable_globs: ['src/**'] }, parent: f.parent, signal: new AbortController().signal }))
       const result = await controller.run()
       const ready = await controller.ready
       const tracker = DurableTracker.open(ready.tracker)
@@ -2219,9 +2284,9 @@ describe('controller real Git/SQLite outcomes', () => {
     try {
       const config = resolveConfig({ stateRoot: '.autoresearch-test', cleanupWorktreesOnSuccess: false, retainWorktrees: true, exportTsv: false, evaluatorRegistrations: [evaluatorRegistration] })
       const signal = new AbortController().signal
-      const controller = new AutoresearchRunController(f.ctx, {
+      const controller = ownFixtureController(f, new AutoresearchRunController(f.ctx, {
         config, input: { ...input, repository: f.root, timeout_ms: 1_000 }, parent: f.parent, signal,
-      })
+      }))
       const result = await controller.run()
       const ready = await controller.ready
       const tracker = DurableTracker.open(ready.tracker)

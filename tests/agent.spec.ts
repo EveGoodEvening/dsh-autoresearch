@@ -326,6 +326,34 @@ describe('proposal-agent adapter', () => {
     expect(handoff).not.toHaveProperty('redactionSecrets')
   })
 
+  it.each(['a', 'score', 'run-1', 'final-line-json-v1', 'non-authoritative', 'Keep behavior'])('rejects immutable secret collision %s before creating or publishing a child', async secret => {
+    const f = fixture(); const persist = vi.fn(); const input = request(f.parent, persist)
+    const error = await requestProposal(f.ctx, { ...input, redactionSecrets: [secret], evaluatorContext: { ...input.evaluatorContext, metricName: 'score' } }).catch(error => error)
+    expect(error).toBeInstanceOf(ProposalAgentError)
+    expect(error.code).toBe('handoff-secret-collision')
+    expect(error.cause).toBeUndefined()
+    expect(persist).not.toHaveBeenCalled()
+    expect(f.createOptions).toEqual([])
+    expect(f.prompts).toEqual([])
+  })
+
+  it('accepts a report copying the original identity and metric while structurally redacting escaped overlapping data secrets', async () => {
+    const f = fixture(); const input = request(f.parent, vi.fn())
+    const secret = 'credential-"\\value'; const longer = `${secret}-suffix`
+    const result = await requestProposal(f.ctx, {
+      ...input, redactionSecrets: [secret, longer],
+      evaluatorContext: { ...input.evaluatorContext, metricName: 'score', localDatasetFiles: [`datasets/${longer}.json`, `datasets/${secret}.json`] },
+      history: [{ ordinal: 0, experimentId: 'prior', state: 'rejected', annotation: { trust: 'untrusted-child-annotation', hypothesis: `${longer} then ${secret}`, intendedEdits: [`src/${secret}.ts`], implementationSummary: `quoted ${longer}` }, hostFacts: { changedPaths: [`src/${longer}.ts`] }, artifacts: 'available' }],
+    })
+    const handoff = JSON.parse(f.prompts[0]!.slice(f.prompts[0]!.indexOf('{')))
+    expect(result).toEqual({ hypothesis: 'Change the hot path', intendedEdits: ['src/hot.ts'], implementationSummary: 'Reduced duplicate work', blockerClaim: null })
+    expect(handoff.identity).toEqual({ runId: input.runId, experimentId: input.experimentId, ordinal: input.ordinal, nonce: expect.stringMatching(/^[0-9a-f-]{36}$/u) })
+    expect(handoff.evaluatorContext).toMatchObject({ metricName: 'score', metricDirection: 'minimize', metricParserVersion: 'final-line-json-v1', localDatasetFiles: ['datasets/[REDACTED].json', 'datasets/[REDACTED].json'] })
+    expect(handoff.researchMemory[0].untrustedClaims.hypothesis).toBe('[REDACTED] then [REDACTED]')
+    expect(handoff.researchMemory[0].hostFacts.changedPaths).toEqual(['src/[REDACTED].ts'])
+    expect(JSON.stringify(handoff)).not.toContain(JSON.stringify(secret).slice(1, -1))
+  })
+
   it('redacts before truncating declarations and annotations, and bounds the actual child prompt', async () => {
     const f = fixture(); const input = request(f.parent, vi.fn()); const secret = 'configured-secret-value'
     const paths = Array.from({ length: 100 }, (_, index) => `datasets/${index}/${'x'.repeat(240)}${secret}.json`)

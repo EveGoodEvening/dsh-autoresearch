@@ -35,7 +35,7 @@ export const PROPOSAL_REPORT_TOOL = 'autoresearch_report' as const
 export const PROPOSAL_INHERITED_TOOLS = ['read', 'write', 'edit', 'glob', 'grep'] as const
 
 export type ProposalAgentErrorCode =
-  | 'route-unavailable' | 'capability-unavailable' | 'handoff-too-large' | 'cancelled'
+  | 'route-unavailable' | 'capability-unavailable' | 'handoff-too-large' | 'handoff-secret-collision' | 'cancelled'
   | 'report-missing' | 'report-duplicate' | 'report-malformed' | 'report-stale'
   | 'report-wrong-experiment' | 'report-too-large' | 'not-quiescent' | 'dispose-failed'
 
@@ -130,6 +130,9 @@ const REPORT_OUTPUT_SCHEMA: JsonSchemaNode = {
   type: 'object', additionalProperties: false, required: ['accepted'], properties: { accepted: { type: 'boolean' } },
 }
 
+const REPORT_DESCRIPTION = 'Submit the single authoritative proposal report for this round. Call exactly once, after all edits are complete.'
+const REPORT_INSTRUCTION = 'After completing all permitted edits, call autoresearch_report exactly once. Its identity fields must exactly match the AUTORESEARCH PROPOSAL ROUND handoff. The tool call is terminal; do no work after it.'
+
 function fail(code: ProposalAgentErrorCode, message: string, cause?: unknown): ProposalAgentError {
   return new ProposalAgentError(code, message, cause)
 }
@@ -189,7 +192,7 @@ function buildPrompt(request: ProposalAgentRequest, nonce: string): string {
   const evaluatorFiles = paths(context.evaluatorFiles)
   const localDatasetFiles = paths(context.localDatasetFiles)
   const evaluatorContext = {
-    metricName: redact(context.metricName), metricDirection: context.metricDirection, metricParserVersion: context.metricParserVersion,
+    metricName: context.metricName, metricDirection: context.metricDirection, metricParserVersion: context.metricParserVersion,
     metricProtocol: 'Host parses the named finite scalar from the final stdout JSON line; strict improvement only; ties reject.',
     protection: 'Declared paths are policy-protected, not an OS sandbox.',
     evaluatorFiles, localDatasetFiles,
@@ -213,7 +216,15 @@ function buildPrompt(request: ProposalAgentRequest, nonce: string): string {
     reportContract: 'Report only hypothesis, intended edits, implementation summary, and an optional blocker claim. Never report metrics, status, commands, Git identities, decisions, acceptance, targets, or budgets.',
   }
   const prefix = 'AUTORESEARCH PROPOSAL ROUND\n\n'
-  const size = (value: unknown): number => prefix.length + JSON.stringify(project(value)).length
+  // Declared paths and prior-round data may be redacted; current authority and
+  // protocol must remain exact. Reject collisions rather than changing either.
+  const immutable = { ...fixed, evaluatorContext: { ...evaluatorContext, evaluatorFiles: [], localDatasetFiles: [] } }
+  const collides = (value: unknown): boolean => typeof value === 'string'
+    ? request.redactionSecrets.some(secret => secret.length > 0 && value.includes(secret))
+    : Array.isArray(value) ? value.some(collides)
+      : value !== null && typeof value === 'object' ? Object.entries(value).some(([key, item]) => collides(key) || collides(item)) : false
+  if (collides([immutable, prefix, REPORT_DESCRIPTION, REPORT_INSTRUCTION, REPORT_SCHEMA, REPORT_OUTPUT_SCHEMA, PROPOSAL_REPORT_TOOL, PROPOSAL_INHERITED_TOOLS, 'truncated', 'older-entries-truncated', 'detail-unavailable-size-limit', '[truncated]', '[REDACTED]'])) throw fail('handoff-secret-collision', 'Configured secret conflicts with required proposal context')
+  const size = (value: unknown): number => prefix.length + JSON.stringify(value).length
   while (size({ ...fixed, researchMemory: [], historyStatus: 'detail-unavailable-size-limit' }) > request.config.maxHandoffChars && (evaluatorFiles.length > 0 || localDatasetFiles.length > 0)) {
     if (evaluatorFiles.length >= localDatasetFiles.length) { evaluatorFiles.pop(); evaluatorContext.evaluatorFilesStatus = 'truncated' }
     else { localDatasetFiles.pop(); evaluatorContext.localDatasetFilesStatus = 'truncated' }
@@ -228,7 +239,7 @@ function buildPrompt(request: ProposalAgentRequest, nonce: string): string {
   }
   if (researchMemory.length < request.history.length && historyStatus === 'complete') historyStatus = 'older-entries-truncated'
   const handoff = { ...fixed, researchMemory, historyStatus }
-  const json = JSON.stringify(project(handoff))
+  const json = JSON.stringify(handoff)
   if (prefix.length + json.length > request.config.maxHandoffChars) throw fail('handoff-too-large', `Proposal handoff fixed context exceeds ${request.config.maxHandoffChars} serialized characters`)
   return `${prefix}${json}`
 }
@@ -258,7 +269,7 @@ function resolvedRoute(request: ProposalAgentRequest, childDepth: number): Agent
 function reportTool(execute: ToolDefinition['execute']): ToolDefinition {
   return {
     name: PROPOSAL_REPORT_TOOL,
-    description: 'Submit the single authoritative proposal report for this round. Call exactly once, after all edits are complete.',
+    description: REPORT_DESCRIPTION,
     parameters: REPORT_SCHEMA,
     output: {
       schema: REPORT_OUTPUT_SCHEMA,
@@ -344,7 +355,7 @@ export async function requestProposal(ctx: Context, request: ProposalAgentReques
         childCtx.systemPrompt.section({
           name: 'tool:autoresearch_report',
           order: 190,
-          text: 'After completing all permitted edits, call autoresearch_report exactly once. Its identity fields must exactly match the AUTORESEARCH PROPOSAL ROUND handoff. The tool call is terminal; do no work after it.',
+          text: REPORT_INSTRUCTION,
         })
         childCtx.tools.guard((execution) => {
           if (!terminal) return undefined
