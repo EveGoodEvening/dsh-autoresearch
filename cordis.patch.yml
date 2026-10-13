@@ -1,0 +1,27 @@
+- insert:
+    - id: autoresearch
+      name: dsh-autoresearch
+      config:
+        gitExecutable: git
+        gitTimeoutMs: 900000
+        gitMaxStdoutBytes: 1048576
+        gitMaxStderrBytes: 1048576
+        stateRoot: dsh-autoresearch
+        branchPrefix: autoresearch/
+        defaultMaxExperiments: 20
+        maxExperiments: 100
+        maxHandoffChars: 16384
+        maxResultChars: 16384
+        maxStdoutBytes: 1048576
+        maxStderrBytes: 1048576
+        defaultTimeoutMs: 900000
+        maxTimeoutMs: 3600000
+        terminationGraceMs: 5000
+        maxActiveRunsPerRepository: 1
+        artifactRetentionDays: 30
+        retainFailedArtifacts: true
+        retainWorktrees: true
+        cleanupWorktreesOnSuccess: false
+        exportTsv: true
+        evaluatorRegistrations: []
+        tsvRetentionDays: 30

@@ -1,0 +1,321 @@
+import z from '@deepseek-ai/schemastery'
+import { normalizeEvaluatorRegistration, normalizeRegistrationEnvironment as normalizeSharedRegistrationEnvironment, type ActivationAutoresearchToolInput, type EvaluatorRegistration, type NormalizedRunPolicy } from './types.js'
+
+export interface EvaluatorRegistrationConfig {
+  id: string
+  command: string
+  args: string[]
+  cwd?: string
+  environment?: Record<string, string>
+  metricName: string
+  metricDirection: 'minimize' | 'maximize'
+  metricParserVersion: 'final-line-json-v1'
+  evaluatorFiles: string[]
+  dataset?:
+    | { kind: 'none' }
+    | { kind: 'local'; files: string[]; identity?: string }
+    | { kind: 'external'; digest: string; identity?: string }
+}
+
+export interface HostEvaluatorRegistration extends EvaluatorRegistration {
+  readonly metricParserVersion: 'final-line-json-v1'
+}
+
+export interface EvaluatorRegistry {
+  readonly registrations: readonly HostEvaluatorRegistration[]
+  resolve(evaluatorId: string): HostEvaluatorRegistration
+}
+export interface Config {
+  provider?: string
+  model?: string
+  maxTokens?: number
+  gitExecutable?: string
+  gitTimeoutMs?: number
+  gitMaxStdoutBytes?: number
+  gitMaxStderrBytes?: number
+  stateRoot?: string
+  branchPrefix?: string
+  defaultMaxExperiments?: number
+  maxExperiments?: number
+  maxHandoffChars?: number
+  maxResultChars?: number
+  maxStdoutBytes?: number
+  maxStderrBytes?: number
+  defaultTimeoutMs?: number
+  maxTimeoutMs?: number
+  terminationGraceMs?: number
+  maxActiveRunsPerRepository?: number
+  artifactRetentionDays?: number
+  retainFailedArtifacts?: boolean
+  retainWorktrees?: boolean
+  cleanupWorktreesOnSuccess?: boolean
+  exportTsv?: boolean
+  tsvRetentionDays?: number
+  evaluatorRegistrations?: EvaluatorRegistrationConfig[]
+}
+
+export interface ResolvedConfig {
+  readonly provider?: string
+  readonly model?: string
+  readonly maxTokens?: number
+  readonly gitExecutable: string
+  readonly gitTimeoutMs: number
+  readonly gitMaxStdoutBytes: number
+  readonly gitMaxStderrBytes: number
+  readonly stateRoot: string
+  readonly branchPrefix: string
+  readonly defaultMaxExperiments: number
+  readonly maxExperiments: number
+  readonly maxHandoffChars: number
+  readonly maxResultChars: number
+  readonly maxStdoutBytes: number
+  readonly maxStderrBytes: number
+  readonly defaultTimeoutMs: number
+  readonly maxTimeoutMs: number
+  readonly terminationGraceMs: number
+  readonly maxActiveRunsPerRepository: number
+  readonly artifactRetentionDays: number
+  readonly retainFailedArtifacts: boolean
+  readonly retainWorktrees: boolean
+  readonly cleanupWorktreesOnSuccess: boolean
+  readonly exportTsv: boolean
+  readonly tsvRetentionDays: number
+  readonly evaluatorRegistry: EvaluatorRegistry
+}
+
+export const DEFAULT_CONFIG: ResolvedConfig = deepFreeze({
+  gitExecutable: 'git',
+  gitTimeoutMs: 900_000,
+  gitMaxStdoutBytes: 1_048_576,
+  gitMaxStderrBytes: 1_048_576,
+  stateRoot: 'dsh-autoresearch',
+  branchPrefix: 'autoresearch/',
+  defaultMaxExperiments: 20,
+  maxExperiments: 100,
+  maxHandoffChars: 16_384,
+  maxResultChars: 16_384,
+  maxStdoutBytes: 1_048_576,
+  maxStderrBytes: 1_048_576,
+  defaultTimeoutMs: 900_000,
+  maxTimeoutMs: 3_600_000,
+  terminationGraceMs: 5_000,
+  maxActiveRunsPerRepository: 1,
+  artifactRetentionDays: 30,
+  retainFailedArtifacts: true,
+  retainWorktrees: true,
+  cleanupWorktreesOnSuccess: false,
+  exportTsv: true,
+  tsvRetentionDays: 30,
+  evaluatorRegistry: createEvaluatorRegistry([]),
+})
+
+// Node timers clamp larger delays to 1 ms instead of preserving the requested timeout.
+const MAX_GIT_TIMEOUT_MS = 2_147_483_647
+
+const positive = () => z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER)
+
+/** Loader-time deployment schema. Independent defaults are explicit because patch rows replace whole configs. */
+export const Config: z<Config> = z.object({
+  provider: z.string(),
+  model: z.string(),
+  maxTokens: positive(),
+  gitExecutable: z.string().default(DEFAULT_CONFIG.gitExecutable),
+  gitTimeoutMs: z.number().step(1).min(1).max(MAX_GIT_TIMEOUT_MS).default(DEFAULT_CONFIG.gitTimeoutMs),
+  gitMaxStdoutBytes: positive().default(DEFAULT_CONFIG.gitMaxStdoutBytes),
+  gitMaxStderrBytes: positive().default(DEFAULT_CONFIG.gitMaxStderrBytes),
+  stateRoot: z.string().default(DEFAULT_CONFIG.stateRoot).description('Private state storage root; generated run workspace paths are intentional public operational metadata disclosed to proposal children. Keep credentials out of public paths.'),
+  branchPrefix: z.string().default(DEFAULT_CONFIG.branchPrefix).description('Prefix for generated run branches, disclosed exactly to proposal children as public operational identity. Host must not include credentials.'),
+  defaultMaxExperiments: positive(),
+  maxExperiments: positive().default(DEFAULT_CONFIG.maxExperiments),
+  maxHandoffChars: positive().default(DEFAULT_CONFIG.maxHandoffChars),
+  maxResultChars: positive().default(DEFAULT_CONFIG.maxResultChars),
+  maxStdoutBytes: positive().default(DEFAULT_CONFIG.maxStdoutBytes),
+  maxStderrBytes: positive().default(DEFAULT_CONFIG.maxStderrBytes),
+  defaultTimeoutMs: positive(),
+  maxTimeoutMs: positive().default(DEFAULT_CONFIG.maxTimeoutMs),
+  terminationGraceMs: positive().default(DEFAULT_CONFIG.terminationGraceMs),
+  maxActiveRunsPerRepository: positive().default(DEFAULT_CONFIG.maxActiveRunsPerRepository),
+  artifactRetentionDays: positive().default(DEFAULT_CONFIG.artifactRetentionDays),
+  retainFailedArtifacts: z.boolean().default(DEFAULT_CONFIG.retainFailedArtifacts),
+  retainWorktrees: z.boolean().default(DEFAULT_CONFIG.retainWorktrees),
+  cleanupWorktreesOnSuccess: z.boolean().default(DEFAULT_CONFIG.cleanupWorktreesOnSuccess),
+  exportTsv: z.boolean().default(DEFAULT_CONFIG.exportTsv),
+  tsvRetentionDays: positive().default(DEFAULT_CONFIG.tsvRetentionDays),
+  evaluatorRegistrations: z.array(z.object({
+    id: z.string().required().description('Host evaluator identity, disclosed to proposal children as intentional public metadata; must not contain credentials.'),
+    command: z.string().required().description('Private Host evaluator executable authority; raw command/argv are not projected into proposal context.'),
+    args: z.array(z.string()).required().description('Private Host evaluator argv; not projected into proposal context.'),
+    cwd: z.string().description('Host evaluator working directory. Raw evaluator invocation is private; generated proposal workspace/branch/commit identity is intentionally public and must be credential-free.'),
+    environment: z.dict(z.string()).description('Private Host evaluator environment mapping; raw keys/values are not projected into proposal context. Exact known-value redaction applies only to permitted untrusted/display/history data before bounds, not intentional public identity/protocol/metadata; this is not universal secrecy.'),
+    metricName: z.string().required().description('Metric name disclosed exactly to proposal children as intentional public metadata, even if it equals an environment value. Host must not put credentials here: they would be disclosed.'),
+    metricDirection: z.union(['minimize', 'maximize']).required().description('Metric direction disclosed exactly to proposal children as intentional public metric semantics, regardless of coincidental environment-value overlap.'),
+    metricParserVersion: z.const('final-line-json-v1').required().description('Metric parser protocol disclosed exactly to proposal children as intentional public metadata, regardless of coincidental environment-value overlap.'),
+    evaluatorFiles: z.array(z.string()).required(),
+    dataset: z.union([
+      z.object({ kind: z.const('none').required() }),
+      z.object({ kind: z.const('local').required(), files: z.array(z.string()).required(), identity: z.string() }),
+      z.object({ kind: z.const('external').required(), digest: z.string().required(), identity: z.string() }),
+    ]).default({ kind: 'none' }),
+  })).default([]).description('Host-owned evaluator registrations. Proposal children receive exact public report identity/protocol, metric semantics, workspace/branch/commit identity and bounded policy/provenance fingerprints; registration authority and fingerprints do not guarantee confidentiality. Host must keep credentials out of designated public fields: actual credentials there are disclosed. Raw argv/environment remain private; known-value data redaction is limited, not universal confidentiality.'),
+})
+
+const CONFIG_KEYS = new Set([
+  'provider', 'model', 'maxTokens', 'gitExecutable', 'stateRoot', 'branchPrefix',
+  'gitTimeoutMs', 'gitMaxStdoutBytes', 'gitMaxStderrBytes',
+  'defaultMaxExperiments', 'maxExperiments', 'maxHandoffChars', 'maxResultChars',
+  'maxStdoutBytes', 'maxStderrBytes', 'defaultTimeoutMs', 'maxTimeoutMs',
+  'terminationGraceMs', 'maxActiveRunsPerRepository', 'artifactRetentionDays',
+  'retainFailedArtifacts', 'retainWorktrees', 'cleanupWorktreesOnSuccess',
+  'exportTsv', 'tsvRetentionDays', 'evaluatorRegistrations',
+])
+
+export function resolveConfig(config: Config = {}): ResolvedConfig {
+  rejectUnknown(config as Record<string, unknown>, CONFIG_KEYS, 'Config')
+  const maxExperiments = positiveInteger(config.maxExperiments ?? DEFAULT_CONFIG.maxExperiments, 'maxExperiments')
+  const maxTimeoutMs = positiveInteger(config.maxTimeoutMs ?? DEFAULT_CONFIG.maxTimeoutMs, 'maxTimeoutMs')
+  const resolved: ResolvedConfig = {
+    ...DEFAULT_CONFIG,
+    ...optionalText(config.provider, 'provider', 'provider'),
+    ...optionalText(config.model, 'model', 'model'),
+    ...optionalPositive(config.maxTokens, 'maxTokens', 'maxTokens'),
+    gitExecutable: normalizedText(config.gitExecutable ?? DEFAULT_CONFIG.gitExecutable, 'gitExecutable'),
+    gitTimeoutMs: gitTimeout(config.gitTimeoutMs ?? DEFAULT_CONFIG.gitTimeoutMs),
+    gitMaxStdoutBytes: positiveInteger(config.gitMaxStdoutBytes ?? DEFAULT_CONFIG.gitMaxStdoutBytes, 'gitMaxStdoutBytes'),
+    gitMaxStderrBytes: positiveInteger(config.gitMaxStderrBytes ?? DEFAULT_CONFIG.gitMaxStderrBytes, 'gitMaxStderrBytes'),
+    stateRoot: safeRelativePath(config.stateRoot ?? DEFAULT_CONFIG.stateRoot, 'stateRoot'),
+    branchPrefix: branchPrefix(config.branchPrefix ?? DEFAULT_CONFIG.branchPrefix),
+    defaultMaxExperiments: positiveInteger(config.defaultMaxExperiments ?? Math.min(DEFAULT_CONFIG.defaultMaxExperiments, maxExperiments), 'defaultMaxExperiments'),
+    maxExperiments,
+    maxHandoffChars: positiveInteger(config.maxHandoffChars ?? DEFAULT_CONFIG.maxHandoffChars, 'maxHandoffChars'),
+    maxResultChars: positiveInteger(config.maxResultChars ?? DEFAULT_CONFIG.maxResultChars, 'maxResultChars'),
+    maxStdoutBytes: positiveInteger(config.maxStdoutBytes ?? DEFAULT_CONFIG.maxStdoutBytes, 'maxStdoutBytes'),
+    maxStderrBytes: positiveInteger(config.maxStderrBytes ?? DEFAULT_CONFIG.maxStderrBytes, 'maxStderrBytes'),
+    defaultTimeoutMs: positiveInteger(config.defaultTimeoutMs ?? Math.min(DEFAULT_CONFIG.defaultTimeoutMs, maxTimeoutMs), 'defaultTimeoutMs'),
+    maxTimeoutMs,
+    terminationGraceMs: positiveInteger(config.terminationGraceMs ?? DEFAULT_CONFIG.terminationGraceMs, 'terminationGraceMs'),
+    maxActiveRunsPerRepository: positiveInteger(config.maxActiveRunsPerRepository ?? DEFAULT_CONFIG.maxActiveRunsPerRepository, 'maxActiveRunsPerRepository'),
+    artifactRetentionDays: positiveInteger(config.artifactRetentionDays ?? DEFAULT_CONFIG.artifactRetentionDays, 'artifactRetentionDays'),
+    retainFailedArtifacts: boolean(config.retainFailedArtifacts ?? DEFAULT_CONFIG.retainFailedArtifacts, 'retainFailedArtifacts'),
+    retainWorktrees: boolean(config.retainWorktrees ?? DEFAULT_CONFIG.retainWorktrees, 'retainWorktrees'),
+    cleanupWorktreesOnSuccess: boolean(config.cleanupWorktreesOnSuccess ?? DEFAULT_CONFIG.cleanupWorktreesOnSuccess, 'cleanupWorktreesOnSuccess'),
+    exportTsv: boolean(config.exportTsv ?? DEFAULT_CONFIG.exportTsv, 'exportTsv'),
+    tsvRetentionDays: positiveInteger(config.tsvRetentionDays ?? DEFAULT_CONFIG.tsvRetentionDays, 'tsvRetentionDays'),
+    evaluatorRegistry: createEvaluatorRegistry(config.evaluatorRegistrations ?? []),
+  }
+  if (resolved.defaultMaxExperiments > resolved.maxExperiments) throw new TypeError('defaultMaxExperiments must not exceed maxExperiments')
+  if (resolved.defaultTimeoutMs > resolved.maxTimeoutMs) throw new TypeError('defaultTimeoutMs must not exceed maxTimeoutMs')
+  if (resolved.cleanupWorktreesOnSuccess && resolved.retainWorktrees) throw new TypeError('cleanupWorktreesOnSuccess and retainWorktrees cannot both be true')
+  return deepFreeze(resolved)
+}
+
+export function createEvaluatorRegistry(values: readonly EvaluatorRegistrationConfig[]): EvaluatorRegistry {
+  if (!Array.isArray(values)) throw new TypeError('evaluatorRegistrations must be an array')
+  const registrations = values.map((value, index) => normalizeEvaluatorConfig(value, index))
+    .sort((left, right) => left.evaluatorId < right.evaluatorId ? -1 : left.evaluatorId > right.evaluatorId ? 1 : 0)
+  for (let index = 1; index < registrations.length; index += 1) {
+    if (registrations[index - 1]!.evaluatorId === registrations[index]!.evaluatorId) throw new TypeError(`duplicate evaluator registration id "${registrations[index]!.evaluatorId}"`)
+  }
+  const byId: Record<string, HostEvaluatorRegistration> = Object.create(null) as Record<string, HostEvaluatorRegistration>
+  for (const registration of registrations) byId[registration.evaluatorId] = registration
+  return deepFreeze({
+    registrations,
+    resolve(evaluatorId: string): HostEvaluatorRegistration {
+      const normalizedId = normalizedText(evaluatorId, 'evaluator_id')
+      const registration = byId[normalizedId]
+      if (!registration) throw new TypeError(`unknown evaluator registration id "${normalizedId}"`)
+      return registration
+    },
+  })
+}
+
+function normalizeEvaluatorConfig(value: EvaluatorRegistrationConfig, index: number): HostEvaluatorRegistration {
+  const source = optionalPlainObject(value, `evaluatorRegistrations[${index}]`)
+  rejectUnknown(source, new Set(['id', 'command', 'args', 'cwd', 'environment', 'metricName', 'metricDirection', 'metricParserVersion', 'evaluatorFiles', 'dataset']), `evaluatorRegistrations[${index}]`)
+  if (!Array.isArray(value.args)) throw new TypeError(`evaluatorRegistrations[${index}].args must be an array`)
+  if (!Array.isArray(value.evaluatorFiles)) throw new TypeError(`evaluatorRegistrations[${index}].evaluatorFiles must be an array`)
+  const dataset = value.dataset === undefined ? { kind: 'none' as const } : normalizeConfiguredDataset(value.dataset, index)
+  const registration = normalizeEvaluatorRegistration({
+    evaluatorId: value.id,
+    command: value.command,
+    args: value.args,
+    ...(value.cwd === undefined ? {} : { cwd: value.cwd }),
+    environment: normalizeHostRegistrationEnvironment(value.environment),
+    metricName: value.metricName,
+    metricDirection: value.metricDirection,
+    evaluatorFiles: value.evaluatorFiles,
+    dataset,
+  })
+  if (value.metricParserVersion !== 'final-line-json-v1') throw new TypeError(`evaluatorRegistrations[${index}].metricParserVersion is unsupported`)
+  return { ...registration, metricParserVersion: value.metricParserVersion }
+}
+
+function normalizeHostRegistrationEnvironment(value: Readonly<Record<string, string>> | undefined): Readonly<Record<string, string>> {
+  const environment = normalizeSharedRegistrationEnvironment(value)
+  for (const name of Object.keys(environment)) if (name.startsWith('DSH_')) throw new TypeError(`environment name ${name} is reserved`)
+  return environment
+}
+
+function normalizeConfiguredDataset(value: NonNullable<EvaluatorRegistrationConfig['dataset']>, index: number): EvaluatorRegistration['dataset'] {
+  const label = `evaluatorRegistrations[${index}].dataset`
+  const source = optionalPlainObject(value, label)
+  if (typeof source['kind'] !== 'string') throw new TypeError(`${label}.kind must be a string`)
+  if (source['kind'] === 'none') {
+    rejectUnknown(source, new Set(['kind']), label)
+    return { kind: 'none' }
+  }
+  if (source['kind'] === 'local') {
+    rejectUnknown(source, new Set(['kind', 'files', 'identity']), label)
+    if (!Array.isArray(source['files'])) throw new TypeError(`${label}.files must be an array`)
+    for (const [fileIndex, file] of source['files'].entries()) if (typeof file !== 'string') throw new TypeError(`${label}.files[${fileIndex}] must be a string`)
+    if (source['identity'] !== undefined && typeof source['identity'] !== 'string') throw new TypeError(`${label}.identity must be a string`)
+    return { kind: 'local', files: source['files'], ...(source['identity'] === undefined ? {} : { identity: source['identity'] }) }
+  }
+  if (source['kind'] === 'external') {
+    rejectUnknown(source, new Set(['kind', 'digest', 'identity']), label)
+    if (typeof source['digest'] !== 'string') throw new TypeError(`${label}.digest must be a string`)
+    if (source['identity'] !== undefined && typeof source['identity'] !== 'string') throw new TypeError(`${label}.identity must be a string`)
+    return { kind: 'external', digest: source['digest'] as `sha256:${string}`, ...(source['identity'] === undefined ? {} : { identity: source['identity'] }) }
+  }
+  throw new TypeError(`${label} has unknown kind`)
+}
+export function normalizeRunPolicy(input: ActivationAutoresearchToolInput, config: ResolvedConfig, callerCwd: string, registration: HostEvaluatorRegistration): NormalizedRunPolicy {
+  const maxExperiments = positiveInteger(input.max_experiments ?? config.defaultMaxExperiments, 'max_experiments')
+  if (maxExperiments > config.maxExperiments) throw new TypeError('max_experiments exceeds deployment maximum')
+  const timeoutMs = positiveInteger(input.timeout_ms ?? config.defaultTimeoutMs, 'timeout_ms')
+  if (timeoutMs > config.maxTimeoutMs) throw new TypeError('timeout_ms exceeds deployment maximum')
+  if (input.target !== undefined && !Number.isFinite(input.target)) throw new TypeError('target must be finite')
+  const datasetIdentity = registration.dataset.kind === 'none' ? undefined : registration.dataset.identity ?? (registration.dataset.kind === 'external' ? registration.dataset.digest : registration.dataset.files.join(','))
+  const policy: NormalizedRunPolicy = {
+    repository: normalizedPath(input.repository ?? callerCwd, 'repository'),
+    ...('run_tag' in input ? { runTag: runTag(input.run_tag) } : { resumeRunId: normalizedText(input.resume_run_id, 'resume_run_id') }),
+    objective: normalizedText(input.objective, 'objective'),
+    constraints: normalizedList(input.constraints ?? [], 'constraints'),
+    mutableGlobs: normalizedList(input.mutable_globs, 'mutable_globs', true),
+    exceptionalAllowlists: { dependencies: [], evaluators: [], datasets: [], submodules: [], gitConfig: [] },
+    evaluation: { command: registration.command, args: [...registration.args], ...(registration.cwd === undefined ? {} : { cwd: registration.cwd }) },
+    metricName: registration.metricName,
+    metricDirection: registration.metricDirection,
+    timeoutMs,
+    maxExperiments,
+    ...(input.target === undefined ? {} : { target: input.target }),
+    provenance: { evaluator: registration.evaluatorId, ...(datasetIdentity === undefined ? {} : { dataset: datasetIdentity }) },
+    environment: registration.environment,
+    mode: input.mode ?? 'background',
+  }
+  return deepFreeze(structuredClone(policy))
+}
+
+function optionalPlainObject(value: unknown, label: string): Record<string, unknown> { if (value === undefined) return {}; if (value === null || typeof value !== 'object' || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) throw new TypeError(`${label} must be a plain object`); return value as Record<string, unknown> }
+function normalizedList(values: readonly unknown[], label: string, paths = false, allowEmpty = false): string[] { const result = values.map((value, index) => paths ? safeRelativePath(value, `${label}[${index}]`) : normalizedText(value, `${label}[${index}]`, allowEmpty)); return [...new Set(result)] }
+function normalizedText(value: unknown, label: string, allowEmpty = false): string { if (typeof value !== 'string' || value !== value.trim() || (!allowEmpty && value.length === 0) || /[\0\r\n]/u.test(value)) throw new TypeError(`${label} must be normalized text`); return value }
+function normalizedPath(value: unknown, label: string): string { const result = normalizedText(value, label); if (/\0/u.test(result)) throw new TypeError(`${label} contains NUL`); return result }
+function safeRelativePath(value: unknown, label: string): string { const result = normalizedText(value, label); if (result.startsWith('/') || result.startsWith('\\') || /^[A-Za-z]:[\\/]/u.test(result) || result.split(/[\\/]/u).includes('..')) throw new TypeError(`${label} must be a relative path without parent traversal`); return result }
+function runTag(value: unknown): string { const result = normalizedText(value, 'run_tag'); if (!/^[a-z0-9][a-z0-9._-]*$/u.test(result) || result.endsWith('.') || result.includes('..')) throw new TypeError('run_tag must be lower-case Git-safe text'); return result }
+function branchPrefix(value: unknown): string { const result = normalizedText(value, 'branchPrefix'); if (!result.endsWith('/') || /[\s~^:?*[\\]/u.test(result) || result.includes('..')) throw new TypeError('branchPrefix must be a valid Git prefix ending in /'); return result }
+function positiveInteger(value: unknown, label: string): number { if (!Number.isSafeInteger(value) || (value as number) < 1) throw new TypeError(`${label} must be a positive safe integer`); return value as number }
+function gitTimeout(value: unknown): number { if (!Number.isInteger(value) || (value as number) < 1 || (value as number) > MAX_GIT_TIMEOUT_MS) throw new TypeError(`gitTimeoutMs must be an integer between 1 and ${MAX_GIT_TIMEOUT_MS}`); return value as number }
+function boolean(value: unknown, label: string): boolean { if (typeof value !== 'boolean') throw new TypeError(`${label} must be boolean`); return value }
+function optionalText(value: unknown, key: string, label: string): Record<string, string> { return value === undefined ? {} : { [key]: normalizedText(value, label) } }
+function optionalPositive(value: unknown, key: string, label: string): Record<string, number> { return value === undefined ? {} : { [key]: positiveInteger(value, label) } }
+function rejectUnknown(record: Record<string, unknown>, keys: ReadonlySet<string>, label: string): void { for (const key of Object.keys(record)) if (!keys.has(key)) throw new TypeError(`${label}: unknown key "${key}"`) }
+function deepFreeze<T>(value: T): T { if (value !== null && typeof value === 'object' && !Object.isFrozen(value)) { Object.freeze(value); for (const item of Object.values(value as Record<string, unknown>)) deepFreeze(item) } return value }

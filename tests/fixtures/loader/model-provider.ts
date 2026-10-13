@@ -1,0 +1,114 @@
+import { join } from 'node:path'
+import type { Context } from '@deepseek-ai/cordis'
+import { LlmAdapter, type GenerateOptions, type LlmModelInfo, type LlmProviderInfo, type LlmResolvedModelInfo, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import { ToolCallId } from '@deepseek-ai/dsh-llm'
+
+export const name = 'autoresearch-test-model'
+export const inject = ['llm']
+// Vitest and the native Loader can evaluate separate instances of this module.
+// Keep the pause gate shared with the existing call log across those instances.
+const globalState = globalThis as typeof globalThis & {
+  __autoresearchModelCalls?: Array<{ provider: string; model: string; tools: string[] }>
+  __autoresearchModelGate?: PromiseWithResolvers<void>
+}
+export const calls = globalState.__autoresearchModelCalls ??= []
+
+export function holdModel(): void {
+  globalState.__autoresearchModelGate ??= Promise.withResolvers<void>()
+}
+
+export function releaseModel(): void {
+  globalState.__autoresearchModelGate?.resolve()
+  delete globalState.__autoresearchModelGate
+}
+async function waitForModelGate(signal: AbortSignal | undefined): Promise<void> {
+  const gate = globalState.__autoresearchModelGate
+  if (!gate) return
+  signal?.throwIfAborted()
+  await new Promise<void>((resolve, reject) => {
+    const abort = () => { signal?.removeEventListener('abort', abort); reject(signal?.reason ?? new Error('model request aborted')) }
+    signal?.addEventListener('abort', abort, { once: true })
+    gate.promise.then(() => { signal?.removeEventListener('abort', abort); resolve() })
+    if (signal?.aborted) abort()
+  })
+}
+interface ProposalHandoff {
+  readonly identity: { readonly runId: string; readonly experimentId: string; readonly ordinal: number; readonly nonce: string }
+  readonly workspace: { readonly worktree: string }
+}
+
+
+function proposalHandoff(options: GenerateOptions): ProposalHandoff {
+  const serialized = JSON.stringify(options.messages)
+  const marker = 'AUTORESEARCH PROPOSAL ROUND\\n\\n'
+  if (!serialized.includes(marker)) throw new Error('proposal handoff missing from model request')
+
+  function findPrompt(value: unknown): string | undefined {
+    if (typeof value === 'string' && value.startsWith('AUTORESEARCH PROPOSAL ROUND\n\n')) return value
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        const prompt = findPrompt(item)
+        if (prompt) return prompt
+      }
+    } else if (value && typeof value === 'object') {
+      for (const item of Object.values(value)) {
+        const prompt = findPrompt(item)
+        if (prompt) return prompt
+      }
+    }
+    return undefined
+  }
+
+  const prompt = findPrompt(JSON.parse(serialized) as unknown)
+  if (!prompt) throw new Error('proposal prompt text missing')
+  return JSON.parse(prompt.slice('AUTORESEARCH PROPOSAL ROUND\n\n'.length)) as ProposalHandoff
+}
+
+function toolCall(name: string, args: unknown, idText: string): StreamChunk[] {
+  const id = ToolCallId(idText)
+  const raw = JSON.stringify(args)
+  return [
+    { type: 'block-start', index: 0, blockType: 'tool-call' },
+    { type: 'tool-call-delta', index: 0, id, name, argumentsDelta: raw },
+    { type: 'block-end', index: 0, block: { type: 'tool-call', id, name, arguments: raw } },
+    { type: 'finish', reason: { kind: 'tool-calls' } },
+  ]
+}
+
+class BoundedAdapter extends LlmAdapter {
+  providerInfo(provider: string): LlmProviderInfo { return { id: provider, name: 'Bounded test provider' } }
+  async listModels(provider: string): Promise<readonly LlmModelInfo[]> { return [{ id: 'bounded-model', name: 'Bounded model', provider }] }
+  async resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> { return { id: model, name: model, provider } }
+  async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    calls.push({ provider: options.provider, model: options.model, tools: options.tools?.map(tool => tool.name) ?? [] })
+    await waitForModelGate(options.signal)
+    const serialized = JSON.stringify(options.messages)
+    const handoff = proposalHandoff(options)
+    const releaseAccepted = serialized.includes('release accepted candidate')
+    const releaseRejected = serialized.includes('release rejected candidate')
+    const releaseTie = serialized.includes('release tie candidate')
+    const releaseContinuation = serialized.includes('release continued candidate failure')
+    let chunks: StreamChunk[]
+    if ((releaseAccepted || releaseRejected || releaseTie || releaseContinuation) && !serialized.includes('release-score-read')) {
+      chunks = toolCall('read', { file_path: join(handoff.workspace.worktree, 'score.txt') }, 'release-score-read')
+    } else if ((releaseAccepted || releaseRejected || releaseTie || releaseContinuation) && !serialized.includes('release-score-write')) {
+      let content = '1\n'
+      if (releaseAccepted) content = '0\n'
+      else if (releaseRejected) content = '2\n'
+      else if (releaseContinuation) content = handoff.identity.ordinal === 1 ? 'not-a-number\n' : '2\n'
+      chunks = toolCall('write', {
+        file_path: join(handoff.workspace.worktree, 'score.txt'),
+        content,
+      }, 'release-score-write')
+    } else if (serialized.includes('"name":"read"') || releaseAccepted || releaseRejected || releaseTie || releaseContinuation) {
+      chunks = toolCall('autoresearch_report', { ...handoff.identity, hypothesis: 'Inspect the strict fixture score', intendedEdits: ['score.txt'], implementationSummary: releaseAccepted || releaseRejected || releaseTie || releaseContinuation ? 'Wrote the bounded release scenario score.' : 'Observed the bounded candidate input without changing it.', blockerClaim: null }, 'report-call')
+    } else {
+      chunks = toolCall('read', { file_path: join(handoff.workspace.worktree, 'score.txt') }, 'read-call')
+    }
+    for (const chunk of chunks) yield chunk
+  }
+}
+
+export function apply(ctx: Context): void {
+  ctx.llm.registerAdapter(['autoresearch-test'], new BoundedAdapter())
+}

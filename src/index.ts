@@ -1,0 +1,271 @@
+import type { Context, Fiber } from '@deepseek-ai/cordis'
+import type { JobOutcome } from '@deepseek-ai/dsh-jobs'
+import type {} from '@deepseek-ai/dsh-system-prompt'
+import { defineTool } from '@deepseek-ai/dsh-tools'
+import type { ToolCallView } from '@deepseek-ai/dsh-tools'
+import { Config, resolveConfig } from './config.js'
+import type { Config as AutoresearchConfig } from './config.js'
+import { AutoresearchRunController, preflightAutoresearchRepository, validateAutoresearchRequest } from './controller.js'
+import { renderToolResult } from './render.js'
+import {
+  ACTIVATION_AUTORESEARCH_TOOL_SCHEMA,
+  AUTORESEARCH_TOOL_OUTPUT_SCHEMA,
+  decodeActivationToolInput,
+  type ActivationAutoresearchToolInput,
+  type AutoresearchRunResult,
+  type AutoresearchToolResult,
+  type BackgroundStartFailedToolResult,
+} from './types.js'
+
+export { Config }
+
+declare module '@deepseek-ai/dsh-jobs' {
+  interface JobKindMap {
+    autoresearch: 'autoresearch'
+  }
+}
+
+export const name = 'autoresearch'
+export const inject = ['agents', 'jobs', 'subprocess', 'systemPrompt', 'tools']
+
+const DESCRIPTION = 'Run a bounded, baseline-first metric optimization loop in an isolated Git worktree. Trusted host code owns evaluation, metric decisions, persistence, cancellation, and recovery.'
+const GUIDANCE = 'Use autoresearch only when the direct human explicitly requests autonomous metric-driven experimentation. For a new run, select a Host-provided evaluator_id and provide a narrow mutable path set. To resume, provide resume_run_id instead; never supply evaluator_id or any other evaluator authority on resume. Runs are background jobs by default and can be inspected or stopped with the generic job tools. Do not invoke it for ordinary coding or open-ended research.'
+
+
+interface Deferred<T> {
+  readonly promise: Promise<T>
+  resolve(value: T): void
+  reject(reason: unknown): void
+}
+
+function deferred<T>(): Deferred<T> {
+  let resolve!: (value: T) => void
+  let reject!: (reason: unknown) => void
+  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no })
+  return { promise, resolve, reject }
+}
+
+function reason(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+function startupFailure(jobId: string, error: unknown, cancelled: boolean): BackgroundStartFailedToolResult {
+  const message = reason(error)
+  return {
+    kind: 'background-start-failed',
+    jobId,
+    status: cancelled ? 'cancelled' : 'failed',
+    reason: message,
+    evidence: [{ code: cancelled ? 'cancelled' : 'startup-failed', message, artifacts: [] }],
+  }
+}
+
+function jobOutcome(result: AutoresearchRunResult, maxResultChars: number): JobOutcome {
+  const serialized = JSON.stringify(result)
+  const detail = result.status
+  if (result.status === 'cancelled') return { status: 'killed', detail, result: serialized }
+  if (result.status === 'baseline-blocked' || result.status === 'blocked' || result.status === 'round-failed') return { status: 'failed', detail, result: serialized }
+  return { status: 'completed', detail, result: serialized.length <= maxResultChars ? serialized : JSON.stringify({ status: result.status, runId: result.runId, tracker: result.tracker }) }
+}
+
+function presentCall(args: ActivationAutoresearchToolInput): ToolCallView {
+  return { card: 'generic', title: 'autoresearch', rawInput: args.objective }
+}
+
+function requireServices(ctx: Context): void {
+  const services = ctx as unknown as Record<string, unknown>
+  for (const service of inject) {
+    if (services[service] === undefined) throw new Error(`autoresearch requires the ctx.${service} service`)
+  }
+  const agents = services['agents'] as { create?: unknown }
+  if (typeof agents.create !== 'function') throw new Error('autoresearch requires a compatible ctx.agents.create runtime with child setup support')
+  const jobs = services['jobs'] as { start?: unknown }
+  if (typeof jobs.start !== 'function') throw new Error('autoresearch requires a compatible ctx.jobs registry')
+}
+
+/** Register the Host-authoritative evaluator contract and its sole production start/resume route. */
+export function apply(ctx: Context, config: AutoresearchConfig = {}): void {
+  requireServices(ctx)
+  const resolved = resolveConfig(config)
+  const active = new Set<AutoresearchRunController>()
+  const activeJobs = new Set<Promise<void>>()
+  const releasePrompt = ctx.systemPrompt.section({ name: 'tool:autoresearch', order: 116.25, text: GUIDANCE })
+  const releaseTool = ctx.tools.register(defineTool({
+    name: 'autoresearch',
+    description: DESCRIPTION,
+    parameters: ACTIVATION_AUTORESEARCH_TOOL_SCHEMA,
+    output: {
+      schema: AUTORESEARCH_TOOL_OUTPUT_SCHEMA,
+      render: (_args, value) => [{ type: 'text', text: renderToolResult(value as unknown as AutoresearchToolResult, resolved.maxResultChars) }],
+    },
+    async execute(args, exec) {
+      const parent = exec.agent
+      if (parent === undefined) throw new Error('autoresearch requires the exact calling agent in exec.agent')
+      const input = decodeActivationToolInput(args) as ActivationAutoresearchToolInput
+      validateAutoresearchRequest(resolved, input)
+      if ((input.mode ?? 'background') === 'foreground') {
+        const controller = new AutoresearchRunController(ctx, { config: resolved, input, parent, signal: exec.signal })
+        active.add(controller)
+        try {
+          return { kind: 'foreground', run: await controller.run() } as never
+        } finally {
+          active.delete(controller)
+          await controller.dispose()
+        }
+      }
+
+      const gate = deferred<void>()
+      const readiness = deferred<AutoresearchToolResult>()
+      const registrySettled = deferred<void>()
+      let controller: AutoresearchRunController | undefined
+      let hooks: { cancel(value?: string): void; done: Promise<JobOutcome> } | undefined
+      let jobId = ''
+      let registered = false
+      let cancelled = false
+      let cancellationApplied = false
+      let cancelReason = 'autoresearch job killed'
+
+      const repositoryPreflight = await preflightAutoresearchRepository(ctx, { config: resolved, input, parent, signal: exec.signal })
+      const startupAbort = deferred<never>()
+      const abortStartup = () => {
+        const error = exec.signal.reason ?? new Error('autoresearch startup aborted')
+        cancelled = true
+        cancelReason = reason(error)
+        if (controller && !cancellationApplied) {
+          controller.cancel(cancelReason)
+          cancellationApplied = true
+        }
+        gate.resolve()
+        readiness.resolve(startupFailure(jobId || 'unregistered', error, true))
+        startupAbort.reject(error)
+      }
+      exec.signal.addEventListener('abort', abortStartup, { once: true })
+      if (exec.signal.aborted) abortStartup()
+
+      if (cancelled) {
+        exec.signal.removeEventListener('abort', abortStartup)
+        return await startupAbort.promise as never
+      }
+      // The owner's jobs-injected child scope survives producer HMR; keep its listener through owner teardown.
+      let observer: Fiber | undefined
+      let observing = false
+      try {
+        observer = parent.ctx.inject(['jobs'], ownerCtx => {
+          const unsubscribe = ownerCtx.jobs.events.subscribe({ owner: parent.id }, event => {
+            if (event.type === 'settled' && event.job.id === jobId && event.job.owner === parent.id) registrySettled.resolve()
+          })
+          observing = true
+          // Cordis disposes yielded effects in reverse order, awaiting the barrier before unsubscribing.
+          // This also retains the listener when owner and Host effects unload concurrently.
+          return ownerCtx.effect(function* () {
+            yield unsubscribe
+            yield async () => { if (jobId && hooks) await registrySettled.promise }
+          }, 'autoresearch.registryObserver()')
+        })
+        await Promise.race([observer.await(), startupAbort.promise])
+        if (!observing) throw new Error('owner job observer did not activate')
+        if (cancelled) throw exec.signal.reason ?? new Error('autoresearch startup aborted')
+        const id = ctx.jobs.start({
+          kind: 'autoresearch',
+          label: `autoresearch: ${input.objective}`,
+          owner: parent.id,
+          outputLimitBytes: resolved.maxResultChars,
+          run: () => {
+            controller = new AutoresearchRunController(ctx, { config: resolved, input, parent, signal: new AbortController().signal, repositoryPreflight })
+            active.add(controller)
+            const done = (async (): Promise<JobOutcome> => {
+              try {
+                await gate.promise
+                if (!registered) throw new Error(cancelReason)
+                if (cancelled) controller!.cancel(cancelReason)
+                const running = controller!.run()
+                try {
+                  const ready = await controller!.ready
+                  readiness.resolve({ kind: 'background', jobId, ...ready })
+                } catch (error) {
+                  readiness.resolve(startupFailure(jobId, error, cancelled))
+                }
+                const result = await running
+                if (cancelled) return { status: 'killed', detail: cancelReason, result: JSON.stringify(result) }
+                return jobOutcome(result, resolved.maxResultChars)
+              } catch (error) {
+                readiness.resolve(startupFailure(jobId || 'unregistered', error, cancelled))
+                const failure = startupFailure(jobId || 'unregistered', error, cancelled)
+                return { status: cancelled ? 'killed' : 'failed', detail: reason(error), result: JSON.stringify(failure) }
+              } finally {
+                if (controller) {
+                  await controller.dispose()
+                  active.delete(controller)
+                }
+              }
+            })()
+            hooks = {
+              cancel(value?: string) {
+                if (cancellationApplied) return
+                if (!cancelled) {
+                  cancelled = true
+                  cancelReason = value ?? cancelReason
+                }
+                controller!.cancel(cancelReason)
+                cancellationApplied = true
+                gate.resolve()
+                readiness.resolve(startupFailure(jobId || 'unregistered', cancelReason, true))
+                startupAbort.reject(new Error(cancelReason))
+              },
+              done,
+            }
+            return hooks
+          },
+        })
+        jobId = String(id)
+        const startedHooks = hooks
+        if (startedHooks) {
+          // The owner's cleanup may drop the record immediately after the terminal event;
+          // its non-consuming event, not a later get(), is the registry-commit authority.
+          const settled = startedHooks.done.then(() => registrySettled.promise).finally(() => observer!.dispose())
+          activeJobs.add(settled)
+          void settled.then(() => activeJobs.delete(settled), () => undefined)
+        } else {
+          await observer!.dispose()
+        }
+        if (!controller) throw new Error('job registry did not start the autoresearch controller')
+        const preparing = controller.prepare(jobId)
+        void preparing.catch(() => undefined)
+        await Promise.race([preparing, startupAbort.promise])
+        registered = true
+        gate.resolve()
+        const result = await Promise.race([readiness.promise, startupAbort.promise])
+        exec.signal.removeEventListener('abort', abortStartup)
+        return result as never
+      } catch (error) {
+        exec.signal.removeEventListener('abort', abortStartup)
+        if (!jobId) await observer?.dispose()
+        const startupCancelled = cancelled || exec.signal.aborted
+        cancelReason = reason(error)
+        if (controller && !cancellationApplied) {
+          controller.cancel(cancelReason)
+          cancellationApplied = true
+        }
+        gate.resolve()
+        if (!hooks && controller) { await controller.dispose(); active.delete(controller) }
+        if (!jobId && exec.signal.aborted && error === exec.signal.reason) throw error
+        return startupFailure(jobId || 'unregistered', error, startupCancelled) as never
+      }
+    },
+    presentCall: args => presentCall(args as unknown as ActivationAutoresearchToolInput),
+    presentResult: () => ({ card: 'generic' }),
+  }))
+
+  let released = false
+  ctx.effect(() => async () => {
+    if (released) return
+    released = true
+    releaseTool()
+    releasePrompt()
+    const settling = [...active].map(async controller => { controller.cancel('autoresearch plugin disposed'); await controller.dispose() })
+    await Promise.allSettled(settling)
+    const jobs = await Promise.allSettled([...activeJobs])
+    const failures = jobs.filter((job): job is PromiseRejectedResult => job.status === 'rejected')
+    if (failures.length) throw new AggregateError(failures.map(job => job.reason), 'autoresearch jobs did not settle during plugin disposal')
+  }, 'autoresearch.lifecycle()')
+}
