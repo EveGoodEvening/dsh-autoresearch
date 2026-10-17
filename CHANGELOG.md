@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Default-branch dependency audit failures open a deduplicated Issue mentioning
+  the repository owner and linking workflow logs. Repeated failures at the same
+  steps update it without new comments; changed failed steps notify again, and
+  recovery closes it. Setup and registry failures are reported too, not only
+  confirmed vulnerabilities. Branch experiments and cancelled runs are ignored.
+
 ## v0.0.1
 
 ### Added
