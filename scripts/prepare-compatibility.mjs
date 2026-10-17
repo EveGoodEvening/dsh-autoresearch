@@ -12,9 +12,11 @@ if (workspace === repoRoot || workspace.startsWith(`${repoRoot}${sep}`)) {
 
 // A new directory prevents a local reproduction from overwriting an existing checkout.
 await mkdir(workspace)
+// Resolve the candidate graph from scratch: retained transitive lockfile entries
+// can satisfy old dependencies while violating the latest upstream peer ranges.
 await cp(repoRoot, workspace, {
   recursive: true,
-  filter: source => !['.git', 'node_modules', 'lib'].includes(relative(repoRoot, source).split(sep)[0]),
+  filter: source => !['.git', 'node_modules', 'lib', 'pnpm-lock.yaml'].includes(relative(repoRoot, source).split(sep)[0]),
 })
 
 const manifestPath = resolve(workspace, 'package.json')

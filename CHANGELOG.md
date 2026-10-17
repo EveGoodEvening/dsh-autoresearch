@@ -10,6 +10,15 @@
   recovery closes it. Setup and registry failures are reported too, not only
   confirmed vulnerabilities. Branch experiments and cancelled runs are ignored.
 
+### Fixed
+
+- Latest-upstream compatibility checks now resolve a fresh candidate lockfile
+  instead of retaining baseline transitive versions that can violate newer
+  Cordis peer requirements. Published peer ranges and baseline dependency
+  resolutions are unchanged.
+- Pin Vitest to the same version as its coverage provider so clean candidate
+  installs satisfy their exact mutual peer requirements.
+
 ## v0.0.1
 
 ### Added

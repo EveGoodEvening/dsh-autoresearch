@@ -11,10 +11,10 @@ The `autoresearch` tool measures a baseline, lets an agent edit allowed files in
 | Component | Supported | Tested |
 | --- | --- | --- |
 | DSH CLI (`@deepseek-ai/dsh`) and DSH service peers | **`0.2.0-rc.2`** (exact, coordinated family) | `0.2.0-rc.2` |
-| Cordis (`@deepseek-ai/cordis`) | **`~4.0.4`** | `4.0.4` |
+| Cordis (`@deepseek-ai/cordis`) | **`~4.0.4`** | `4.0.4`, `4.0.5` |
 | Node.js | `^22.19.0 \|\| >=24.2.0` | `24.18.0` |
 
-Tested pairing observed on **2026-10-04**. Use the **scoped Cordis fork**, not unscoped `cordis`. DSH is a prerelease pairing; other DSH versions are not declared supported. Daily [upstream compatibility checks](https://github.com/EveGoodEvening/dsh-autoresearch/blob/master/.github/workflows/compatibility.yml) do not automatically expand these ranges.
+Latest tested pairing observed on **2026-10-17**. Use the **scoped Cordis fork**, not unscoped `cordis`. DSH is a prerelease pairing; other DSH versions are not declared supported. Daily [upstream compatibility checks](https://github.com/EveGoodEvening/dsh-autoresearch/blob/master/.github/workflows/compatibility.yml) do not automatically expand these ranges.
 
 ## Install
 
