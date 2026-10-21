@@ -43,7 +43,7 @@ jobs:
       # without installing packages or running dependency lifecycle scripts.
       - name: Audit dependencies
         id: audit
-        run: pnpm audit --audit-level low
+        run: pnpm audit --audit-level high
 
       - name: Summarize audit result
         id: summary
@@ -112,7 +112,7 @@ jobs:
               `Failed steps: **${failed}**.`,
               `[Workflow logs](${run}).`,
               '',
-              'This check runs `pnpm audit --audit-level low` against the committed lockfile, including dev and optional dependencies, without installing packages or running dependency lifecycle scripts.',
+              'This check runs `pnpm audit --audit-level high` against the committed lockfile, including dev and optional dependencies, without installing packages or running dependency lifecycle scripts.',
               'A failure may indicate reported vulnerabilities, registry/network errors, or setup/runner failures. Inspect the failed step before treating it as a confirmed vulnerability.',
               'Re-run **Dependency audit** from Actions on the default branch to check recovery.',
               '',

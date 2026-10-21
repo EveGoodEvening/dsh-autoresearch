@@ -10,6 +10,11 @@
   recovery closes it. Setup and registry failures are reported too, not only
   confirmed vulnerabilities. Branch experiments and cancelled runs are ignored.
 
+### Changed
+
+- Raise scheduled and manual dependency audits to `--audit-level high`, retaining
+  development and optional dependency coverage.
+
 ### Fixed
 
 - Latest-upstream compatibility checks now resolve a fresh candidate lockfile
