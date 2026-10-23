@@ -2,6 +2,8 @@
 
 ## Lessons
 
+- Security audits must fail at low severity, including development/optional dependencies; raising the threshold is not remediation. Refresh compatible transitive ranges first, then use exact vulnerable-version overrides only for remaining upstream pins, preserving release-age policy and the synchronized DSH family. October 2026 CA checks must distinguish affected `AAA Certificate Services` / `emSign ECC Root CA - G3` roots from unaffected emSign G1; Node 24.22.1 rejected all four published compromised-chain endpoints with `CERT_REVOKED` while normal HTTPS succeeded.
+
 - DeepSeek Harness out-of-tree features ship as opt-in bundles: `package.json` declares `dsh.bundle.patch`, and the stable patch inserts an ordinary Cordis plugin row whose config is replaced whole, not deep-merged.
 - Install out-of-tree bundles with `dsh plugin --profile <name> add <package-spec>`: the command forwards to pnpm inside the profile and reconciles `dsh.profile.bundles`. A bare package name targets the configured registry, so unpublished bundles need a local directory or packed tarball spec; plain `pnpm add` does not activate the bundle.
 - Autoresearch runtime authority belongs to `AutoresearchRunController`; compose the existing `agents`, `jobs`, `subprocess`, `systemPrompt`, and `tools` services and generic `dsh-tool-jobs` controls instead of adding a workflow engine or subagent service.

@@ -12,8 +12,17 @@
 
 ### Changed
 
-- Raise scheduled and manual dependency audits to `--audit-level high`, retaining
-  development and optional dependency coverage.
+- Restore scheduled and manual dependency audits to `--audit-level low`, retaining
+  development and optional dependency coverage without advisory suppressions.
+- Require patched Node.js `^22.23.4 || ^24.22.1 || >=26.12.1` and align all CI
+  workflows on Node.js `24.22.1` for the October TLS/Brotli and CA fixes.
+- Refresh compatible transitive dependencies, pair Vitest/coverage at `4.1.12`,
+  and replace vulnerable upstream pins for MCP client/SDK, Vite and fflate with
+  patched releases while preserving the supported DSH release family.
+- Verified on Node.js `24.22.1`: zero low-threshold audit findings, peer checks,
+  typecheck/build, 576 passing coverage tests (10 skipped), and the packed
+  consumer/installed DSH profile/Web HTTP smoke. Normal HTTPS returned 200;
+  all four published compromised-CA endpoints failed with `CERT_REVOKED`.
 
 ### Fixed
 

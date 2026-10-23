@@ -76,12 +76,12 @@
     "@deepseek-ai/dsh-tools": "0.2.0-rc.2"
   },
   "devDependencies": {
-    "@deepseek-ai/cordis": "~4.0.4",
+    "@deepseek-ai/cordis": "~4.0.5",
     "@deepseek-ai/cordis-plugin-group": "1.0.4",
     "@deepseek-ai/cordis-plugin-hmr": "1.0.19",
-    "@deepseek-ai/cordis-plugin-include": "~1.0.9",
-    "@deepseek-ai/cordis-plugin-loader": "~1.0.5",
-    "@deepseek-ai/cordis-plugin-timer": "~1.1.6",
+    "@deepseek-ai/cordis-plugin-include": "~1.0.10",
+    "@deepseek-ai/cordis-plugin-loader": "~1.0.6",
+    "@deepseek-ai/cordis-plugin-timer": "~1.1.7",
     "@deepseek-ai/dsh": "0.2.0-rc.2",
     "@deepseek-ai/dsh-agent": "0.2.0-rc.2",
     "@deepseek-ai/dsh-agent-preset": "0.2.0-rc.2",
@@ -109,14 +109,14 @@
     "@deepseek-ai/dsh-typert-protocol": "0.2.0-rc.2",
     "@deepseek-ai/dsh-web-app": "0.2.0-rc.2",
     "@types/js-yaml": "^4.0.9",
-    "@types/node": "^22.0.0",
-    "@vitest/coverage-v8": "4.1.10",
-    "js-yaml": "^4.3.1",
-    "typescript": "^6.0.0",
-    "vitest": "4.1.10"
+    "@types/node": "^22.20.5",
+    "@vitest/coverage-v8": "4.1.12",
+    "js-yaml": "^4.3.2",
+    "typescript": "^6.0.3",
+    "vitest": "4.1.12"
   },
   "engines": {
-    "node": "^22.19.0 || >=24.2.0"
+    "node": "^22.23.4 || ^24.22.1 || >=26.12.1"
   },
   "packageManager": "pnpm@11.7.0"
 }

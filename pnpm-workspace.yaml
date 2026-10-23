@@ -10,3 +10,9 @@ minimumReleaseAgeStrict: true
 minimumReleaseAgeExclude:
   # DSH publishes one synchronized prerelease family; exact versions remain locked in pnpm-lock.yaml.
   - '@deepseek-ai/*'
+# Upstream Host/tooling pins still resolve these vulnerable versions.
+overrides:
+  '@modelcontextprotocol/client@2.0.0': 2.3.0
+  '@modelcontextprotocol/sdk@1.30.0': 1.32.0
+  'fflate@0.8.2': 0.8.3
+  'vite@8.2.1': 8.2.4
