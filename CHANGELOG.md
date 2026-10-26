@@ -12,6 +12,8 @@
 
 ### Changed
 
+- Update `@deepseek-ai/schemastery` to `3.18.5` to satisfy the latest DSH
+  settings peer requirement without changing the declared DSH/Cordis support ranges.
 - Restore scheduled and manual dependency audits to `--audit-level low`, retaining
   development and optional dependency coverage without advisory suppressions.
 - Require patched Node.js `^22.23.4 || ^24.22.1 || >=26.12.1` and align all CI
@@ -32,6 +34,14 @@
   resolutions are unchanged.
 - Pin Vitest to the same version as its coverage provider so clean candidate
   installs satisfy their exact mutual peer requirements.
+
+### Removed
+
+- Remove the empty `dsh-autoresearch/invariant` companion and direct
+  `@deepseek-ai/dsh-invariants` dependency. Upstream retired this mechanism after
+  DSH `0.2.0-rc.2`; the latest compatibility probe no longer requests its nonexistent
+  matching release. Remove custom imports or profile rows for the former companion.
+  Controller-owned validation, evaluation and recovery checks are unchanged.
 
 ## v0.0.1
 

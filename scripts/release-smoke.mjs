@@ -9,7 +9,7 @@ const repoRoot = resolve(import.meta.dirname, '..')
 const dshExecutable = process.env.DSH_BIN || join(repoRoot, 'node_modules', '.bin', process.platform === 'win32' ? 'dsh.cmd' : 'dsh')
 const basePackage = dirname(dirname(fileURLToPath(import.meta.resolve('@deepseek-ai/dsh-base'))))
 const sharedCheckoutLink = join(basePackage, 'node_modules', 'dsh-autoresearch')
-const MODULES = ['agent', 'config', 'controller', 'evaluator-artifacts', 'evaluator', 'git', 'index', 'invariant', 'recovery', 'render', 'retention', 'state-layout', 'tracker', 'types']
+const MODULES = ['agent', 'config', 'controller', 'evaluator-artifacts', 'evaluator', 'git', 'index', 'recovery', 'render', 'retention', 'state-layout', 'tracker', 'types']
 export const EXPECTED_TARBALL_ENTRIES = Object.freeze([
   'package/CHANGELOG.md', 'package/LICENSE', 'package/README.md', 'package/THIRD_PARTY_NOTICES.md', 'package/cordis.patch.yml', 'package/package.json',
   ...MODULES.flatMap(name => [`package/lib/${name}.d.ts`, `package/lib/${name}.d.ts.map`, `package/lib/${name}.js`, `package/lib/${name}.js.map`]),
@@ -62,10 +62,10 @@ async function main(args) {
     await writeFile(join(consumer, 'package.json'), JSON.stringify({ name: 'dsh-autoresearch-consumer-smoke', private: true, type: 'module', scripts: { typecheck: 'tsc --noEmit -p tsconfig.json' } }, null, 2))
     await run('npm', ['install', '--ignore-scripts', '--no-package-lock', tarball, `typescript@${packageManifest.devDependencies.typescript}`], { cwd: consumer })
     await writeFile(join(consumer, 'tsconfig.json'), JSON.stringify({ compilerOptions: { module: 'NodeNext', moduleResolution: 'NodeNext', strict: true, skipLibCheck: false }, include: ['smoke.ts'] }, null, 2))
-    await writeFile(join(consumer, 'smoke.ts'), "import * as rootModule from 'dsh-autoresearch'\nimport * as invariantModule from 'dsh-autoresearch/invariant'\nif (rootModule.name !== 'autoresearch' || invariantModule.name !== 'autoresearch-invariant') throw new Error('installed exports failed')\n")
+    await writeFile(join(consumer, 'smoke.ts'), "import * as rootModule from 'dsh-autoresearch'\nif (rootModule.name !== 'autoresearch') throw new Error('installed exports failed')\n")
     await run(join(consumer, 'node_modules', '.bin', process.platform === 'win32' ? 'tsc.cmd' : 'tsc'), ['--noEmit', '-p', 'tsconfig.json'], { cwd: consumer })
     await assertDeclarationGraph(join(consumer, 'node_modules', manifest.name, 'lib'))
-    await run(process.execPath, ['--input-type=module', '--eval', "const root=await import('dsh-autoresearch');const invariant=await import('dsh-autoresearch/invariant');if(root.name!=='autoresearch'||invariant.name!=='autoresearch-invariant')throw new Error('imports failed')"], { cwd: consumer })
+    await run(process.execPath, ['--input-type=module', '--eval', "const root=await import('dsh-autoresearch');if(root.name!=='autoresearch')throw new Error('imports failed')"], { cwd: consumer })
 
     evidence.scenarios = await runInstalledScenarios(installedRoot, root)
     await assertNoSharedCheckoutLink()
@@ -143,7 +143,6 @@ function assertManifest(manifest) {
   if (!rootEntryIsValid) throw new Error('packed manifest root ESM entry is invalid')
 
   const exportsAreValid = manifest.exports?.['.']?.default === './lib/index.js'
-    && manifest.exports?.['./invariant']?.default === './lib/invariant.js'
   if (!exportsAreValid) throw new Error('packed manifest exports are invalid')
 
   const serialized = JSON.stringify({
