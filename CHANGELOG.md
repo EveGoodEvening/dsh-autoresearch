@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.0.2
 
 ### Added
 
@@ -21,7 +21,8 @@
 - Refresh compatible transitive dependencies, pair Vitest/coverage at `4.1.12`,
   and replace vulnerable upstream pins for MCP client/SDK, Vite and fflate with
   patched releases while preserving the supported DSH release family.
-- Verified on Node.js `24.22.1`: zero low-threshold audit findings, peer checks,
+- Earlier dependency-refresh verification on Node.js `24.22.1` reported zero
+  low-threshold audit findings, passing peer checks,
   typecheck/build, 576 passing coverage tests (10 skipped), and the packed
   consumer/installed DSH profile/Web HTTP smoke. Normal HTTPS returned 200;
   all four published compromised-CA endpoints failed with `CERT_REVOKED`.
@@ -42,6 +43,18 @@
   DSH `0.2.0-rc.2`; the latest compatibility probe no longer requests its nonexistent
   matching release. Remove custom imports or profile rows for the former companion.
   Controller-owned validation, evaluation and recovery checks are unchanged.
+
+### Known issues
+
+- The release-time audit on 2026-10-26 reports four advisories in transitive
+  `fast-uri@3.1.8` (two moderate, two low):
+  [GHSA-w74x-v6f9-j3xg](https://github.com/advisories/GHSA-w74x-v6f9-j3xg),
+  [GHSA-wjr9-j795-jxcr](https://github.com/advisories/GHSA-wjr9-j795-jxcr),
+  [GHSA-xhq7-xmqj-769h](https://github.com/advisories/GHSA-xhq7-xmqj-769h), and
+  [GHSA-333x-w4r6-6crp](https://github.com/advisories/GHSA-333x-w4r6-6crp).
+  This release retains the existing dependency resolutions; patched `3.1.9`
+  becomes eligible under the seven-day release-age policy at 23:05:26 UTC that day.
+  The audit threshold and release-age policy remain unchanged.
 
 ## v0.0.1
 
