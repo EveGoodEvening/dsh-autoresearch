@@ -1,5 +1,7 @@
 # dsh-autoresearch
 
+English | [简体中文](README.zh.md)
+
 Unofficial, third-party plugin for bounded, metric-driven optimization in [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness), inspired by [Karpathy's autoresearch](https://github.com/karpathy/autoresearch).
 
 **Independent project:** `dsh-autoresearch` is maintained by [EveGoodEvening](https://github.com/EveGoodEvening). It is not affiliated with, endorsed by, or sponsored by DeepSeek or Andrej Karpathy.

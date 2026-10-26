@@ -11,7 +11,7 @@ const basePackage = dirname(dirname(fileURLToPath(import.meta.resolve('@deepseek
 const sharedCheckoutLink = join(basePackage, 'node_modules', 'dsh-autoresearch')
 const MODULES = ['agent', 'config', 'controller', 'evaluator-artifacts', 'evaluator', 'git', 'index', 'recovery', 'render', 'retention', 'state-layout', 'tracker', 'types']
 export const EXPECTED_TARBALL_ENTRIES = Object.freeze([
-  'package/CHANGELOG.md', 'package/LICENSE', 'package/README.md', 'package/THIRD_PARTY_NOTICES.md', 'package/cordis.patch.yml', 'package/package.json',
+  'package/CHANGELOG.md', 'package/LICENSE', 'package/README.md', 'package/README.zh.md', 'package/THIRD_PARTY_NOTICES.md', 'package/cordis.patch.yml', 'package/package.json',
   ...MODULES.flatMap(name => [`package/lib/${name}.d.ts`, `package/lib/${name}.d.ts.map`, `package/lib/${name}.js`, `package/lib/${name}.js.map`]),
 ].sort())
 
