@@ -10,11 +10,11 @@ The `autoresearch` tool measures a baseline, lets an agent edit allowed files in
 
 | Component | Supported | Tested |
 | --- | --- | --- |
-| DSH CLI (`@deepseek-ai/dsh`) and DSH service peers | **`0.2.0-rc.2`** (exact, coordinated family) | `0.2.0-rc.2` |
-| Cordis (`@deepseek-ai/cordis`) | **`~4.0.4`** | `4.0.4`, `4.0.5` |
+| DSH CLI (`@deepseek-ai/dsh`) and DSH service peers | **`0.2.1-rc.2`** (exact, coordinated family) | `0.2.1-rc.2` |
+| Cordis (`@deepseek-ai/cordis`) | **`~4.0.5`** | `4.0.5` |
 | Node.js | `^22.23.4 \|\| ^24.22.1 \|\| >=26.12.1` | `24.22.1` |
 
-DSH/Cordis pairing observed on **2026-10-17**; patched Node.js baseline and packed-consumer/Web-profile smoke verified on **2026-10-23**. Use the **scoped Cordis fork**, not unscoped `cordis`. DSH is a prerelease pairing; other DSH versions are not declared supported. Daily [upstream compatibility checks](https://github.com/EveGoodEvening/dsh-autoresearch/blob/master/.github/workflows/compatibility.yml) do not automatically expand these ranges.
+Supported pairing and packed-consumer/Web-profile smoke verified on **2026-10-26**. Use the **scoped Cordis fork**, not unscoped `cordis`. DSH is a prerelease pairing; other DSH versions are not declared supported. Daily [upstream compatibility checks](https://github.com/EveGoodEvening/dsh-autoresearch/blob/master/.github/workflows/compatibility.yml) do not automatically expand these ranges.
 
 The Node.js security floors include the October 2026 TLS/Brotli fixes and
 [eMudhra CA remediation](https://emudhra.we-have-a-problem.com/). Keep the Host

@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Migrate the supported Host baseline to the exact, coordinated DSH `0.2.1-rc.2`
+  CLI and service family in both development and peer dependencies.
+- Raise the scoped `@deepseek-ai/cordis` peer range to `~4.0.5`, matching the
+  development range, and upgrade `cordis-plugin-group` to `1.0.5` to satisfy
+  the new Host boot peer requirement.
+- Update targeted development dependency overrides for the new Host's pinned
+  MCP client, Undici and Zod versions so the migration does not reintroduce
+  their known advisories. These overrides do not patch consumer-managed Hosts.
+
 ## v0.0.2
 
 ### Added
