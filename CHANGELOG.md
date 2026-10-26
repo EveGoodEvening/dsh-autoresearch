@@ -1,6 +1,11 @@
 # Changelog
 
-## Unreleased
+## v0.0.3
+
+### Added
+
+- Add a Simplified Chinese README and language navigation between the English
+  and Chinese documentation; include both READMEs in the published package.
 
 ### Changed
 
@@ -12,6 +17,15 @@
 - Update targeted development dependency overrides for the new Host's pinned
   MCP client, Undici and Zod versions so the migration does not reintroduce
   their known advisories. These overrides do not patch consumer-managed Hosts.
+- Clarify upstream invariant diagnostic activation and the minimal SDK's
+  composition requirements.
+
+### Known issues
+
+- The four `fast-uri@3.1.8` advisories documented under v0.0.2 remain present
+  in the release-time audit (two moderate, two low). This release leaves the
+  dependency lockfile, low-severity audit threshold, and seven-day release-age
+  policy unchanged.
 
 ## v0.0.2
 
