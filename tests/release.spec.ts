@@ -1,10 +1,11 @@
 import { execFile } from 'node:child_process'
+import { readFileSync } from 'node:fs'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { describe, expect, it } from 'vitest'
-import { assertExactTarballEntries, EXPECTED_TARBALL_ENTRIES, isolatedDshEnvironment } from '../scripts/release-smoke.mjs'
+import { assertExactTarballEntries, assertManifest, EXPECTED_TARBALL_ENTRIES, isolatedDshEnvironment } from '../scripts/release-smoke.mjs'
 
 const root = join(import.meta.dirname, '..')
 const run = promisify(execFile)
@@ -13,6 +14,16 @@ describe('release and consumer contract', () => {
   it('enforces the deterministic packed-file allowlist', () => {
     expect(() => assertExactTarballEntries([...EXPECTED_TARBALL_ENTRIES, 'package/lib/stale.js'])).toThrow(/unexpected=.*stale\.js/)
     expect(() => assertExactTarballEntries(EXPECTED_TARBALL_ENTRIES.filter(path => path !== 'package/lib/index.d.ts'))).toThrow(/missing=.*index\.d\.ts/)
+  })
+
+  it('requires the packed manifest to keep the DSH compatibility range', () => {
+    const source = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))
+    expect(() => assertManifest(source, source)).not.toThrow()
+    const { engines: { dsh: _dsh, ...engines }, ...rest } = source
+    expect(() => assertManifest({ ...rest, engines }, source)).toThrow(/engines\.dsh/)
+    expect(() => assertManifest({ ...source, peerDependencies: { ...source.peerDependencies, '@deepseek-ai/dsh-tools': '0.2.1-rc.2' } }, source)).toThrow(/DSH peers/)
+    const future = { ...source, engines: { ...source.engines, dsh: '>=0.2.2-0' }, peerDependencies: Object.fromEntries(Object.entries(source.peerDependencies).map(([name, range]) => [name, name.startsWith('@deepseek-ai/dsh') ? '>=0.2.2-0' : range])) }
+    expect(() => assertManifest(future, future)).toThrow(/compatibility check/)
   })
 
   it('overrides inherited profile roots and removes unrelated DSH controls', () => {

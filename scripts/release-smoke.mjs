@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { spawn } from 'node:child_process'
+import { evaluatePluginCompatibility, getDshRuntimeVersion } from '@deepseek-ai/dsh-app-boot'
 
 const repoRoot = resolve(import.meta.dirname, '..')
 const dshExecutable = process.env.DSH_BIN || join(repoRoot, 'node_modules', '.bin', process.platform === 'win32' ? 'dsh.cmd' : 'dsh')
@@ -36,7 +37,7 @@ async function main(args) {
     const entries = (await run('tar', ['-tzf', tarball])).stdout.trim().split('\n').filter(Boolean).sort()
     assertExactTarballEntries(entries)
     const manifest = JSON.parse((await run('tar', ['-xOzf', tarball, 'package/package.json'])).stdout)
-    assertManifest(manifest)
+    assertManifest(manifest, packageManifest)
     const externalDshHomeBefore = externalDshHome ? await stat(externalDshHome).catch(() => undefined) : undefined
     evidence.package = { files: entries, manifest: { name: manifest.name, version: manifest.version, exports: manifest.exports } }
 
@@ -136,7 +137,7 @@ export function assertExactTarballEntries(entries) {
   const unexpected = actual.filter(path => !expected.has(path))
   throw new Error(`packed artifact entries differ from the release allowlist; missing=${missing.join(',')}; unexpected=${unexpected.join(',')}`)
 }
-function assertManifest(manifest) {
+export function assertManifest(manifest, packageManifest) {
   const rootEntryIsValid = manifest.type === 'module'
     && manifest.main === 'lib/index.js'
     && manifest.types === 'lib/index.d.ts'
@@ -154,6 +155,13 @@ function assertManifest(manifest) {
   if (/\b(?:link|file|workspace):/u.test(serialized) || serialized.includes('/src/')) {
     throw new Error('packed runtime manifest contains a local link or source-tree path')
   }
+
+  const dshRange = packageManifest.engines?.dsh
+  if (typeof dshRange !== 'string' || manifest.engines?.dsh !== dshRange) throw new Error('packed manifest engines.dsh differs from the source manifest')
+  const dshPeers = Object.entries(manifest.peerDependencies ?? {}).filter(([name]) => name === '@deepseek-ai/dsh' || name.startsWith('@deepseek-ai/dsh-'))
+  if (dshPeers.length === 0 || dshPeers.some(([, range]) => range !== dshRange)) throw new Error('packed manifest DSH peers do not match engines.dsh')
+  const incompatible = evaluatePluginCompatibility(manifest, {}, getDshRuntimeVersion())
+  if (incompatible) throw new Error(`packed manifest is rejected by the DSH plugin compatibility check: ${JSON.stringify(incompatible)}`)
 }
 
 async function assertDeclarationGraph(lib) {

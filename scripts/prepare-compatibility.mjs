@@ -26,6 +26,7 @@ const isDsh = name => name === '@deepseek-ai/dsh' || name.startsWith('@deepseek-
 const isCordis = name => name === '@deepseek-ai/cordis' || name.startsWith('@deepseek-ai/cordis-')
 const names = [...new Set(sections.flatMap(section => Object.keys(manifest[section] ?? {})))].sort()
 const declaredPeerDependencies = { ...manifest.peerDependencies }
+const declaredEngines = { ...manifest.engines }
 const dshVersion = await latestVersion('@deepseek-ai/dsh')
 const versions = Object.fromEntries(await Promise.all(names.filter(name => isDsh(name) || isCordis(name)).map(async name => [
   name,
@@ -39,6 +40,10 @@ for (const section of sections) {
   }
 }
 
+// DSH's plugin gate lets an own engines.dsh range decide alone. Repin it with the
+// peers so the probe measures API compatibility, not the published support range.
+if (manifest.engines?.dsh !== undefined) manifest.engines.dsh = dshVersion
+
 // Repin peers only in the disposable candidate, so packed consumers use the same
 // upstream versions as source tests rather than silently installing the old peers.
 await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`)
@@ -47,6 +52,7 @@ await writeFile(resolve(workspace, 'upstream-versions.json'), `${JSON.stringify(
   channel: 'latest',
   package: `${manifest.name}@${manifest.version}`,
   declaredPeerDependencies,
+  declaredEngines,
   versions,
 }, null, 2)}\n`)
 if (process.env.GITHUB_OUTPUT) {

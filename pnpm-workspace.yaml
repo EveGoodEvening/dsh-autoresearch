@@ -10,11 +10,12 @@ minimumReleaseAgeStrict: true
 minimumReleaseAgeExclude:
   # DSH publishes one synchronized prerelease family; exact versions remain locked in pnpm-lock.yaml.
   - '@deepseek-ai/*'
-# Upstream Host/tooling pins still resolve these vulnerable versions.
+# Exact-version overrides. Unless noted, upstream Host/tooling pins still resolve these vulnerable versions.
 overrides:
+  # Works around dsh-otel's exact OTel SDK 2.11.0/0.222.0 peers (<1.10.0) vs its
+  # own ^1.9.1 api range. Not a security fix; remove once upstream aligns.
+  '@opentelemetry/api@1.10.0': 1.9.1
   '@modelcontextprotocol/client@2.2.0': 2.3.0
-  '@modelcontextprotocol/sdk@1.30.0': 1.32.0
   'fflate@0.8.2': 0.8.3
   'undici@8.11.2': 8.12.2
-  'vite@8.2.1': 8.2.4
   'zod@4.4.3': 4.6.7

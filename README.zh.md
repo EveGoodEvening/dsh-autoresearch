@@ -12,11 +12,11 @@
 
 | 组件 | 支持版本 | 已测试版本 |
 | --- | --- | --- |
-| DSH CLI（`@deepseek-ai/dsh`）及 DSH 服务对等依赖 | **`0.2.1-rc.2`**（精确版本，整套组件同步） | `0.2.1-rc.2` |
+| DSH CLI（`@deepseek-ai/dsh`）及 DSH 服务对等依赖 | **`>=0.2.1-rc.2 <0.2.2-0`**（`engines.dsh` 及对等依赖） | `0.2.1-rc.5` |
 | Cordis（`@deepseek-ai/cordis`） | **`~4.0.5`** | `4.0.5` |
 | Node.js | `^22.23.4 \|\| ^24.22.1 \|\| >=26.12.1` | `24.22.1` |
 
-上述支持组合已于 **2026-10-26** 验证，并通过了打包后独立安装及 Web profile 的冒烟测试。请使用**带作用域的 Cordis 分支**，而不是无作用域的 `cordis`。此 DSH 组合使用预发布版本；未声明支持其他 DSH 版本。每日的[上游兼容性检查](https://github.com/EveGoodEvening/dsh-autoresearch/blob/master/.github/workflows/compatibility.yml)不会自动扩大上述支持范围。
+上述已测试组合已于 **2026-10-31** 验证，并通过了打包后独立安装及 Web profile 的冒烟测试。请使用**带作用域的 Cordis 分支**，而不是无作用域的 `cordis`。DSH 的插件兼容性检查以 `engines.dsh` 为准，因此接受从 `rc.2` 到正式版 `0.2.1` 之间的任意 `0.2.1` 预发布版本；`0.2.2` 预发布版本移除了本插件使用的 API，因此被排除。每日的[上游兼容性检查](https://github.com/EveGoodEvening/dsh-autoresearch/blob/master/.github/workflows/compatibility.yml)不会自动扩大上述支持范围。
 
 Node.js 的最低安全版本要求涵盖了 2026 年 10 月的 TLS/Brotli 修复和 [eMudhra CA 修复措施](https://emudhra.we-have-a-problem.com/)。请及时为宿主运行时及其操作系统的 CA 证书库安装补丁；插件的锁文件无法更新这两者。依赖审计包括开发依赖和可选依赖，并在发现 **low（低危）** 及以上级别问题时失败，而不是隐藏低危问题。
 
