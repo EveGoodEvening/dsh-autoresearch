@@ -1,5 +1,34 @@
 # Changelog
 
+## v0.0.4
+
+### Changed
+
+- Declare DSH support as the range `>=0.2.1-rc.2 <0.2.2-0` through a new
+  `engines.dsh` field and matching DSH peer ranges, replacing exact
+  `0.2.1-rc.2` peers. DSH's plugin compatibility check rejected the exact pins
+  on newer `0.2.1` prereleases even though the APIs used are unchanged. `0.2.2`
+  prereleases are excluded because they remove `ToolsService.presentAs()`.
+- Test against the DSH `0.2.1-rc.5` CLI and service family and
+  `cordis-plugin-hmr` `1.0.20`; regenerate the lockfile from a fresh
+  resolution.
+- Add a development override pinning `@opentelemetry/api` `1.10.0` to `1.9.1`
+  so `dsh-otel`'s exact OpenTelemetry SDK peers are satisfied. This is not a
+  security fix and does not affect consumer-managed Hosts.
+- Drop the `@modelcontextprotocol/sdk` and `vite` overrides; their vulnerable
+  versions are no longer resolved.
+- Add a regression test that runs DSH's own plugin compatibility check against
+  the package manifest, and have the release smoke require the packed manifest
+  to keep `engines.dsh`, matching DSH peer ranges and pass that check.
+- Have the upstream compatibility probe repin `engines.dsh` along with the
+  peers and record the declared engines and peers.
+
+### Fixed
+
+- The fresh resolution selects `fast-uri` `3.1.9`, clearing the four
+  `fast-uri@3.1.8` advisories carried since v0.0.2; the low-severity audit now
+  reports no known vulnerabilities.
+
 ## v0.0.3
 
 ### Added
