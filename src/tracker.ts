@@ -871,7 +871,8 @@ function secureDeleteFile(path: string, info: Stats): void {
 function validateOwnerFile(path: string, info: Stats): void {
   if (!info.isFile() || info.isSymbolicLink()) throw new TrackerTransitionError(`retained path is not a regular file: ${path}`)
   if (typeof process.getuid === 'function' && info.uid !== process.getuid()) throw new TrackerTransitionError(`retained file is not owner-controlled: ${path}`)
-  if ((info.mode & 0o077) !== 0) throw new TrackerTransitionError(`retained file is not owner-only: ${path}`)
+  // POSIX mode bits are synthesized on Windows; enforced only on POSIX.
+  if (process.platform !== 'win32' && (info.mode & 0o077) !== 0) throw new TrackerTransitionError(`retained file is not owner-only: ${path}`)
   if (realpathSync(path) !== path) throw new TrackerTransitionError(`retained file traverses a symlink: ${path}`)
 }
 
