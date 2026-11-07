@@ -25,6 +25,12 @@
   agents that `cd` into a repository before calling `autoresearch` (and child
   agents, which inherit the parent's header cwd) always failed preflight with
   `fatal: not a git repository` even when the target repository was valid.
+- Apply the owner-only permission-bit checks in `StateLayout` only on POSIX
+  platforms. On Windows, `lstat()` synthesizes mode bits from the read-only
+  attribute (always `0o0666` with group/other bits set) and `chmod` cannot
+  express POSIX permissions, so every state-root open threw
+  `state root must not be accessible by group or other users` and the plugin
+  was unusable on Windows. Windows access control remains enforced by ACLs.
 
 ## v0.0.4
 

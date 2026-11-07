@@ -5,6 +5,15 @@ export class StateLayoutError extends Error {
   constructor(message: string) { super(message); this.name = 'StateLayoutError' }
 }
 
+/**
+ * Windows `lstat()` synthesizes mode bits from the read-only attribute (0o666),
+ * so POSIX group/other permission checks are meaningless there — real access
+ * control is via ACLs. Skip the check off POSIX platforms.
+ */
+function accessibleByGroupOrOther(info: { mode: number }): boolean {
+  return process.platform !== 'win32' && (info.mode & 0o077) !== 0
+}
+
 /** Owner-only, non-symlink filesystem capability rooted at one canonical state directory. */
 export class StateLayout {
   readonly root: string
@@ -16,7 +25,7 @@ export class StateLayout {
     const info = lstatSync(absolute)
     if (!info.isDirectory() || info.isSymbolicLink()) throw new StateLayoutError('state root must be a real directory')
     if (typeof process.getuid === 'function' && info.uid !== process.getuid()) throw new StateLayoutError('state root must be owned by the current user')
-    if ((info.mode & 0o077) !== 0) throw new StateLayoutError('state root must not be accessible by group or other users')
+    if ((info.mode & 0o077) !== 0 && accessibleByGroupOrOther(info)) throw new StateLayoutError('state root must not be accessible by group or other users')
     chmodSync(absolute, 0o700)
     return new StateLayout(realpathSync(absolute))
   }
@@ -26,7 +35,7 @@ export class StateLayout {
     const info = lstatSync(absolute)
     if (!info.isDirectory() || info.isSymbolicLink()) throw new StateLayoutError('state root must be a real directory')
     if (typeof process.getuid === 'function' && info.uid !== process.getuid()) throw new StateLayoutError('state root must be owned by the current user')
-    if ((info.mode & 0o077) !== 0) throw new StateLayoutError('state root must not be accessible by group or other users')
+    if ((info.mode & 0o077) !== 0 && accessibleByGroupOrOther(info)) throw new StateLayoutError('state root must not be accessible by group or other users')
     return new StateLayout(realpathSync(absolute))
   }
 
@@ -124,7 +133,7 @@ export class StateLayout {
     const info = lstatSync(path)
     if (info.isSymbolicLink() || (directory ? !info.isDirectory() : !info.isFile())) throw new StateLayoutError(`unsafe state ${directory ? 'directory' : 'file'}: ${path}`)
     if (typeof process.getuid === 'function' && info.uid !== process.getuid()) throw new StateLayoutError(`state path is not owner-controlled: ${path}`)
-    if ((info.mode & 0o077) !== 0) throw new StateLayoutError(`state path is accessible by group or other users: ${path}`)
+    if ((info.mode & 0o077) !== 0 && accessibleByGroupOrOther(info)) throw new StateLayoutError(`state path is accessible by group or other users: ${path}`)
   }
 }
 
