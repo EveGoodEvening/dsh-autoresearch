@@ -31,6 +31,13 @@
   express POSIX permissions, so every state-root open threw
   `state root must not be accessible by group or other users` and the plugin
   was unusable on Windows. Windows access control remains enforced by ACLs.
+- Compare worktree paths separator-normalized (and case-insensitively on
+  Windows). `git worktree list --porcelain` reports paths with forward slashes
+  while run identities are built with `node:path.join` (backslashes on
+  Windows), so the allocation resume check in `allocateRunWorktree` always
+  threw `git-identity-collision` on Windows, `inspectRunGitState` reported
+  registered worktrees as missing, and `removeRunWorktree` silently skipped
+  removal.
 
 ## v0.0.4
 
