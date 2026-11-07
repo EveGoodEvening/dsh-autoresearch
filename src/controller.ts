@@ -52,7 +52,13 @@ function trackerPathForRun(discovery: RepositoryDiscovery, stateRoot: string, ru
 }
 
 export async function preflightAutoresearchRepository(ctx: Context, options: Pick<AutoresearchRunControllerOptions, 'config' | 'input' | 'parent' | 'signal'>): Promise<AcceptedRepositoryPreflight> {
-  const callerCwd = String(options.parent.session.header.cwd)
+  // Anchor on the parent's EFFECTIVE working directory — the workingDirectory
+  // service folds session.header.cwd plus model-visible working-directory/change
+  // events — not the immutable session header: agents commonly cd into a
+  // repository before calling autoresearch, and child agents inherit the
+  // parent's header cwd even when the parent's effective directory moved.
+  const workingDirectory = (ctx as unknown as { get(name: 'workingDirectory'): { get(session: Agent['session']): string } | undefined }).get('workingDirectory')
+  const callerCwd = String(workingDirectory?.get(options.parent.session) ?? options.parent.session.header.cwd)
   const timeoutMs = options.input.timeout_ms ?? options.config.defaultTimeoutMs
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > options.config.maxTimeoutMs) throw new TypeError('timeout_ms exceeds deployment maximum')
   const gitOptions = { timeoutMs: options.config.gitTimeoutMs, graceMs: options.config.terminationGraceMs, maxStdoutBytes: options.config.gitMaxStdoutBytes, maxStderrBytes: options.config.gitMaxStderrBytes }

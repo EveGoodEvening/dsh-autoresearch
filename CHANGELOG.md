@@ -1,5 +1,31 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Support DSH `0.2.2` prereleases: widen `engines.dsh` and the DSH peer ranges
+  to `>=0.2.1-rc.2 <0.2.3-0` and accept cordis `~4.1.0` alongside `~4.0.5`.
+  `ToolsService.presentAs()` was the only API removed in `0.2.2` that this
+  plugin used; every other dependency (`agents.create`, `jobs.start/list`,
+  `jobs.events.subscribe`, `subprocess.spawn/resolveExecutable`,
+  `systemPrompt.section`, `tools.register/guard`, the `dsh-subagent`
+  child-composition helpers, `createUserMessage`, `validateJsonSchemaValue`,
+  `scrubbedParentEnv`) is unchanged on `0.2.2-rc.1`.
+- Drop the `childCtx.tools.presentAs('native')` call from the proposal child
+  setup: the method no longer exists on `0.2.2`, and the report tool works
+  unchanged as a regularly registered plugin tool (its card renders as
+  `generic` instead of native-styled).
+
+### Fixed
+
+- Anchor repository preflight on the calling agent's EFFECTIVE working
+  directory (`ctx.get('workingDirectory').get(session)`), falling back to
+  `session.header.cwd`. The header cwd is immutable at session creation, so
+  agents that `cd` into a repository before calling `autoresearch` (and child
+  agents, which inherit the parent's header cwd) always failed preflight with
+  `fatal: not a git repository` even when the target repository was valid.
+
 ## v0.0.4
 
 ### Changed
