@@ -45,7 +45,6 @@ interface HarnessFixture {
   readonly childSessions: Array<{ append: Mock }>
   readonly childTools: Map<string, ToolDefinition>
   readonly restrictions: unknown[]
-  readonly presentations: string[]
   readonly sections: Array<{ name: string; order: number; text: string }>
   readonly order: string[]
   readonly prompts: string[]
@@ -65,7 +64,6 @@ function fixture(): HarnessFixture {
   const childSessions: Array<{ append: Mock }> = []
   const childTools = new Map<string, ToolDefinition>()
   const restrictions: unknown[] = []
-  const presentations: string[] = []
   const sections: Array<{ name: string; order: number; text: string }> = []
   const resultListeners: ResultListener[] = []
   const order: string[] = []
@@ -114,7 +112,7 @@ function fixture(): HarnessFixture {
         },
         tools: {
           restrict(value: unknown) { restrictions.push(value); order.push('restrict'); return () => undefined },
-          presentAs(value: string) { presentations.push(value); order.push('present'); return () => undefined },
+          setExecutor() { return () => undefined },
           register(tool: ToolDefinition) { childTools.set(tool.name, tool); order.push(`tool:${tool.name}`); return () => undefined },
           guard() { order.push('guard'); return () => undefined },
         },
@@ -180,7 +178,7 @@ function fixture(): HarnessFixture {
       return harness.liveJob && caller === childId.value ? [{ id: JobId('proposal-job'), kind: 'autoresearch', label: 'proposal', owner: caller, status: 'running', startedAt: 0, output: { total: 0, earliest: 0 } }] satisfies JobView[] : []
     } },
   }) as unknown as Context
-  Object.assign(harness, { ctx, parent, createOptions, childTools, childSessions, restrictions, presentations, sections, order, prompts, dispose, childId, jobListCallers, liveCount: () => live.size })
+  Object.assign(harness, { ctx, parent, createOptions, childTools, childSessions, restrictions, sections, order, prompts, dispose, childId, jobListCallers, liveCount: () => live.size })
   return harness
 }
 
@@ -225,7 +223,6 @@ describe('proposal-agent adapter', () => {
     })
     expect(f.createOptions[0]).not.toHaveProperty('seed')
     expect(f.restrictions).toEqual([{ allow: PROPOSAL_INHERITED_TOOLS }, { allow: PROPOSAL_INHERITED_TOOLS }])
-    expect(f.presentations).toEqual(['native', 'native'])
     expect(f.childSessions[0]?.append.mock.calls).toEqual([
       ['sandbox/mode', { mode: 'workspace-write', source: 'delegation' }],
       ['approval/policy', { policy: 'never', source: 'delegation' }],

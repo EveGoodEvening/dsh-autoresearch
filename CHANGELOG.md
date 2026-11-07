@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Upgrade the tested Host pairing to DSH `0.2.2-rc.1` and scoped
+  `@deepseek-ai/cordis` `4.1.0`. Declare `>=0.2.2-rc.1 <0.2.3-0` for
+  `engines.dsh` and every DSH peer, with Cordis peers at `~4.1.0`.
+- Align the Cordis plugin family and Schemastery `3.19.0`, and regenerate the
+  dependency lockfile without weakening the seven-day release-age or
+  low-severity security-audit policies.
+- Replace proposal children’s removed `tools.presentAs()` API with a scoped
+  `NativeToolExecutor` through `tools.setExecutor()`.
+- Migrate integration and installed-release verification to batched tool calls
+  and model-facing `job_output` reads for HMR cancellation results.
+- Drop Node.js 22 support to satisfy the new Host requirement, retaining the
+  patched runtime range `^24.22.1 || >=26.12.1`.
+
 ## v0.0.4
 
 ### Changed

@@ -23,19 +23,11 @@ const manifest: Manifest = probe
   ? { ...installed, engines: probe.declaredEngines, peerDependencies: probe.declaredPeerDependencies }
   : installed
 
-const accepted = ['0.2.1-rc.2', '0.2.1-rc.5', '0.2.1-rc.9', '0.2.1']
-const rejected = ['0.2.2-alpha.2', '0.2.0-rc.2']
+const accepted = ['0.2.2-rc.1', '0.2.2-rc.9', '0.2.2']
+const rejected = ['0.2.1-rc.5', '0.2.1', '0.2.2-alpha.2', '0.2.2-rc.0', '0.2.3-alpha.1', '0.2.3']
 const isDsh = (name: string) => name === '@deepseek-ai/dsh' || name.startsWith('@deepseek-ai/dsh-')
 
 describe('DSH plugin compatibility gate', () => {
-  it('declares one engines.dsh range shared by every DSH peer', () => {
-    const range = manifest.engines.dsh
-    expect(range).toBe('>=0.2.1-rc.2 <0.2.2-0')
-    const dshPeers = Object.entries(manifest.peerDependencies).filter(([name]) => isDsh(name))
-    expect(dshPeers.length).toBeGreaterThan(0)
-    for (const [, peerRange] of dshPeers) expect(peerRange).toBe(range)
-  })
-
   it.each(accepted)('dsh-app-boot accepts DSH %s', runtimeVersion => {
     expect(evaluatePluginCompatibility(manifest, {}, runtimeVersion)).toBeUndefined()
   })

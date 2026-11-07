@@ -4,6 +4,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentHandle, AgentOptions } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
+import { NativeToolExecutor } from '@deepseek-ai/dsh-tool-executor-native'
 import {
   appendDelegatedPolicyOverrides,
   applyChildComposition,
@@ -334,7 +335,7 @@ export async function requestProposal(ctx: Context, request: ProposalAgentReques
       setup(childCtx, childAgent) {
         appendDelegatedPolicyOverrides(childAgent.session, delegatedPolicy)
         applyChildComposition(childCtx, request.parent, { toolFilter: { allow: PROPOSAL_INHERITED_TOOLS } })
-        childCtx.tools.presentAs('native')
+        childCtx.tools.setExecutor(new NativeToolExecutor(childCtx))
         childCtx.tools.register(reportTool(async (args, exec) => {
           reportCalls += 1
           if (reportCalls !== 1) {
