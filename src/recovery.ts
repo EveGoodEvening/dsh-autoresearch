@@ -434,7 +434,8 @@ function readSecure(path: string): Buffer {
     const before = lstatSync(path)
     if (!before.isFile() || before.isSymbolicLink()) throw new Error('artifact is not a regular owner-controlled file')
     if (typeof process.getuid === 'function' && before.uid !== process.getuid()) throw new Error('artifact file is not owner-controlled')
-    if ((before.mode & 0o077) !== 0) throw new Error('artifact file is not owner-only')
+    // POSIX mode bits are synthesized on Windows; enforced only on POSIX.
+    if (process.platform !== 'win32' && (before.mode & 0o077) !== 0) throw new Error('artifact file is not owner-only')
     const canonical = realpathSync(path)
     if (canonical !== path) throw new Error('artifact path traverses a symlink')
     const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW)

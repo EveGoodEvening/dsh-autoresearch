@@ -536,9 +536,9 @@ export class DurableTracker {
     const temporary = `${destination}.${process.pid}.${randomUUID()}.tmp`
     try {
       const descriptor = openSync(temporary, 'wx', 0o600)
-      try { writeFileSync(descriptor, body, { encoding: 'utf8' }); fsyncSync(descriptor) } finally { closeSync(descriptor) }
+      try { writeFileSync(descriptor, body, { encoding: 'utf8' }); fsyncFile(descriptor) } finally { closeSync(descriptor) }
       renameSync(temporary, destination); chmodSync(destination, 0o600)
-      const directory = openSync(dirname(destination), 'r'); try { fsyncSync(directory) } finally { closeSync(directory) }
+      fsyncDirectory(dirname(destination))
     } catch (error) { try { unlinkSync(temporary) } catch { /* best effort for derived output */ }; throw error }
   }
 
@@ -871,7 +871,8 @@ function secureDeleteFile(path: string, info: Stats): void {
 function validateOwnerFile(path: string, info: Stats): void {
   if (!info.isFile() || info.isSymbolicLink()) throw new TrackerTransitionError(`retained path is not a regular file: ${path}`)
   if (typeof process.getuid === 'function' && info.uid !== process.getuid()) throw new TrackerTransitionError(`retained file is not owner-controlled: ${path}`)
-  if ((info.mode & 0o077) !== 0) throw new TrackerTransitionError(`retained file is not owner-only: ${path}`)
+  // POSIX mode bits are synthesized on Windows; enforced only on POSIX.
+  if (process.platform !== 'win32' && (info.mode & 0o077) !== 0) throw new TrackerTransitionError(`retained file is not owner-only: ${path}`)
   if (realpathSync(path) !== path) throw new TrackerTransitionError(`retained file traverses a symlink: ${path}`)
 }
 
@@ -892,7 +893,15 @@ function removeEmptyParents(start: string, stop: string): void {
   }
 }
 
-function fsyncDirectory(path: string): void { const fd = openSync(path, 'r'); try { fsyncSync(fd) } finally { closeSync(fd) } }
+/** File fsync that tolerates Windows handle-kind rejections (EPERM/EINVAL). */
+function fsyncFile(descriptor: number): void { try { fsyncSync(descriptor) } catch (error) { const code = (error as NodeJS.ErrnoException | undefined)?.code; if (!(process.platform === 'win32' && (code === 'EPERM' || code === 'EINVAL'))) throw error } }
+function fsyncDirectory(path: string): void {
+  // Windows rejects fsync on directory handles outright (EPERM); the data files
+  // inside are fsync'd, which is the durability that matters here.
+  if (process.platform === 'win32') return
+  const fd = openSync(path, 'r')
+  try { fsyncSync(fd) } catch (error) { if (((error as NodeJS.ErrnoException | undefined)?.code ?? '') !== 'EPERM') throw error } finally { closeSync(fd) }
+}
 function optionalLstat(path: string): Stats | undefined { try { return lstatSync(path) } catch (error) { if (errorCode(error) === 'ENOENT') return undefined; throw error } }
 function safeStateComponent(value: string, label: string): string { if (!/^[A-Za-z0-9._-]+$/u.test(value) || value === '.' || value === '..') throw new TrackerTransitionError(`${label} contains unsafe characters`); return value }
 function integer(value: unknown, label: string): number { const result = Number(value); if (!Number.isSafeInteger(result)) throw new TrackerTransitionError(`${label} must be an integer`); return result }

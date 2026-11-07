@@ -26,6 +26,10 @@ export function createEvaluatorArtifactWriterFactory(layout: StateLayout, runId:
 interface DirectoryIdentity { readonly path: string; readonly dev: number; readonly ino: number }
 
 /** Attempt-scoped, exclusive artifact capability. Mint only after durable attempt allocation. */
+/** POSIX permission bits are synthesized on Windows (lstat mode 0o666); enforce
+ * group/other exclusion only on POSIX platforms, matching StateLayout. */
+function accessibleByGroupOrOther(info: { mode: number }): boolean { return process.platform !== 'win32' && (info.mode & 0o077) !== 0 }
+
 export class EvaluatorArtifactWriter {
   readonly attemptDirectory: string
   private readonly parent: DirectoryIdentity
@@ -37,7 +41,7 @@ export class EvaluatorArtifactWriter {
     const info = lstatSync(directory)
     if (!info.isDirectory() || info.isSymbolicLink()) throw new TypeError('artifact attempt directory must be a real directory')
     if (typeof process.getuid === 'function' && info.uid !== process.getuid()) throw new TypeError('artifact attempt directory must be owner-controlled')
-    if ((info.mode & 0o077) !== 0) throw new TypeError('artifact attempt directory must be owner-only')
+    if (accessibleByGroupOrOther(info)) throw new TypeError('artifact attempt directory must be owner-only')
     this.attemptDirectory = directory
     this.parent = Object.freeze({ path: directory, dev: info.dev, ino: info.ino })
     Object.freeze(this.parent)
@@ -69,7 +73,8 @@ export class EvaluatorArtifactWriter {
       if (!opened.isFile()) throw new TypeError('artifact destination must be a regular file')
       if (typeof process.getuid === 'function' && opened.uid !== process.getuid()) throw new TypeError('artifact destination must be owner-controlled')
       writeFileSync(fd, bytes)
-      fsyncSync(fd)
+      // Windows rejects fsync on some handle kinds (EPERM); tolerate only that.
+      try { fsyncSync(fd) } catch (error) { const code = (error as NodeJS.ErrnoException | undefined)?.code; if (!(process.platform === 'win32' && (code === 'EPERM' || code === 'EINVAL'))) throw error }
       const final = fstatSync(fd)
       if (final.dev !== opened.dev || final.ino !== opened.ino || final.size !== bytes.length) throw new TypeError('artifact destination identity changed')
     } finally { closeSync(fd) }
@@ -81,7 +86,7 @@ export class EvaluatorArtifactWriter {
     const info = lstatSync(this.parent.path)
     if (!info.isDirectory() || info.isSymbolicLink() || info.dev !== this.parent.dev || info.ino !== this.parent.ino) throw new TypeError('artifact attempt directory identity changed')
     if (typeof process.getuid === 'function' && info.uid !== process.getuid()) throw new TypeError('artifact attempt directory is not owner-controlled')
-    if ((info.mode & 0o077) !== 0) throw new TypeError('artifact attempt directory is not owner-only')
+    if (accessibleByGroupOrOther(info)) throw new TypeError('artifact attempt directory is not owner-only')
     const canonical = statSync(this.parent.path)
     if (canonical.dev !== info.dev || canonical.ino !== info.ino) throw new TypeError('artifact attempt directory traverses a symlink')
   }

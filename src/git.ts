@@ -208,9 +208,12 @@ export async function allocateRunWorktree(ctx: GitContext, executable: string, d
   assertDurableIdentity(discovery, identity, durable)
   const invoke = (args: readonly string[]) => runGit(ctx, executable, args, { ...options, cwd: discovery.repository }); const branchRef = `refs/heads/${identity.branch}`
   const branchCommit = await readOptionalRef(ctx, executable, branchRef, discovery.repository, options); const worktrees = parseWorktreeList((await invoke(['worktree', 'list', '--porcelain'])).stdout)
-  const registered = worktrees.find((item) => item.path === identity.worktree); const branchRegistration = worktrees.find((item) => item.branch === branchRef)
+  // `git worktree list --porcelain` reports native paths with forward slashes, while identity
+  // paths are built with node:path.join (backslashes on Windows). Compare separator-normalized,
+  // case-insensitively on Windows.
+  const registered = worktrees.find((item) => sameFsPath(item.path, identity.worktree)); const branchRegistration = worktrees.find((item) => item.branch === branchRef)
   if (branchCommit || registered || branchRegistration) {
-    if (!resume || !branchCommit || !registered || branchRegistration?.path !== identity.worktree || registered.branch !== branchRef) throw new GitBoundaryError('git-identity-collision', 'Run branch/worktree identity collides with another allocation')
+    if (!resume || !branchCommit || !registered || !sameFsPath(branchRegistration?.path ?? '', identity.worktree) || registered.branch !== branchRef) throw new GitBoundaryError('git-identity-collision', 'Run branch/worktree identity collides with another allocation')
     const head = (await runGit(ctx, executable, ['rev-parse', '--verify', 'HEAD^{commit}'], { ...options, cwd: identity.worktree })).stdout.trim(); const accepted = await readOptionalRef(ctx, executable, identity.acceptedRef, discovery.repository, options)
     if (branchCommit !== head) throw new GitBoundaryError('git-resume-mismatch', 'Run branch and worktree HEAD disagree')
     if (!await isAncestor(ctx, executable, durable.startCommit, branchCommit, discovery.repository, options)) throw new GitBoundaryError('git-resume-mismatch', 'Run branch is not descended from immutable start commit')
@@ -471,7 +474,7 @@ export async function inspectRunGitState(ctx: GitContext, executable: string, di
   const acceptedCommit = await readOptionalRef(ctx, executable, identity.acceptedRef, discovery.repository, options)
   const branchCommit = await readOptionalRef(ctx, executable, `refs/heads/${identity.branch}`, discovery.repository, options)
   const auditCommits = (await runGit(ctx, executable, ['for-each-ref', '--format=%(objectname)', identity.candidateRefPrefix], { ...options, cwd: discovery.repository })).stdout.split('\n').filter(Boolean)
-  const registered = parseWorktreeList((await runGit(ctx, executable, ['worktree', 'list', '--porcelain'], { ...options, cwd: discovery.repository })).stdout).find(item => item.path === identity.worktree)
+  const registered = parseWorktreeList((await runGit(ctx, executable, ['worktree', 'list', '--porcelain'], { ...options, cwd: discovery.repository })).stdout).find(item => sameFsPath(item.path, identity.worktree))
   const headCommit = registered ? await readOptionalRef(ctx, executable, 'HEAD^{commit}', identity.worktree, options) : undefined
   return { ...(acceptedCommit ? { acceptedCommit } : {}), ...(branchCommit ? { branchCommit } : {}), ...(headCommit ? { headCommit } : {}), auditCommits, worktreeRegistered: registered !== undefined, ...(registered?.branch ? { registeredBranch: registered.branch } : {}) }
 }
@@ -482,7 +485,7 @@ export async function removeRunWorktree(ctx: GitContext, executable: string, dis
     cwd: discovery.repository,
   })
   const worktrees = parseWorktreeList(result.stdout)
-  if (!worktrees.some(item => item.path === identity.worktree)) return
+  if (!worktrees.some(item => sameFsPath(item.path, identity.worktree))) return
   await runGit(ctx, executable, ['worktree', 'remove', identity.worktree], {
     ...options,
     cwd: discovery.repository,
@@ -543,6 +546,8 @@ function matchesAny(path: string, globs: readonly string[]): boolean { return gl
 function isProtected(path: string): boolean { return PROTECTED_DEFAULTS.some((entry) => path === entry || path.startsWith(`${entry}/`)) || path.startsWith('.git/') || /(^|\/)(?:eval|evaluator|dataset|policy)(?:\.|\/|$)/iu.test(path) }
 function exceptionalCategory(path: string, submodule: boolean, policy: Pick<NormalizedRunPolicy, 'exceptionalAllowlists' | 'evaluation' | 'provenance'>): boolean { const lists = policy.exceptionalAllowlists; if (submodule && matchesAny(path, lists.submodules)) return true; if ((path === '.gitmodules' || path.startsWith('.git/')) && matchesAny(path, lists.gitConfig)) return true; if (/^(?:package\.json|.*lock.*|pnpm-workspace\.yaml)$/u.test(path) && matchesAny(path, lists.dependencies)) return true; const evaluatorPath = policy.evaluation.cwd ? `${policy.evaluation.cwd}/${policy.evaluation.command}` : policy.evaluation.command; const repositoryEvaluatorPath = evaluatorPath.startsWith('/') ? undefined : normalizeRepoPath(evaluatorPath); if ((path === repositoryEvaluatorPath || /(^|\/)(?:eval|evaluator)(?:\.|\/|$)/iu.test(path)) && matchesAny(path, lists.evaluators)) return true; if (policy.provenance.evaluator === path && matchesAny(path, lists.evaluators)) return true; if (policy.provenance.dataset === path && matchesAny(path, lists.datasets)) return true; return false }
 function sameSet(left: readonly string[], right: readonly string[]): boolean { const a = [...left].sort(); const b = [...right].sort(); return a.length === b.length && a.every((value, index) => value === b[index]) }
+/** Filesystem-path equality that tolerates git's forward-slash reporting on Windows. */
+function sameFsPath(left: string, right: string): boolean { const unify = (value: string): string => value.replace(/\\/g, '/'); const a = unify(left); const b = unify(right); return process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b }
 function isUniqueConstraint(error: unknown): boolean { return String((error as { code?: unknown }).code ?? '').startsWith('SQLITE_CONSTRAINT') || String(error).includes('UNIQUE constraint failed') }
 function parseWorktreeList(value: string): Array<{ path: string; branch?: string }> { return value.trim().split(/\n\n+/u).filter(Boolean).map((block) => { const lines = block.split('\n'); const path = lines[0]?.startsWith('worktree ') ? lines[0].slice(9) : ''; const branch = lines.find((line) => line.startsWith('branch '))?.slice(7); return { path, ...(branch ? { branch } : {}) } }) }
 function parseDeclaredTreeEntries(value: string): Array<{ mode: string; type: string; object: string; path: string }> {

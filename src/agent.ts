@@ -334,7 +334,9 @@ export async function requestProposal(ctx: Context, request: ProposalAgentReques
       setup(childCtx, childAgent) {
         appendDelegatedPolicyOverrides(childAgent.session, delegatedPolicy)
         applyChildComposition(childCtx, request.parent, { toolFilter: { allow: PROPOSAL_INHERITED_TOOLS } })
-        childCtx.tools.presentAs('native')
+        // DSH 0.2.2 removed ToolsService.presentAs(); the report tool registers
+        // normally and renders as a generic plugin tool card instead of a
+        // native-styled one. Functionality is unchanged.
         childCtx.tools.register(reportTool(async (args, exec) => {
           reportCalls += 1
           if (reportCalls !== 1) {
