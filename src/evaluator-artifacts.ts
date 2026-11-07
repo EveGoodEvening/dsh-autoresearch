@@ -73,7 +73,8 @@ export class EvaluatorArtifactWriter {
       if (!opened.isFile()) throw new TypeError('artifact destination must be a regular file')
       if (typeof process.getuid === 'function' && opened.uid !== process.getuid()) throw new TypeError('artifact destination must be owner-controlled')
       writeFileSync(fd, bytes)
-      fsyncSync(fd)
+      // Windows rejects fsync on some handle kinds (EPERM); tolerate only that.
+      try { fsyncSync(fd) } catch (error) { const code = (error as NodeJS.ErrnoException | undefined)?.code; if (!(process.platform === 'win32' && (code === 'EPERM' || code === 'EINVAL'))) throw error }
       const final = fstatSync(fd)
       if (final.dev !== opened.dev || final.ino !== opened.ino || final.size !== bytes.length) throw new TypeError('artifact destination identity changed')
     } finally { closeSync(fd) }
