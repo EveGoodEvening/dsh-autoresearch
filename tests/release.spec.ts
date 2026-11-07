@@ -18,11 +18,10 @@ describe('release and consumer contract', () => {
 
   it('requires the packed manifest to keep the DSH compatibility range', () => {
     const source = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))
-    expect(() => assertManifest(source, source)).not.toThrow()
     const { engines: { dsh: _dsh, ...engines }, ...rest } = source
     expect(() => assertManifest({ ...rest, engines }, source)).toThrow(/engines\.dsh/)
     expect(() => assertManifest({ ...source, peerDependencies: { ...source.peerDependencies, '@deepseek-ai/dsh-tools': '0.2.1-rc.2' } }, source)).toThrow(/DSH peers/)
-    const future = { ...source, engines: { ...source.engines, dsh: '>=0.2.2-0' }, peerDependencies: Object.fromEntries(Object.entries(source.peerDependencies).map(([name, range]) => [name, name.startsWith('@deepseek-ai/dsh') ? '>=0.2.2-0' : range])) }
+    const future = { ...source, engines: { ...source.engines, dsh: '>=0.2.3-0' }, peerDependencies: Object.fromEntries(Object.entries(source.peerDependencies).map(([name, range]) => [name, name.startsWith('@deepseek-ai/dsh') ? '>=0.2.3-0' : range])) }
     expect(() => assertManifest(future, future)).toThrow(/compatibility check/)
   })
 

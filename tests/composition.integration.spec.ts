@@ -11,9 +11,8 @@ import type { SubprocessHandle } from '@deepseek-ai/dsh-subprocess'
 import type {} from '@deepseek-ai/dsh-tool-jobs'
 import { JobId, type JobEvent } from '@deepseek-ai/dsh-jobs'
 import { SessionId } from '@deepseek-ai/dsh-session'
-import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { COMPOSITION_TERMINATION_GRACE_MS, composeHarness, assembledPrompt, observeJobSettlement, type RealHarness } from './fixtures/harness-composition.ts'
+import { COMPOSITION_TERMINATION_GRACE_MS, composeHarness, assembledPrompt, executeTool, observeJobSettlement, type RealHarness } from './fixtures/harness-composition.ts'
 import { calls, holdModel, releaseModel } from './fixtures/loader/model-provider.ts'
 
 const run = promisify(execFile)
@@ -80,7 +79,7 @@ function stringProperty(value: unknown, property: string): string {
 }
 
 async function execute(harness: RealHarness, name: string, args: unknown, agent: Agent) {
-  return harness.ctx.tools.execute({ callId: ToolCallId(`call-${crypto.randomUUID()}`), name, arguments: args, agent, signal: new AbortController().signal })
+  return executeTool(harness.ctx, name, args, agent)
 }
 
 function request(cwd: string, mode: 'background' | 'foreground' = 'background') {
@@ -379,10 +378,7 @@ describe('real Loader/profile production composition', () => {
     holdModel()
     try {
       await Promise.race([deadline.promise, (async () => {
-        const started = await harness.ctx.tools.execute({
-          callId: ToolCallId(`call-${crypto.randomUUID()}`), name: 'autoresearch',
-          arguments: request(cwd), agent: parent.agent, signal: operation.signal,
-        })
+        const started = await executeTool(harness.ctx, 'autoresearch', request(cwd), parent.agent, operation.signal)
         expect(started.isError).toBe(false)
         if (started.value && typeof started.value === 'object' && 'kind' in started.value && started.value.kind === 'background-start-failed') throw new Error(JSON.stringify(started.value))
         expect(started.value).toMatchObject({ kind: 'background', jobId: expect.stringMatching(/^autoresearch-/) })
@@ -437,9 +433,9 @@ describe('real Loader/profile production composition', () => {
         throw new Error(`autoresearch jobs survived HMR unload: ${JSON.stringify(jobs.map(job => ({ id: job.id, status: job.status, detail: job.detail, finishedAt: job.finishedAt, result: harness.ctx.jobs.read(JobId(job.id), parent.agent.id).result })))}`)
       }
       expect(jobs).toEqual([expect.objectContaining({ kind: 'autoresearch', status: 'killed', finishedAt: expect.any(Number) })])
-      const result = harness.ctx.jobs.read(JobId(jobs[0]!.id), parent.agent.id).result
-      if (result === undefined) throw new Error('HMR job has no authoritative cancellation result')
-      expect(JSON.parse(result)).toMatchObject({ status: 'cancelled' })
+      const output = await execute(harness, 'job_output', { job_id: jobs[0]!.id }, parent.agent)
+      expect(output.isError).toBe(false)
+      expect(JSON.parse(stringProperty(output.value, 'text'))).toMatchObject({ status: 'cancelled' })
       expect(harness.ctx.agents.list().map(agent => agent.id)).toEqual([parent.agent.id])
     } finally {
       try { await parent.dispose() } finally { terminal.dispose(); await marker.dispose() }
@@ -463,9 +459,9 @@ describe('real Loader/profile production composition', () => {
       await harness.reloadAutoresearch()
       const settled = harness.ctx.jobs.get(JobId(jobId), parent.agent.id)
       expect(settled.status).toBe('killed')
-      const result = harness.ctx.jobs.read(JobId(jobId), parent.agent.id).result
-      if (result === undefined) throw new Error('HMR job has no authoritative cancellation result')
-      expect(JSON.parse(result)).toMatchObject({ status: 'cancelled' })
+      const output = await execute(harness, 'job_output', { job_id: jobId }, parent.agent)
+      expect(output.isError).toBe(false)
+      expect(JSON.parse(stringProperty(output.value, 'text'))).toMatchObject({ status: 'cancelled' })
       releaseModel()
       expect(harness.ctx.agents.list().map(agent => agent.id)).toEqual([parent.agent.id])
       expect(harness.ctx.tools.schemas().filter(tool => tool.name === 'autoresearch')).toHaveLength(1)

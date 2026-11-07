@@ -12,11 +12,11 @@ The `autoresearch` tool measures a baseline, lets an agent edit allowed files in
 
 | Component | Supported | Tested |
 | --- | --- | --- |
-| DSH CLI (`@deepseek-ai/dsh`) and DSH service peers | **`>=0.2.1-rc.2 <0.2.2-0`** (`engines.dsh` and peers) | `0.2.1-rc.5` |
-| Cordis (`@deepseek-ai/cordis`) | **`~4.0.5`** | `4.0.5` |
-| Node.js | `^22.23.4 \|\| ^24.22.1 \|\| >=26.12.1` | `24.22.1` |
+| DSH CLI (`@deepseek-ai/dsh`) and DSH service peers | **`>=0.2.2-rc.1 <0.2.3-0`** (`engines.dsh` and peers) | `0.2.2-rc.1` |
+| Cordis (`@deepseek-ai/cordis`) | **`~4.1.0`** | `4.1.0` |
+| Node.js | `^24.22.1 \|\| >=26.12.1` | `24.22.1` |
 
-Tested pairing and packed-consumer/Web-profile smoke verified on **2026-10-31**. Use the **scoped Cordis fork**, not unscoped `cordis`. DSH's plugin check uses `engines.dsh`, so any `0.2.1` prerelease from `rc.2` through the final `0.2.1` is accepted; `0.2.2` prereleases are excluded because they remove an API this plugin uses. Daily [upstream compatibility checks](https://github.com/EveGoodEvening/dsh-autoresearch/blob/master/.github/workflows/compatibility.yml) do not automatically expand these ranges.
+Tested pairing and packed-consumer/Web-profile smoke verified on **2026-11-07**. Use the **scoped Cordis fork**, not unscoped `cordis`. Older DSH releases and Node.js 22 are no longer supported; `0.2.3` prereleases are outside the declared range. Daily [upstream compatibility checks](https://github.com/EveGoodEvening/dsh-autoresearch/blob/master/.github/workflows/compatibility.yml) do not automatically expand these ranges.
 
 The Node.js security floors include the October 2026 TLS/Brotli fixes and
 [eMudhra CA remediation](https://emudhra.we-have-a-problem.com/). Keep the Host

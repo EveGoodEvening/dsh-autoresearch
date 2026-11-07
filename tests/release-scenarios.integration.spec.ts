@@ -6,10 +6,9 @@ import { basename, dirname, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { describe, expect, it, vi } from 'vitest'
-import { composeHarness, observeJobSettlement, packageRoot } from './fixtures/harness-composition.ts'
+import { composeHarness, executeTool, observeJobSettlement, packageRoot } from './fixtures/harness-composition.ts'
 
 const evaluator = new URL('./fixtures/loader/evaluator.mjs', import.meta.url).pathname
 const descendantEvaluator = new URL('./fixtures/loader/evaluator-descendant-hold.mjs', import.meta.url).pathname
@@ -78,13 +77,7 @@ async function parent(ctx: Context, cwd: string) {
 }
 
 async function execute(ctx: Context, agent: Agent, args: unknown, signal: AbortSignal = new AbortController().signal): Promise<ReleaseToolValue> {
-  const result = await ctx.tools.execute({
-    callId: ToolCallId(`release-${crypto.randomUUID()}`),
-    name: 'autoresearch',
-    arguments: args,
-    agent,
-    signal,
-  })
+  const result = await executeTool(ctx, 'autoresearch', args, agent, signal)
   if (result.isError) throw new Error(JSON.stringify(result))
   return result.value as unknown as ReleaseToolValue
 }
@@ -325,18 +318,18 @@ releaseDescribe('packed release scenarios', () => {
         const started = await execute(harness.ctx, owner.agent, args)
         expect(started).toMatchObject({ kind: 'background', jobId: expect.any(String), runId: expect.any(String) })
 
-        const listed = await harness.ctx.tools.execute({ callId: ToolCallId('list'), name: 'job_list', arguments: {}, agent: owner.agent, signal: new AbortController().signal })
+        const listed = await executeTool(harness.ctx, 'job_list', {}, owner.agent)
         expect(listed.isError).toBe(false)
         expect(listed.value).toEqual(expect.arrayContaining([expect.objectContaining({ id: started.jobId })]))
 
         expect((await terminal.settled).job).toMatchObject({ id: started.jobId, status: 'completed' })
-        const output = await harness.ctx.tools.execute({ callId: ToolCallId('output'), name: 'job_output', arguments: { job_id: started.jobId }, agent: owner.agent, signal: new AbortController().signal })
+        const output = await executeTool(harness.ctx, 'job_output', { job_id: started.jobId }, owner.agent)
         expect(output.isError).toBe(false)
         const outputValue = output.value as unknown as { text: string }
         const completed = JSON.parse(outputValue.text) as ReleaseRun
         if (completed.status !== 'budget-limited') throw new Error(JSON.stringify({ status: completed.status, evidence: completed.evidence }))
 
-        const kill = await harness.ctx.tools.execute({ callId: ToolCallId('kill'), name: 'job_kill', arguments: { job_id: started.jobId }, agent: owner.agent, signal: new AbortController().signal })
+        const kill = await executeTool(harness.ctx, 'job_kill', { job_id: started.jobId }, owner.agent)
         expect(kill.isError).toBe(false)
         const noLiveJobs = harness.ctx.jobs.list(owner.agent.id).every(job => !['running', 'stopping'].includes(job.status))
 
@@ -386,11 +379,11 @@ releaseDescribe('packed release scenarios', () => {
         expect(ready.score).toBe(0)
         expect(ready.head).toBe(running.experiments.find(row => row.kind === 'candidate')?.candidate_commit)
         expect(ready.head).not.toBe(before.head)
-        const killed = await harness.ctx.tools.execute({ callId: ToolCallId('candidate-kill'), name: 'job_kill', arguments: { job_id: started.jobId }, agent: owner.agent, signal: new AbortController().signal })
+        const killed = await executeTool(harness.ctx, 'job_kill', { job_id: started.jobId }, owner.agent)
         expect(killed.isError).toBe(false)
         expect((await terminal.settled).job).toMatchObject({ id: started.jobId, status: 'killed' })
         await waitUntil(() => processGone(ready.pid), 'candidate evaluator survived cancellation')
-        const output = await harness.ctx.tools.execute({ callId: ToolCallId('candidate-output'), name: 'job_output', arguments: { job_id: started.jobId }, agent: owner.agent, signal: new AbortController().signal })
+        const output = await executeTool(harness.ctx, 'job_output', { job_id: started.jobId }, owner.agent)
         expect(output.isError).toBe(false)
         const outputValue = output.value
         if (!outputValue || typeof outputValue !== 'object' || !('text' in outputValue) || typeof outputValue.text !== 'string') throw new Error('candidate cancellation job output is missing result text')
@@ -429,7 +422,7 @@ releaseDescribe('packed release scenarios', () => {
         const args = request(cwd, 'release interruption resume', 'background')
         const started = await execute(harness.ctx, owner.agent, args); await waitUntil(async () => { try { await readFile(marker); return true } catch { return false } }, 'descendant evaluator did not start')
         const pids = JSON.parse(await readFile(marker, 'utf8')) as { parent: number; child: number }
-        const killed = await harness.ctx.tools.execute({ callId: ToolCallId('interrupt-kill'), name: 'job_kill', arguments: { job_id: started.jobId }, agent: owner.agent, signal: new AbortController().signal }); expect(killed.isError).toBe(false)
+        const killed = await executeTool(harness.ctx, 'job_kill', { job_id: started.jobId }, owner.agent); expect(killed.isError).toBe(false)
         expect((await terminal.settled).job).toMatchObject({ id: started.jobId, status: 'killed' })
         await waitUntil(async () => await processGone(pids.parent) && await processGone(pids.child), 'provider-owned evaluator tree survived cancellation')
         const { run_tag: _tag, evaluator_id: _evaluatorId, mode: _mode, ...stable } = args; const resumed = await execute(harness.ctx, owner.agent, { ...stable, resume_run_id: started.runId, mode: 'foreground' })

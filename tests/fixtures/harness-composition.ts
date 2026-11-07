@@ -5,6 +5,8 @@ import { dirname, join, relative } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { boot, composeEntries, createRuntimeResolution, initProfile, loadOverlayPatches, loadProfile, PluginPackages, writeProfileManifest } from '@deepseek-ai/dsh-app-boot'
 import type { Context } from '@deepseek-ai/cordis'
+import type { Agent } from '@deepseek-ai/dsh-agent'
+import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { JobEvent } from '@deepseek-ai/dsh-jobs'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { EntryOptions } from '@deepseek-ai/cordis-plugin-loader'
@@ -43,6 +45,18 @@ export function observeJobSettlement(ctx: Context, owner: SessionId) {
     if (event.type === 'settled') terminal.resolve(event)
   })
   return { settled: terminal.promise, dispose }
+}
+
+export async function executeTool(ctx: Context, name: string, args: unknown, agent: Agent, signal: AbortSignal = new AbortController().signal) {
+  const id = ToolCallId(`call-${crypto.randomUUID()}`)
+  const batch = await ctx.tools.execute({
+    calls: [{ type: 'tool-call', id, name, arguments: JSON.stringify(args) }],
+    agent,
+    signal,
+  })
+  const [settled] = batch.results
+  if (batch.results.length !== 1 || settled?.callId !== id) throw new Error(`tool batch did not settle ${id}`)
+  return settled.result
 }
 
 function providerOverlay(): PatchOptions[] {
