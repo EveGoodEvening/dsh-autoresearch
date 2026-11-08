@@ -23,7 +23,7 @@ export class RepositoryContainmentError extends GitBoundaryError {
   constructor(code: RepositoryContainmentCode, message: string, evidence: readonly string[] = []) { super(code, message, evidence); this.name = 'RepositoryContainmentError' }
 }
 export interface GitContext { readonly subprocess: Pick<SubprocessRuntime, 'spawn' | 'resolveExecutable'> }
-export interface GitEnvironmentOverrides { readonly GIT_INDEX_FILE?: string; readonly GIT_AUTHOR_NAME?: string; readonly GIT_AUTHOR_EMAIL?: string; readonly GIT_COMMITTER_NAME?: string; readonly GIT_COMMITTER_EMAIL?: string; readonly GIT_AUTHOR_DATE?: string; readonly GIT_COMMITTER_DATE?: string }
+export interface GitEnvironmentOverrides { readonly GIT_INDEX_FILE?: string; readonly GIT_AUTHOR_NAME?: string; readonly GIT_AUTHOR_EMAIL?: string; readonly GIT_COMMITTER_NAME?: string; readonly GIT_COMMITTER_EMAIL?: string; readonly GIT_AUTHOR_DATE?: string; readonly GIT_COMMITTER_DATE?: string; readonly LC_ALL?: string }
 export interface GitCommandOptions { readonly cwd: string; readonly timeoutMs: number; readonly graceMs: number; readonly maxStdoutBytes: number; readonly maxStderrBytes: number; readonly signal?: AbortSignal; readonly env?: GitEnvironmentOverrides; readonly stdinData?: string }
 export interface GitCommandResult { readonly argv: readonly string[]; readonly stdout: string; readonly stderr: string; readonly exitCode: number | null; readonly signal: NodeJS.Signals | null; readonly timedOut: boolean }
 export interface RepositoryDiscovery { readonly repository: string; readonly callerCwd: string; readonly gitCommonDir: string; readonly repositoryId: string; readonly startCommit: string }
@@ -114,13 +114,20 @@ export async function discoverContainedRepository(ctx: GitContext, executable: s
   return { ...parentDiscovery, callerCwd: target.requestedPath }
 }
 
+/** Containment authority for a changed working directory: the original repository root, or the original non-repository directory, plus the canonical original directory that anchors repository discovery. */
+export interface OriginalWorkspaceAuthority { readonly root: string; readonly repository: boolean; readonly anchor: string }
+
 /**
  * Resolve the containment authority for a caller whose effective working directory differs from its original one.
  * The immutable Session-header directory is the only authority: the repository containing it, or the directory itself
  * when it is not inside a repository. A model-changeable effective directory may select targets only inside that root.
- * Failure to discover a repository narrows the authority to the directory; cancellation and unsafe config still propagate.
+ * Authority comes from `rev-parse --show-toplevel` alone: a resolved top level is the repository authority even when later
+ * discovery steps (unborn HEAD, config) would fail, and only Git's positive "not a git repository" report narrows the
+ * authority to the directory; the probe runs with `LC_ALL=C` so that report is recognised under any Host locale. Every other,
+ * transient, cancelled or unsafe failure rejects the changed directory. The reported top level is not a discovery anchor
+ * (`core.worktree` can place it outside the Git directory's own discovery path), so callers discover from `anchor`.
  */
-export async function resolveOriginalWorkspaceAuthority(ctx: GitContext, executable: string, originalCwd: string, options: Omit<GitCommandOptions, 'cwd'>): Promise<string> {
+export async function resolveOriginalWorkspaceAuthority(ctx: GitContext, executable: string, originalCwd: string, options: Omit<GitCommandOptions, 'cwd'>): Promise<OriginalWorkspaceAuthority> {
   let canonical: string
   try {
     canonical = await realpath(normalizedAbsoluteInput(originalCwd, 'original workspace'))
@@ -128,13 +135,16 @@ export async function resolveOriginalWorkspaceAuthority(ctx: GitContext, executa
   } catch (error) {
     throw new RepositoryContainmentError('repository-target-outside-parent', 'The Session original workspace is unavailable, so a changed working directory cannot be authorized', [String((error as NodeJS.ErrnoException).code ?? error)])
   }
+  let toplevel: string
   try {
-    const { repository } = await discoverRepository(ctx, executable, canonical, options)
-    return isPathContained(repository, canonical) ? repository : canonical
+    toplevel = (await runGit(ctx, executable, ['rev-parse', '--show-toplevel'], { ...options, cwd: canonical, env: { LC_ALL: 'C' } })).stdout
   } catch (error) {
-    if (error instanceof GitBoundaryError && error.code === 'git-command-failed' && !options.signal?.aborted) return canonical
+    if (error instanceof GitBoundaryError && error.code === 'git-command-failed' && !options.signal?.aborted && /not a git repository/iu.test(String(error.evidence[1] ?? ''))) return { root: canonical, repository: false, anchor: canonical }
     throw error
   }
+  const repository = await canonicalGitPath(toplevel, canonical)
+  if (!isPathContained(repository, canonical)) throw new RepositoryContainmentError('repository-target-outside-parent', 'The Session original workspace is outside its reported repository, so a changed working directory cannot be authorized', [canonical, repository])
+  return { root: repository, repository: true, anchor: canonical }
 }
 
 /** Reject any canonical path that escapes the original-workspace authority from {@link resolveOriginalWorkspaceAuthority}. */
@@ -541,7 +551,7 @@ function priorControllerIsProvablyGone(claim: Record<string, unknown>): boolean 
   return actual === undefined || actual !== expected
 }
 function safeGitArgs(args: readonly string[]): readonly string[] { return args[0] === '-e' ? args : ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'diff.external=', '-c', 'interactive.diffFilter=', ...args] }
-function closedGitEnvironment(overrides: GitEnvironmentOverrides = {}): Record<string, string> { const base = scrubbedParentEnv(); for (const key of Object.keys(base)) if (/^GIT_/iu.test(key)) delete base[key]; const allowed: Readonly<Record<string, true>> = { GIT_INDEX_FILE: true, GIT_AUTHOR_NAME: true, GIT_AUTHOR_EMAIL: true, GIT_COMMITTER_NAME: true, GIT_COMMITTER_EMAIL: true, GIT_AUTHOR_DATE: true, GIT_COMMITTER_DATE: true }; for (const key of Object.keys(overrides)) if (allowed[key] !== true) throw new TypeError(`Unsupported Git environment override ${key}`); const explicit = Object.fromEntries(Object.entries(overrides).filter((entry): entry is [string, string] => entry[1] !== undefined)); return { ...base, ...explicit, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '1', GIT_PAGER: 'cat' } }
+function closedGitEnvironment(overrides: GitEnvironmentOverrides = {}): Record<string, string> { const base = scrubbedParentEnv(); for (const key of Object.keys(base)) if (/^GIT_/iu.test(key)) delete base[key]; const allowed: Readonly<Record<string, true>> = { GIT_INDEX_FILE: true, GIT_AUTHOR_NAME: true, GIT_AUTHOR_EMAIL: true, GIT_COMMITTER_NAME: true, GIT_COMMITTER_EMAIL: true, GIT_AUTHOR_DATE: true, GIT_COMMITTER_DATE: true, LC_ALL: true }; for (const key of Object.keys(overrides)) if (allowed[key] !== true) throw new TypeError(`Unsupported Git environment override ${key}`); const explicit = Object.fromEntries(Object.entries(overrides).filter((entry): entry is [string, string] => entry[1] !== undefined)); return { ...base, ...explicit, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '1', GIT_PAGER: 'cat' } }
 function requireSha(value: string, label: string): void { if (!FULL_SHA.test(value)) throw new GitBoundaryError('git-invalid-sha', `Git returned a non-full ${label}`) }
 function assertDurableIdentity(discovery: RepositoryDiscovery, identity: RunGitIdentity, durable: DurableGitIdentity): void { if (durable.runId !== identity.runId || durable.repositoryId !== discovery.repositoryId || durable.startCommit !== discovery.startCommit || durable.branch !== identity.branch || durable.worktree !== identity.worktree) throw new GitBoundaryError('git-durable-identity-mismatch', 'Allocation identity differs from the immutable durable run') }
 function normalizedAbsoluteInput(value: string, label: string, cwd = process.cwd()): string {

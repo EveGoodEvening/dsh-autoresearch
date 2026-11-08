@@ -684,6 +684,19 @@ describe('controller real Git/SQLite outcomes', { timeout: 30_000 }, () => {
       return { result: preflightAutoresearchRepository(ctx, request), ensure }
     }
 
+    it('fails closed when the working-directory service is registered but inactive instead of using the original directory', async () => {
+      const f = controllerFixture([])
+      const ensure = vi.fn()
+      const base = f.ctx as unknown as { get(name: string): unknown }
+      const ctx = Object.assign(Object.create(base) as object, { get: (name: string, strict = true) => name === 'workingDirectory' ? (strict ? undefined : { ensure }) : base.get(name) }) as unknown as Context
+      const caller = { ...f.parent, session: { ...f.parent.session, header: { ...f.parent.session.header, cwd: f.root } } } as unknown as Agent
+      const { repository: _repository, ...rest } = input
+      const spawned = f.subprocess.specs.length
+      await expect(preflightAutoresearchRepository(ctx, { config: controllerConfig(), input: rest as never, parent: caller, signal: new AbortController().signal })).rejects.toThrow('working-directory service is not active')
+      expect(ensure).not.toHaveBeenCalled()
+      expect(f.subprocess.specs.length).toBe(spawned)
+    })
+
     it('selects the repository from a changed directory inside a non-repository original workspace', async () => {
       const f = controllerFixture([])
       const workspace = tempDir('autoresearch-original-workspace-')
@@ -710,7 +723,7 @@ describe('controller real Git/SQLite outcomes', { timeout: 30_000 }, () => {
       ['a sibling repository of the original repository', (f: ControllerFixture) => ({ original: f.root, effective: gitRepo(join(tempDir('autoresearch-sibling-'), 'other')) })],
       ['a repository outside an unrelated non-repository original directory', (f: ControllerFixture) => ({ original: tempDir('autoresearch-unrelated-'), effective: f.root })],
       ['a symlink alias that resolves outside the original workspace', (f: ControllerFixture) => { const workspace = tempDir('autoresearch-alias-'); symlinkSync(f.root, join(workspace, 'link')); return { original: workspace, effective: join(workspace, 'link') } }],
-      ['a repository whose root lies above the original non-repository subdirectory', (f: ControllerFixture) => { const nested = join(f.root, 'untracked-workspace'); mkdirSync(nested); return { original: tempDir('autoresearch-unrelated-'), effective: nested } }],
+      ['a repository subdirectory outside an unrelated non-repository original directory', (f: ControllerFixture) => { const nested = join(f.root, 'untracked-workspace'); mkdirSync(nested); return { original: tempDir('autoresearch-unrelated-'), effective: nested } }],
     ])('rejects a model-changed directory into %s before discovering it', async (_label, layout) => {
       const f = controllerFixture([])
       const { original, effective } = layout(f)
@@ -718,6 +731,91 @@ describe('controller real Git/SQLite outcomes', { timeout: 30_000 }, () => {
       await expect(preflight(f, original, effective).result).rejects.toMatchObject({ code: 'repository-target-outside-parent' })
       const discoveredIn = f.subprocess.specs.slice(discoveredBefore).map(spec => spec.cwd)
       expect(discoveredIn).not.toContain(realpathSync(effective))
+    })
+
+    const gitfile = (path: string, target: string) => { mkdirSync(path, { recursive: true }); writeFileSync(join(path, '.git'), `gitdir: ${join(target, '.git')}\n`); return path }
+    const linkedWorktree = (repository: string, path: string) => { mkdirSync(dirname(path), { recursive: true }); execFileSync('git', ['-C', repository, 'worktree', 'add', '-q', '--detach', path]); return path }
+
+    it.each([
+      ['a nested repository', (f: ControllerFixture) => gitRepo(join(f.root, 'vendor', 'nested'))],
+      ['a .git file pointing at an outside repository', (f: ControllerFixture) => gitfile(join(f.root, 'x'), gitRepo(join(tempDir('autoresearch-victim-'), 'victim')))],
+      ['a linked worktree of an outside repository', (f: ControllerFixture) => linkedWorktree(gitRepo(join(tempDir('autoresearch-victim-'), 'victim')), join(f.root, 'vendor', 'wt'))],
+      ['an in-tree linked worktree of the original repository', (f: ControllerFixture) => linkedWorktree(f.root, join(f.root, '.worktrees', 'x'))],
+    ])('rejects a changed directory into %s inside the original repository as an explicit target would', async (_label, layout) => {
+      const f = controllerFixture([])
+      const effective = layout(f)
+      await expect(preflight(f, join(f.root, 'src'), undefined, effective).result).rejects.toMatchObject({ code: 'repository-target-nested' })
+      const discoveredBefore = f.subprocess.specs.length
+      await expect(preflight(f, join(f.root, 'src'), effective).result).rejects.toMatchObject({ code: 'repository-target-nested' })
+      expect(f.subprocess.specs.slice(discoveredBefore).map(spec => spec.cwd)).not.toContain(realpathSync(effective))
+    })
+
+    it.each([
+      ['a .git file pointing at an outside repository', (workspace: string) => gitfile(join(workspace, 'y'), gitRepo(join(tempDir('autoresearch-victim-'), 'victim')))],
+      ['a linked worktree of an outside repository', (workspace: string) => linkedWorktree(gitRepo(join(tempDir('autoresearch-victim-'), 'victim')), join(workspace, 'wt'))],
+    ])('rejects a changed directory into %s inside a non-repository original workspace', async (_label, layout) => {
+      const f = controllerFixture([])
+      const workspace = tempDir('autoresearch-original-workspace-')
+      await expect(preflight(f, workspace, layout(workspace)).result).rejects.toMatchObject({ code: 'repository-target-outside-parent', message: /outside the Session original workspace/ })
+    })
+
+    it('rejects a changed directory when original repository discovery fails for any reason other than a non-repository', async () => {
+      let failing: string | undefined
+      const f = controllerFixture([], [], {}, { gitSpawnFailure: spec => { if (failing !== undefined && spec.cwd === failing && spec.argv.includes('--show-toplevel')) { failing = undefined; return new Error('fatal: transient discovery failure') } return undefined } })
+      const original = join(f.root, 'sub'); const effective = join(original, 'deeper'); mkdirSync(effective, { recursive: true })
+      failing = realpathSync(original)
+      await expect(preflight(f, original, effective).result).rejects.toMatchObject({ code: 'git-command-failed', message: /transient discovery failure/ })
+      gitRepo(effective)
+      failing = realpathSync(original)
+      await expect(preflight(f, original, effective).result).rejects.toMatchObject({ code: 'git-command-failed', message: /transient discovery failure/ })
+      const accepted = await preflight(f, original, f.root).result
+      expect(accepted.discovery.repository).toBe(realpathSync(f.root))
+    })
+
+    it('keeps the repository authority of an original repository with an unborn HEAD', async () => {
+      const f = controllerFixture([])
+      const original = join(tempDir('autoresearch-unborn-'), 'repo'); mkdirSync(original); execFileSync('git', ['init', '-q', '-b', 'main', original])
+      const nested = gitRepo(join(original, 'vendor', 'nested'))
+      await expect(preflight(f, original, undefined, nested).result).rejects.toMatchObject({ code: 'git-command-failed', message: /HEAD\^\{commit\}/ })
+      const discoveredBefore = f.subprocess.specs.length
+      await expect(preflight(f, original, nested).result).rejects.toMatchObject({ code: 'git-command-failed', message: /HEAD\^\{commit\}/ })
+      expect(f.subprocess.specs.slice(discoveredBefore).map(spec => spec.cwd)).not.toContain(realpathSync(nested))
+    })
+
+    it('accepts an explicit absolute target inside the original repository after the directory moved outside it', async () => {
+      const f = controllerFixture([])
+      const outside = tempDir('autoresearch-moved-away-')
+      for (const target of [f.root, join(f.root, 'src')]) {
+        const expected = await preflight(f, f.root, undefined, target).result
+        const { result, ensure } = preflight(f, f.root, outside, target)
+        const accepted = await result
+        expect(accepted.discovery).toEqual(expected.discovery)
+        expect(accepted.discovery.callerCwd).toBe(realpathSync(target))
+        expect(ensure).not.toHaveBeenCalled()
+      }
+      mkdirSync(join(outside, 'src'))
+      await expect(preflight(f, f.root, outside, 'src').result).rejects.toMatchObject({ code: 'repository-target-outside-parent' })
+      await expect(preflight(f, f.root, outside, gitRepo(join(outside, 'other'))).result).rejects.toMatchObject({ code: 'repository-target-outside-parent' })
+    })
+
+    it('discovers from the original directory when its core.worktree repository is nested inside an outer repository', async () => {
+      const f = controllerFixture([])
+      const outer = gitRepo(join(tempDir('autoresearch-core-worktree-'), 'P'))
+      const tree = join(outer, 'X'); const meta = gitRepo(join(tree, 'meta')); mkdirSync(join(tree, 'other'))
+      execFileSync('git', ['-C', meta, 'config', 'core.worktree', realpathSync(tree)])
+      const expected = await preflight(f, meta, undefined, realpathSync(join(tree, 'other'))).result
+      expect(expected.discovery.repository).toBe(realpathSync(tree))
+      const accepted = await preflight(f, meta, join(tree, 'other')).result
+      expect(accepted.discovery).toEqual(expected.discovery)
+      expect(accepted.discovery.gitCommonDir).toBe(realpathSync(join(meta, '.git')))
+    })
+
+    it('recognises a non-repository original workspace under a translating Git locale', async () => {
+      const f = controllerFixture([], [], {}, { gitSpawnFailure: spec => spec.argv.includes('--show-toplevel') && spec.cwd === realpathSync(workspace) ? new Error(spec.env?.['LC_ALL'] === 'C' ? 'fatal: not a git repository (or any of the parent directories): .git' : 'fatal: Kein Git-Repository (oder irgendeines der Elternverzeichnisse): .git') : undefined })
+      const workspace = tempDir('autoresearch-localized-')
+      const project = gitRepo(join(workspace, 'project'))
+      const accepted = await preflight(f, workspace, project).result
+      expect(accepted.discovery.repository).toBe(realpathSync(project))
     })
 
     it('rejects a changed directory whose original workspace no longer exists', async () => {

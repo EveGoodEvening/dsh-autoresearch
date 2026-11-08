@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { realpath } from 'node:fs/promises'
-import { join } from 'node:path'
+import { isAbsolute, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { requestProposal, ProposalAgentError, type ProposalHistoryEntry } from './agent.js'
@@ -8,7 +8,7 @@ import { normalizeRunPolicy, type HostEvaluatorRegistration, type ResolvedConfig
 import { createEvaluatorArtifactWriterFactory } from './evaluator-artifacts.js'
 import { captureFrozenFileAttempt, createEvaluatorBoundary, evaluatorEvaluationSha256, freezeEvaluatorProvenanceFromManifest, FrozenEvaluatorBoundaryError, recomputeRegistrationManifest, revalidateEvaluatorBoundary, revalidateFrozenFileAttempt, runEvaluator, type FrozenEvaluatorProvenance } from './evaluator.js'
 import {
-  acquireControllerClaim, acquireRunLock, assertWithinOriginalWorkspace, resolveOriginalWorkspaceAuthority, allocateRunWorktree, canonicalizeRepositoryTarget, checkoutCandidateForEvaluation, commitCandidate, currentControllerProcessIdentity, deriveRegistrationManifestAtStartCommit, discoverContainedRepository, durableGitIdentity,
+  acquireControllerClaim, acquireRunLock, assertWithinOriginalWorkspace, resolveOriginalWorkspaceAuthority, allocateRunWorktree, canonicalizeRepositoryTarget, checkoutCandidateForEvaluation, commitCandidate, currentControllerProcessIdentity, deriveRegistrationManifestAtStartCommit, discoverContainedRepository, durableGitIdentity, RepositoryContainmentError,
   GitBoundaryError, heartbeatControllerClaim, makeRunGitIdentity, reconcileAcceptedHead, reconcileRejectedHead, recoverTerminalRunLock, recoverTerminalRunLockUnderControllerClaim, releaseControllerClaim, rollbackRunActivationAuthority,
   removeRunWorktree, resolveGitExecutable, restoreAcceptedWorktree, runGit, snapshotCandidate, validateCandidate, validateFrozenCandidatePaths,
   verifyExactWorktree, type CandidateSnapshot, type ControllerProcessIdentity, type GitCommandOptions, type GitConfigBaseline,
@@ -57,22 +57,28 @@ interface EffectiveWorkingDirectory { ensure(agent: Agent, signal?: AbortSignal)
 
 /**
  * Resolve the calling Agent's effective directory: the working-directory service when the Host mounts it
- * (tracking `cd`-style changes and missing-directory recovery), otherwise the Session's original `cwd`.
+ * (tracking `cd`-style changes and missing-directory recovery), otherwise the Session's original `cwd` when the Host
+ * composes no such service. A registered but inactive service (for example during HMR) fails closed rather than
+ * silently resolving targets against a directory the agent has left.
  */
 export async function resolveCallerCwd(ctx: Context, parent: Agent, signal: AbortSignal): Promise<string> {
   const workingDirectory = ctx.get('workingDirectory') as EffectiveWorkingDirectory | undefined
   if (workingDirectory !== undefined) return workingDirectory.ensure(parent, signal)
+  if (ctx.get('workingDirectory', false) !== undefined) throw new Error('The working-directory service is not active; retry autoresearch after it reloads')
   return String(parent.session.header.cwd)
 }
 
 /**
  * The effective directory selects the default and relative repository target. Because the model can change it without
- * approval, a changed directory is authorized only inside the immutable original workspace (its repository, or the
- * directory itself), checked before target discovery and again for the discovered repository root.
+ * approval, a changed directory is authorized only inside the immutable original workspace, and the effective directory
+ * and target are checked against it before discovery. Inside an original repository, discovery is anchored at the
+ * canonical original directory and must find that same repository, so nested repositories, `.git` files and linked worktrees are rejected exactly as an explicit target would be.
+ * Inside an original non-repository directory, the discovered repository root and Git common dir must stay inside it.
  */
 export async function preflightAutoresearchRepository(ctx: Context, options: Pick<AutoresearchRunControllerOptions, 'config' | 'input' | 'parent' | 'signal'>): Promise<AcceptedRepositoryPreflight> {
   const originalCwd = String(options.parent.session.header.cwd)
-  const callerCwd = await resolveCallerCwd(ctx, options.parent, options.signal)
+  // An explicit absolute target selects itself, so the effective directory has no authority over it: anchor at the original directory.
+  const callerCwd = typeof options.input.repository === 'string' && isAbsolute(options.input.repository) ? originalCwd : await resolveCallerCwd(ctx, options.parent, options.signal)
   const timeoutMs = options.input.timeout_ms ?? options.config.defaultTimeoutMs
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > options.config.maxTimeoutMs) throw new TypeError('timeout_ms exceeds deployment maximum')
   const gitOptions = { timeoutMs: options.config.gitTimeoutMs, graceMs: options.config.terminationGraceMs, maxStdoutBytes: options.config.gitMaxStdoutBytes, maxStderrBytes: options.config.gitMaxStderrBytes }
@@ -81,9 +87,10 @@ export async function preflightAutoresearchRepository(ctx: Context, options: Pic
   const gitExecutable = await resolveGitExecutable(ctx, options.config.gitExecutable, options.signal)
   const changed = callerCwd !== originalCwd && requestedTarget.parentCwd !== await realpath(originalCwd).catch(() => undefined)
   const authority = changed ? await resolveOriginalWorkspaceAuthority(ctx, gitExecutable, originalCwd, commandOptions) : undefined
-  if (authority !== undefined) assertWithinOriginalWorkspace(authority, requestedTarget.parentCwd)
-  const discovery = await discoverContainedRepository(ctx, gitExecutable, requestedTarget, commandOptions)
-  if (authority !== undefined) assertWithinOriginalWorkspace(authority, discovery.repository)
+  if (authority !== undefined) assertWithinOriginalWorkspace(authority.root, requestedTarget.parentCwd, requestedTarget.requestedPath)
+  const discovery = await discoverContainedRepository(ctx, gitExecutable, authority?.repository === true ? { ...requestedTarget, parentCwd: authority.anchor } : requestedTarget, commandOptions)
+  if (authority?.repository === true && discovery.repository !== authority.root) throw new RepositoryContainmentError('repository-target-outside-parent', 'Repository discovered from the Session original workspace differs from its authority', [discovery.repository, authority.root])
+  if (authority !== undefined && !authority.repository) assertWithinOriginalWorkspace(authority.root, discovery.repository, discovery.gitCommonDir)
   return { discovery, gitExecutable, gitOptions }
 }
 
