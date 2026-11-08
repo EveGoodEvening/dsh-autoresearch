@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process'
 import { readdirSync, watch } from 'node:fs'
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
@@ -219,6 +219,37 @@ describe('real Loader/profile production composition', () => {
         expect(persistedBackgroundJobIds(target.path)).toEqual([])
       }
     } finally { await parent.dispose() }
+  }, 30_000)
+
+  it('follows the real working_directory tool inside the original workspace and rejects a model cd outside it', async () => {
+    const harness = await composeHarness(); active.push(harness)
+    const ownerRoot = join(harness.root, 'owner'); const externalRoot = join(harness.root, 'external'); await mkdir(ownerRoot); await mkdir(externalRoot)
+    const ownerRepository = await repository(ownerRoot)
+    const externalRepository = await repository(externalRoot)
+    const parent = await parentAgent(harness, ownerRoot, 'effective-cwd')
+    const terminal = observeJobSettlement(harness.ctx, parent.agent.id)
+    const { repository: _repository, ...omitted } = request(ownerRepository)
+    try {
+      expect((await execute(harness, 'working_directory', { cd: externalRepository }, parent.agent)).isError).toBe(false)
+      expect((harness.ctx as unknown as { workingDirectory: { get(session: unknown): string } }).workingDirectory.get(parent.agent.session)).toBe(await realpath(externalRepository))
+      for (const mode of ['foreground', 'background'] as const) {
+        const escaped = await execute(harness, 'autoresearch', { ...omitted, mode }, parent.agent)
+        expect(escaped.isError).toBe(true)
+        expect(escaped.error).toMatchObject({ message: 'Effective working directory or repository is outside the Session original workspace' })
+        expect(harness.ctx.jobs.list(parent.agent.id)).toEqual([])
+        expect(persistedBackgroundJobIds(externalRepository)).toEqual([])
+      }
+
+      expect((await execute(harness, 'working_directory', { cd: ownerRepository }, parent.agent)).isError).toBe(false)
+      expect(parent.agent.session.header.cwd).toBe(ownerRoot)
+      const started = await execute(harness, 'autoresearch', omitted, parent.agent)
+      expect(started.isError).toBe(false)
+      const jobId = (started.value as { jobId: string }).jobId
+      expect((await terminal.settled).job.id).toBe(jobId)
+      const output = await execute(harness, 'job_output', { job_id: jobId }, parent.agent)
+      expect(JSON.parse((output.value as { text: string }).text)).toMatchObject({ best: { metric: 1 } })
+      expect(persistedBackgroundJobIds(ownerRepository)).toContain(jobId)
+    } finally { terminal.dispose(); await parent.dispose() }
   }, 30_000)
 
   it('constructs LocalJobRegistry hooks synchronously, returns its id before worktree side effects, persists it before evaluator spawn, and cancels execution through the job', async () => {
