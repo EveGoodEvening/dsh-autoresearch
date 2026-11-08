@@ -114,6 +114,34 @@ export async function discoverContainedRepository(ctx: GitContext, executable: s
   return { ...parentDiscovery, callerCwd: target.requestedPath }
 }
 
+/**
+ * Resolve the containment authority for a caller whose effective working directory differs from its original one.
+ * The immutable Session-header directory is the only authority: the repository containing it, or the directory itself
+ * when it is not inside a repository. A model-changeable effective directory may select targets only inside that root.
+ * Failure to discover a repository narrows the authority to the directory; cancellation and unsafe config still propagate.
+ */
+export async function resolveOriginalWorkspaceAuthority(ctx: GitContext, executable: string, originalCwd: string, options: Omit<GitCommandOptions, 'cwd'>): Promise<string> {
+  let canonical: string
+  try {
+    canonical = await realpath(normalizedAbsoluteInput(originalCwd, 'original workspace'))
+    if (!(await stat(canonical)).isDirectory()) throw new Error('ENOTDIR')
+  } catch (error) {
+    throw new RepositoryContainmentError('repository-target-outside-parent', 'The Session original workspace is unavailable, so a changed working directory cannot be authorized', [String((error as NodeJS.ErrnoException).code ?? error)])
+  }
+  try {
+    const { repository } = await discoverRepository(ctx, executable, canonical, options)
+    return isPathContained(repository, canonical) ? repository : canonical
+  } catch (error) {
+    if (error instanceof GitBoundaryError && error.code === 'git-command-failed' && !options.signal?.aborted) return canonical
+    throw error
+  }
+}
+
+/** Reject any canonical path that escapes the original-workspace authority from {@link resolveOriginalWorkspaceAuthority}. */
+export function assertWithinOriginalWorkspace(authority: string, ...paths: readonly string[]): void {
+  for (const path of paths) if (!isPathContained(authority, path)) throw new RepositoryContainmentError('repository-target-outside-parent', 'Effective working directory or repository is outside the Session original workspace', [path, authority])
+}
+
 export async function discoverRepository(ctx: GitContext, executable: string, requestedPath: string, options: Omit<GitCommandOptions, 'cwd'>): Promise<RepositoryDiscovery> {
   const callerCwd = await realpath(resolve(requestedPath)); const invoke = (args: readonly string[]) => runGit(ctx, executable, args, { ...options, cwd: callerCwd })
   const repository = await canonicalGitPath((await invoke(['rev-parse', '--show-toplevel'])).stdout, callerCwd)

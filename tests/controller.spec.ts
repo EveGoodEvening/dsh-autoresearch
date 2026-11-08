@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { execFileSync, spawn } from 'node:child_process'
 import { DatabaseSync } from 'node:sqlite'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
@@ -40,7 +40,7 @@ describe('exclusive autoresearch controller contract', () => {
 
   it('memoizes the single state-machine execution', async () => {
     const resolveExecutable = vi.fn(async () => { throw new Error('discovery stopped') })
-    const ctx = { subprocess: { resolveExecutable } } as unknown as Context
+    const ctx = { get: () => undefined, subprocess: { resolveExecutable } } as unknown as Context
     const controller = new AutoresearchRunController(ctx, { config: controllerConfig(), input, parent: parent(), signal: new AbortController().signal })
     const first = controller.run()
     const second = controller.run()
@@ -105,7 +105,7 @@ describe('exclusive autoresearch controller contract', () => {
       entered()
       signal?.addEventListener('abort', () => reject(signal.reason), { once: true })
     }))
-    const ctx = { subprocess: { resolveExecutable }, agents: { create } } as unknown as Context
+    const ctx = { get: () => undefined, subprocess: { resolveExecutable }, agents: { create } } as unknown as Context
     const controller = new AutoresearchRunController(ctx, { config: controllerConfig(), input, parent: parent(), signal: new AbortController().signal })
     const running = controller.run()
     await discoveryEntered
@@ -128,7 +128,7 @@ describe('exclusive autoresearch controller contract', () => {
         void cleanupReleased.then(() => { cleanupComplete(); reject(signal.reason) })
       }, { once: true })
     }))
-    const ctx = { subprocess: { resolveExecutable }, agents: { create: vi.fn() } } as unknown as Context
+    const ctx = { get: () => undefined, subprocess: { resolveExecutable }, agents: { create: vi.fn() } } as unknown as Context
     const controller = new AutoresearchRunController(ctx, { config: controllerConfig(), input, parent: parent(), signal: new AbortController().signal })
     const preparing = controller.prepare('job-1')
     void preparing.catch(() => undefined)
@@ -668,6 +668,65 @@ async function expectRegistrationResumeRejected(mode: 'nonterminal' | 'terminal'
 
 describe('controller real Git/SQLite outcomes', { timeout: 30_000 }, () => {
   afterEach(drainRealGitFixtures, 10_000)
+  describe('effective working directory preflight', () => {
+    const scratch: string[] = []
+    afterEach(() => { for (const path of scratch.splice(0)) rmSync(path, { recursive: true, force: true }) })
+    const tempDir = (prefix: string) => { const path = mkdtempSync(join(tmpdir(), prefix)); scratch.push(path); return path }
+    const gitRepo = (path: string) => { mkdirSync(path, { recursive: true }); execFileSync('git', ['init', '-q', '-b', 'main', path]); execFileSync('git', ['-C', path, '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-q', '--allow-empty', '-m', 'base']); return path }
+    /** Preflight with Session-header (original) `original` and working-directory-service (effective) `effective`. */
+    function preflight(f: ControllerFixture, original: string, effective: string | undefined, repository?: string) {
+      const caller = { ...f.parent, session: { ...f.parent.session, header: { ...f.parent.session.header, cwd: original } } } as unknown as Agent
+      const { repository: _repository, ...rest } = input
+      const request = { config: controllerConfig(), input: (repository === undefined ? rest : { ...rest, repository }) as never, parent: caller, signal: new AbortController().signal }
+      const base = f.ctx as unknown as { get(name: string): unknown }
+      const ensure = vi.fn(async (agent: Agent, signal?: AbortSignal) => { expect(agent).toBe(caller); expect(signal).toBe(request.signal); return effective! })
+      const ctx = effective === undefined ? f.ctx : Object.assign(Object.create(base) as object, { get: (name: string) => name === 'workingDirectory' ? { ensure } : base.get(name) }) as unknown as Context
+      return { result: preflightAutoresearchRepository(ctx, request), ensure }
+    }
+
+    it('selects the repository from a changed directory inside a non-repository original workspace', async () => {
+      const f = controllerFixture([])
+      const workspace = tempDir('autoresearch-original-workspace-')
+      const project = gitRepo(join(workspace, 'project'))
+      mkdirSync(join(project, 'src'))
+      await expect(preflight(f, workspace, undefined).result).rejects.toThrow(/not a git repository/)
+      const { result, ensure } = preflight(f, workspace, join(project, 'src'))
+      const accepted = await result
+      expect(ensure).toHaveBeenCalledTimes(1)
+      expect(accepted.discovery.repository).toBe(realpathSync(project))
+      expect(accepted.discovery.callerCwd).toBe(realpathSync(join(project, 'src')))
+      const relative = await preflight(f, workspace, project, 'src').result
+      expect(relative.discovery.callerCwd).toBe(realpathSync(join(project, 'src')))
+    })
+
+    it('authorizes a changed directory anywhere in the repository containing the original directory', async () => {
+      const f = controllerFixture([])
+      const accepted = await preflight(f, join(f.root, 'src'), f.root).result
+      expect(accepted.discovery.repository).toBe(realpathSync(f.root))
+      expect(accepted.discovery.callerCwd).toBe(realpathSync(f.root))
+    })
+
+    it.each([
+      ['a sibling repository of the original repository', (f: ControllerFixture) => ({ original: f.root, effective: gitRepo(join(tempDir('autoresearch-sibling-'), 'other')) })],
+      ['a repository outside an unrelated non-repository original directory', (f: ControllerFixture) => ({ original: tempDir('autoresearch-unrelated-'), effective: f.root })],
+      ['a symlink alias that resolves outside the original workspace', (f: ControllerFixture) => { const workspace = tempDir('autoresearch-alias-'); symlinkSync(f.root, join(workspace, 'link')); return { original: workspace, effective: join(workspace, 'link') } }],
+      ['a repository whose root lies above the original non-repository subdirectory', (f: ControllerFixture) => { const nested = join(f.root, 'untracked-workspace'); mkdirSync(nested); return { original: tempDir('autoresearch-unrelated-'), effective: nested } }],
+    ])('rejects a model-changed directory into %s before discovering it', async (_label, layout) => {
+      const f = controllerFixture([])
+      const { original, effective } = layout(f)
+      const discoveredBefore = f.subprocess.specs.length
+      await expect(preflight(f, original, effective).result).rejects.toMatchObject({ code: 'repository-target-outside-parent' })
+      const discoveredIn = f.subprocess.specs.slice(discoveredBefore).map(spec => spec.cwd)
+      expect(discoveredIn).not.toContain(realpathSync(effective))
+    })
+
+    it('rejects a changed directory whose original workspace no longer exists', async () => {
+      const f = controllerFixture([])
+      const missing = join(tempDir('autoresearch-missing-'), 'gone')
+      await expect(preflight(f, missing, f.root).result).rejects.toMatchObject({ code: 'repository-target-outside-parent' })
+    })
+  })
+
   it('activates Host registration authority and atomically persists its identity', async () => {
     const f = controllerFixture([{ stdout: '{"score":1}\n' }])
     const controller = createCaseController(f)

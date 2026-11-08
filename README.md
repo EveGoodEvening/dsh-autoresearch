@@ -100,7 +100,7 @@ From that repository, ask the agent to call:
 }
 ```
 
-- `repository` defaults to the agent's working directory. Use a fresh, Git-safe `run_tag` for each new run.
+- `repository` defaults to the agent's current working directory, and a relative path resolves against it. After the agent changes directory, the target must remain inside the Session's original directory or the repository containing it. Use a fresh, Git-safe `run_tag` for each new run.
 - Runs are background jobs by default. Inspect or stop them with `job_list`, `job_output`, and `job_kill`; use `"mode": "foreground"` to wait for completion.
 - Cancellation waits for evaluator cleanup, reconciles the accepted Git state, and releases the run lock only after durable terminal settlement.
 - Plugin unload or hot reload cancels active runs and waits for proposal children and jobs to settle.
