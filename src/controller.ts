@@ -5,16 +5,16 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { requestProposal, ProposalAgentError, type ProposalHistoryEntry } from './agent.js'
 import { normalizeRunPolicy, type HostEvaluatorRegistration, type ResolvedConfig } from './config.js'
-import { createEvaluatorArtifactWriterFactory } from './evaluator-artifacts.js'
+import { createEvaluatorArtifactWriterFactory, redactConfiguredSecrets } from './evaluator-artifacts.js'
 import { captureFrozenFileAttempt, createEvaluatorBoundary, evaluatorEvaluationSha256, freezeEvaluatorProvenanceFromManifest, FrozenEvaluatorBoundaryError, recomputeRegistrationManifest, revalidateEvaluatorBoundary, revalidateFrozenFileAttempt, runEvaluator, type FrozenEvaluatorProvenance } from './evaluator.js'
 import {
   acquireControllerClaim, acquireRunLock, assertWithinOriginalWorkspace, resolveOriginalWorkspaceAuthority, allocateRunWorktree, canonicalizeRepositoryTarget, checkoutCandidateForEvaluation, commitCandidate, currentControllerProcessIdentity, deriveRegistrationManifestAtStartCommit, discoverContainedRepository, durableGitIdentity, RepositoryContainmentError,
-  GitBoundaryError, heartbeatControllerClaim, makeRunGitIdentity, reconcileAcceptedHead, reconcileRejectedHead, recoverTerminalRunLock, recoverTerminalRunLockUnderControllerClaim, releaseControllerClaim, rollbackRunActivationAuthority,
+  GitBoundaryError, heartbeatControllerClaim, restoreAcceptedAfterCandidateCommit, makeRunGitIdentity, reconcileAcceptedHead, reconcileRejectedHead, recoverTerminalRunLock, recoverTerminalRunLockUnderControllerClaim, releaseControllerClaim, rollbackRunActivationAuthority,
   removeRunWorktree, resolveGitExecutable, restoreAcceptedWorktree, runGit, snapshotCandidate, validateCandidate, validateFrozenCandidatePaths,
   verifyExactWorktree, type CandidateSnapshot, type ControllerProcessIdentity, type GitCommandOptions, type GitConfigBaseline,
   type RepositoryDiscovery, type RunGitIdentity,
 } from './git.js'
-import { classifyDurableRegistration, reconcileRecovery, type RecoveredEvaluation, type RecoveredExperiment, type RecoveryDirective } from './recovery.js'
+import { CANDIDATE_REJECTION_INTENT, classifyDurableRegistration, reconcileRecovery, type RecoveredEvaluation, type RecoveredExperiment, type RecoveryDirective } from './recovery.js'
 import { DurableTracker, TRACKER_SCHEMA_VERSION, serializeDurablePolicy, serializeRedactedDurablePolicy, type ArtifactRecord, type HostFailureFacts } from './tracker.js'
 import { applyRunRetention, sweepRepositoryRetention } from './retention.js'
 import { StateLayout } from './state-layout.js'
@@ -114,8 +114,11 @@ export class AutoresearchRunController {
   private disposed = false
   private cancellationPersisted = false
   private quiescenceFailure?: ProposalAgentError
+  /** A quiescent proposal failure whose accepted-HEAD restoration failed: failure recovery finishes drive()'s round-failed verdict. */
   private claimHeartbeat: NodeJS.Timeout | undefined
   private claimFailure?: unknown
+  /** Aborted on claim loss: failure-recovery Git runs on it instead of the (already settled) run aborter. */
+  private failureCleanup?: AbortController
 
 
   constructor(private readonly ctx: Context, private readonly options: AutoresearchRunControllerOptions) {
@@ -132,6 +135,8 @@ export class AutoresearchRunController {
   setJobId(jobId: string): void { if (this.preparePromise || this.runPromise) throw new Error('job id must be assigned before controller preparation'); if (this.jobId !== undefined) throw new Error('job id is already assigned'); this.jobId = normalizedReason(jobId) }
   /** Test-only seam after writable identity revalidation and controller claim, before terminal evidence recheck. */
   terminalResumeClaimAcquiredForTest(): void {}
+  /** Test-only seam: returning false models a process crash, which cannot run in-process terminal failure persistence. */
+  unexpectedFailurePersistenceForTest(_error: unknown): boolean { return true }
   prepare(jobId?: string): Promise<AutoresearchRunReady> {
     if (jobId !== undefined) {
       if (this.jobId === undefined) this.jobId = normalizedReason(jobId)
@@ -195,6 +200,7 @@ export class AutoresearchRunController {
         const best = durableBest(runtime.tracker, runtime.runId)
         return decodeRunResult({ ...common(runtime), status: 'blocked', best, evidence: error.evidence.map(message => ({ code: error.code, message, artifacts: [] })) }, runtime.policy.metricDirection)
       }
+      if (runtime && runtime.claimOwner && runtime.claimProcess && !runtime.legacy && !runtime.readonlyTerminal && !runtime.preclaimBlock) return await this.failUnexpectedly(runtime, error)
       throw error
     } finally {
       if (runtime) this.releaseClaim(runtime)
@@ -393,14 +399,22 @@ export class AutoresearchRunController {
     if (!runtime.claimOwner || !runtime.claimProcess) return
     this.claimHeartbeat = setInterval(() => {
       try { heartbeatControllerClaim(runtime.tracker, runtime.runId, runtime.claimOwner!, CONTROLLER_LEASE_MS, new Date(), runtime.claimProcess!) }
-      catch (error) { this.claimFailure = error; if (!this.aborter.signal.aborted) this.aborter.abort(error) }
+      catch (error) { this.recordClaimFailure(error) }
     }, CONTROLLER_HEARTBEAT_MS)
     this.claimHeartbeat.unref()
+  }
+  private recordClaimFailure(error: unknown): void {
+    this.claimFailure ??= error
+    if (!this.aborter.signal.aborted) this.aborter.abort(error)
+    // Failure recovery deliberately ignores the run aborter, but must stop mutating a worktree another controller may own.
+    if (this.failureCleanup && !this.failureCleanup.signal.aborted) this.failureCleanup.abort(error)
   }
   private assertClaim(runtime: Runtime): void {
     if (!runtime.claimOwner || !runtime.claimProcess) return
     if (this.claimFailure) throw this.claimFailure
-    heartbeatControllerClaim(runtime.tracker, runtime.runId, runtime.claimOwner, CONTROLLER_LEASE_MS, new Date(), runtime.claimProcess)
+    // A synchronously detected claim loss is recorded like a heartbeat loss, so no failure path treats it as an owned failure.
+    try { heartbeatControllerClaim(runtime.tracker, runtime.runId, runtime.claimOwner, CONTROLLER_LEASE_MS, new Date(), runtime.claimProcess) }
+    catch (error) { this.recordClaimFailure(error); throw error }
   }
   private releaseClaim(runtime: Runtime): void {
     if (this.claimHeartbeat) { clearInterval(this.claimHeartbeat); this.claimHeartbeat = undefined }
@@ -469,7 +483,10 @@ export class AutoresearchRunController {
       if (directive.kind === 'ready') {
         if (runtime.policy.target !== undefined && isTargetReached(runtime.policy.metricDirection, directive.best.metric, runtime.policy.target)) return this.complete(runtime, 'target-reached', directive.best)
         if (directive.nextOrdinal > runtime.policy.maxExperiments) return this.complete(runtime, 'budget-limited', directive.best)
+        const pendingProposal = pendingProposalFailure(runtime.tracker, runtime.runId)
         await restoreAcceptedWorktree(this.ctx, runtime.gitExecutable, runtime.identity.worktree, runtime.identity, directive.restoreCommit, { ...runtime.gitOptions, signal: this.aborter.signal })
+        // A proposal failure whose restoration never completed: finish its durable round-failed verdict, never re-propose.
+        if (pendingProposal) { this.assertClaim(runtime); this.finishProposalFailure(runtime, pendingProposal); directive = await reconcileRecovery(this.ctx, { ...runtime, signal: this.aborter.signal }); continue }
         if (!runtime.registration) throw new Error('durable evaluator registration is unavailable')
         try { recomputeRegistrationManifest(runtime.identity.worktree, runtime.registration.manifest) }
         catch (error) {
@@ -515,10 +532,17 @@ export class AutoresearchRunController {
       if (error instanceof ProposalAgentError && (error.code === 'dispose-failed' || error.code === 'not-quiescent')) { this.quiescenceFailure = error; r.tracker.transitionRun(r.runId, 'blocked', { terminalReason: error.message, blockedCode: 'attempt-uncertain', quiescent: false, ...(best ? { best } : {}) }); return }
       if (this.aborter.signal.aborted) throw error
       const evidence = errorEvidence(error)
-      r.tracker.checkpointRun(r.runId, { intent: { kind: 'restore-after-proposal-failure', commit: best.commit } })
+      // The proposal verdict is durable before restoration: if restoring fails, failure recovery and every resume read it back
+      // and finish drive()'s round-failed verdict instead of proposing a fresh candidate at the same ordinal.
+      r.tracker.checkpointRun(r.runId, { intent: { kind: PROPOSAL_FAILURE_INTENT, commit: best.commit, code: evidence.code, message: evidence.message } })
       await restoreAcceptedWorktree(this.ctx, r.gitExecutable, r.identity.worktree, r.identity, best.commit, { ...r.gitOptions, signal: this.aborter.signal })
-      r.tracker.transitionRun(r.runId, 'round-failed', { terminalReason: evidence.message, blockedCode: evidence.code, quiescent: true })
+      this.finishProposalFailure(r, evidence)
     }
+  }
+
+  /** drive()'s round-failed verdict for a quiescent proposal failure, persisted once its accepted HEAD is restored. */
+  private finishProposalFailure(r: Runtime, evidence: ProposalFailureEvidence, controllerFailure: readonly BlockerEvidence[] = []): void {
+    r.tracker.transitionRun(r.runId, 'round-failed', { terminalReason: evidence.message, blockedCode: evidence.code, quiescent: true, ...(controllerFailure.length > 0 ? { outcome: { kind: CONTROLLER_FAILURE_OUTCOME, evidence: [evidence, ...controllerFailure].map(({ code, message }) => ({ code, message })) } } : {}) })
   }
 
   private async commitRecoveredCandidate(r: Runtime, experiment: RecoveredExperiment, snapshot: CandidateSnapshot, validatedPaths: readonly string[]): Promise<void> {
@@ -547,9 +571,11 @@ export class AutoresearchRunController {
     let intentCreated = false
     const persistenceState: { frozenMismatch?: { message: string; evaluation: RecoveredEvaluation } } = {}
     const dataset = registrationDatasetMetadata(r.registration.registration)
-    const result = await runEvaluator({ subprocess: this.ctx.subprocess, worktree: r.identity.worktree, boundary, frozenFiles, evaluation: r.policy.evaluation, metricName: r.policy.metricName, metricDirection: r.policy.metricDirection, timeoutMs: r.policy.timeoutMs, terminationGraceMs: this.options.config.terminationGraceMs, maxStdoutBytes: this.options.config.maxStdoutBytes, maxStderrBytes: this.options.config.maxStderrBytes, artifactWriterFactory: () => { if (!intentCreated) throw new Error('artifact capability requested before durable attempt intent'); return createEvaluatorArtifactWriterFactory(r.tracker.layout, r.runId, experiment.experimentId, attemptId)() }, environment: r.policy.environment, ...(dataset ? { dataset } : {}), policy: r.policy, signal: this.aborter.signal, persistence: {
+    let artifactCapabilityFailed = false
+    const evaluation = runEvaluator({ subprocess: this.ctx.subprocess, worktree: r.identity.worktree, boundary, frozenFiles, evaluation: r.policy.evaluation, metricName: r.policy.metricName, metricDirection: r.policy.metricDirection, timeoutMs: r.policy.timeoutMs, terminationGraceMs: this.options.config.terminationGraceMs, maxStdoutBytes: this.options.config.maxStdoutBytes, maxStderrBytes: this.options.config.maxStderrBytes, artifactWriterFactory: () => { if (!intentCreated) throw new Error('artifact capability requested before durable attempt intent'); try { return createEvaluatorArtifactWriterFactory(r.tracker.layout, r.runId, experiment.experimentId, attemptId)() } catch (error) { artifactCapabilityFailed = true; throw error } }, environment: r.policy.environment, ...(dataset ? { dataset } : {}), policy: r.policy, signal: this.aborter.signal, persistence: {
       persistSpawnIntent: intent => { r.tracker.createAttemptIntent({ attemptId, runId: r.runId, experimentId: experiment.experimentId, ordinal: attemptOrdinal }, intent); intentCreated = true },
       persistSpawnObserved: facts => r.tracker.recordAttemptObserved(attemptId, facts),
+      persistAttemptQuiescent: facts => r.tracker.recordAttemptObserved(attemptId, facts),
       persistAttemptOutcome: (outcome, outputArtifacts) => {
         const artifacts = outputArtifacts.map(item => artifact(r, experiment.experimentId, attemptId, item))
         const attemptResult = outcome.kind === 'measured' ? { kind: 'measured' as const, metric: outcome.metric } : { kind: 'failed' as const, code: outcome.code, message: outcome.message }
@@ -565,6 +591,16 @@ export class AutoresearchRunController {
         if (mismatchMessage !== undefined) persistenceState.frozenMismatch = { message: mismatchMessage, evaluation: { ...outcome, attemptId, artifacts } as RecoveredEvaluation }
       },
     } })
+    let result: Awaited<typeof evaluation>
+    try { result = await evaluation }
+    catch (error) {
+      // runEvaluator mints the attempt's artifact capability after its durable spawn intent and before provider spawn, so
+      // a mint failure proves this attempt created no process: record that empty process tree as quiescent.
+      if (!artifactCapabilityFailed) throw error
+      try { r.tracker.recordAttemptObserved(attemptId, { processTreeQuiescent: true }) }
+      catch (markError) { throw controllerAggregateError('evaluator artifact capability failed and its pre-spawn quiescence could not be recorded', [['original', error], ['quiescence record', markError]], Object.values(r.policy.environment)) }
+      throw error
+    }
     if (persistenceState.frozenMismatch) return this.finalizeFrozenMismatch(r, experiment, persistenceState.frozenMismatch.evaluation, persistenceState.frozenMismatch.message)
     const recovered = { ...result, attemptId, artifacts: result.artifacts.map(item => artifact(r, experiment.experimentId, attemptId, item)) } as RecoveredEvaluation
     await this.finalizeEvaluation(r, experiment, recovered)
@@ -625,7 +661,8 @@ export class AutoresearchRunController {
     r.tracker.transitionRun(r.runId, 'deciding', { outcome: { kind: 'candidate-evaluation-failed', code, message } })
   }
 
-  private async reconcileCandidate(r: Runtime, directive: Extract<RecoveryDirective, { kind: 'reconcile-candidate' }>, signal = this.aborter.signal): Promise<void> {
+  /** `afterGit` re-proves ownership after each awaited Git operation, before any durable write that depends on it. */
+  private async reconcileCandidate(r: Runtime, directive: Extract<RecoveryDirective, { kind: 'reconcile-candidate' }>, signal = this.aborter.signal, afterGit: () => void = () => undefined): Promise<void> {
     const best = durableBest(r.tracker, r.runId)
     const experimentRow = r.tracker.database.prepare('SELECT state FROM experiments WHERE experiment_id = ?').get(directive.experiment.experimentId)
     const experimentTerminal = experimentRow && !['baseline-pending', 'running'].includes(String(experimentRow['state']))
@@ -633,7 +670,8 @@ export class AutoresearchRunController {
     if (r.tracker.getRun(r.runId)?.['state'] === 'candidate-running') r.tracker.transitionRun(r.runId, 'deciding', { outcome: { kind: 'terminal-experiment-recovered' } })
     r.tracker.checkpointRun(r.runId, { intent: { kind: 'git-reconciliation', outcome: directive.outcome } })
     if (directive.outcome.kind === 'accept') {
-      await reconcileAcceptedHead(this.ctx, r.gitExecutable, r.identity.worktree, r.identity, directive.candidateCommit, { ...r.gitOptions, signal })
+      try { await reconcileAcceptedHead(this.ctx, r.gitExecutable, r.identity.worktree, r.identity, directive.candidateCommit, { ...r.gitOptions, signal }) }
+      finally { afterGit() }
       const next = { metric: directive.outcome.metric, commit: directive.candidateCommit, experimentId: directive.experiment.experimentId }
       if (!experimentTerminal) r.tracker.commitTerminalExperiment(directive.experiment.experimentId, 'accepted', { metric: next.metric, decision: 'accept' })
       const target = r.policy.target !== undefined && isTargetReached(r.policy.metricDirection, next.metric, r.policy.target)
@@ -643,9 +681,11 @@ export class AutoresearchRunController {
     try {
       await reconcileRejectedHead(this.ctx, r.gitExecutable, r.identity.worktree, r.identity, directive.candidateCommit, directive.expectedAcceptedCommit, { ...r.gitOptions, signal })
     } catch (error) {
+      afterGit()
       if (!(error instanceof GitBoundaryError)) throw error
       return this.blockRejectedReconciliation(r, error)
     }
+    afterGit()
     if (!experimentTerminal && directive.outcome.kind === 'reject') r.tracker.commitTerminalExperiment(directive.experiment.experimentId, 'rejected', { metric: directive.outcome.metric, decision: 'reject' })
     if (directive.outcome.kind === 'cancel') {
       r.tracker.transitionRun(r.runId, 'cancelled', { best, terminalReason: this.cancelReason, blockedCode: 'cancelled', quiescent: true, outcome: { kind: 'reconciled', decision: 'cancel' } })
@@ -672,7 +712,11 @@ export class AutoresearchRunController {
     return this.finish(r, { status, ...(status === 'target-reached' ? { target: r.policy.target! } : {}), best })
   }
 
-  private async block(r: Runtime, directive: Extract<RecoveryDirective, { kind: 'blocked' }>): Promise<AutoresearchRunResult> {
+  /** `controllerFailure` persists the complete typed evidence in the terminal transition so terminal replay returns it unchanged. */
+  private async block(r: Runtime, directive: Extract<RecoveryDirective, { kind: 'blocked' }>, controllerFailure = false): Promise<AutoresearchRunResult> {
+    // Failure persistence runs on fresh cleanup signals that ignore a lost claim: re-prove ownership right before the
+    // synchronous terminal transition and lock release, so a controller that lost the run never terminalizes it.
+    if (controllerFailure) this.assertClaim(r)
     const best = optionalBest(r.tracker, r.runId)
     const row = r.tracker.getRun(r.runId)!
     const provenQuiescent = directive.lock === 'release-after-persist' && r.tracker.recoveryState(r.runId).processDisposition !== 'uncertain'
@@ -683,7 +727,7 @@ export class AutoresearchRunController {
         if (state === 'baseline-pending') r.tracker.commitTerminalExperiment(id, 'cancelled', { failureCode: directive.code, failureMessage: directive.evidence[0]?.message ?? directive.code })
         else if (state === 'running') r.tracker.commitTerminalExperiment(id, 'crashed', { failureCode: directive.code, failureMessage: directive.evidence[0]?.message ?? directive.code })
       }
-      r.tracker.transitionRun(r.runId, 'blocked', { blockedCode: directive.code, terminalReason: directive.evidence[0]?.message ?? directive.code, quiescent: provenQuiescent, ...(best ? { best } : {}) })
+      r.tracker.transitionRun(r.runId, 'blocked', { blockedCode: directive.code, terminalReason: directive.evidence[0]?.message ?? directive.code, quiescent: provenQuiescent, ...(best ? { best } : {}), ...(controllerFailure ? { outcome: { kind: CONTROLLER_FAILURE_OUTCOME, evidence: directive.evidence.map(({ code, message }) => ({ code, message })) } } : {}) })
     }
     const result = best ? { status: 'blocked', best, evidence: directive.evidence } : { status: 'round-failed', reason: directive.evidence[0]?.message ?? directive.code, evidence: directive.evidence }
     return this.finish(r, result, provenQuiescent)
@@ -747,6 +791,200 @@ export class AutoresearchRunController {
     return this.returnTerminal(r, directive)
   }
 
+  /**
+   * Releasing the controller claim does not release the shared active-run lock: an owned run that fails unexpectedly
+   * after activation must be terminalized, or it blocks every later run on the repository. Terminal persistence goes
+   * through block(), which releases the lock only when every attempt is durably quiescent. A run without an active lock
+   * has nothing to leak and stays resumable, and an already-terminal run keeps its existing replay/release path. A
+   * controller that no longer provably owns the run never terminalizes it: another controller may be driving it.
+   */
+  private async failUnexpectedly(r: Runtime, error: unknown): Promise<AutoresearchRunResult> {
+    if (!this.unexpectedFailurePersistenceForTest(error)) throw error
+    if (error instanceof GitBoundaryError && CLAIM_LOSS_CODES.has(error.code)) throw error
+    const secrets = Object.values(r.policy.environment)
+    try { heartbeatControllerClaim(r.tracker, r.runId, r.claimOwner!, CONTROLLER_LEASE_MS, new Date(), r.claimProcess!) }
+    catch (claimError) { this.claimFailure ??= claimError; throw controllerAggregateError('autoresearch run failed and this controller no longer provably owns it, so its terminal failure was not persisted', [['original', error], ['claim', claimError]], secrets) }
+    let recovery: ReturnType<DurableTracker['recoveryState']>
+    try { recovery = r.tracker.recoveryState(r.runId) }
+    catch (inspectionError) { throw controllerAggregateError('autoresearch run failed and its durable state could not be inspected for terminal failure persistence', [['original', error], ['inspection', inspectionError]], secrets) }
+    const state = String(recovery.run['state']) as RunDurableState
+    if (isTerminalState(state)) {
+      // The terminal transition committed but its finish() failed before releasing the lock: release it now when the
+      // durable row proves quiescence, exactly as a terminal resume would, rather than stranding it.
+      if (recovery.activeLock && recovery.run['terminal_quiescent'] === 1 && recovery.processDisposition === 'quiescent') {
+        try { recoverTerminalRunLockUnderControllerClaim(r.tracker, r.runId, r.claimOwner!, r.claimProcess!) }
+        catch (releaseError) { throw controllerAggregateError('autoresearch run failed after its terminal transition and its quiescent run lock could not be released', [['original', error], ['release', releaseError]], secrets) }
+      }
+      throw error
+    }
+    if (!recovery.activeLock) throw error
+    const evidence = controllerFailureEvidence(error, secrets)
+    try {
+      // A proposal child that is not proven quiescent may still be editing the worktree: block without restoring it and
+      // retain the lock, exactly as cancellation does.
+      if (this.quiescenceFailure) return await this.block(r, { kind: 'blocked', runId: r.runId, code: 'attempt-uncertain', evidence: [{ code: this.quiescenceFailure.code, message: this.quiescenceFailure.message, artifacts: [] }, ...evidence], lock: 'retain' }, true)
+      return await this.terminalizeFailure(r, state, evidence)
+    } catch (cleanupError) {
+      // Any cleanup failure after a claim loss (including Git aborted by it) is that loss: another controller may own the run.
+      if (this.claimFailure !== undefined) throw controllerAggregateError('autoresearch run failed and this controller lost its claim during failure recovery, so its terminal failure was not persisted', [['original', error], ['claim', this.claimFailure], ...(cleanupError === this.claimFailure ? [] : [['recovery', cleanupError] as const])], secrets)
+      if (cleanupError instanceof ResumableControllerFailure) {
+        let proposal: ProposalFailureEvidence | undefined
+        try { proposal = pendingProposalFailure(r.tracker, r.runId) } catch { proposal = undefined }
+        const proposalPart = proposal ? [[`proposal ${proposal.code}`, Object.assign(new Error(proposal.message), { name: 'ProposalFailure', code: proposal.code })] as const] : []
+        throw controllerAggregateError('autoresearch run failed and its accepted HEAD could not be restored; the run remains nonterminal with its lock held so a resume can retry reconciliation', [['original', error], ...proposalPart, ['restoration', cleanupError.cause]], secrets)
+      }
+      throw controllerAggregateError('autoresearch run failed and its terminal failure persistence also failed', [['original', error], ['persistence', cleanupError]], secrets)
+    }
+  }
+
+  /**
+   * Initializing runs have no attempt, so they terminalize directly. Every later phase first reconciles with a fresh,
+   * non-aborted cleanup signal: a durably recorded attempt outcome (baseline or candidate) is authority and is finalized
+   * before terminalizing, never overwritten as crashed. A baseline without an outcome never moved HEAD. A candidate phase may
+   * leave an unaccepted candidate checked out: like cancellation it first reconciles with a fresh, non-aborted cleanup
+   * signal and restores the accepted HEAD. Terminal lock retention is reserved for real process uncertainty (block()
+   * still retains it whenever an attempt is not durably quiescent). When every process is quiescent but restoration or
+   * candidate reconciliation fails on Git state (a transient Git error, a stray worktree file, an index lock) or recovery
+   * settles somewhere unexpected, the run is left nonterminal with its lock held: a terminal row with an unproven
+   * quiescence would retain the lock permanently, while a resume after the condition clears retries the reconciliation
+   * and releases it. A rejected reconciliation keeps the recoverable `git-reconciliation-blocked` checkpoint that drive()
+   * also writes. When the controller itself terminalizes the failure (a `controller-failed` block, or a block that
+   * recovery resolves to), the original failure's typed evidence is persisted with that terminal transition.
+   *
+   * A durable, validated decision supersedes the transient controller failure: when reconciliation settles an
+   * already-recorded outcome into its own terminal state (an accepted candidate reaching the target, a classified
+   * baseline failure, a persisted cancellation or terminal block), or into a ready state that drive() would complete
+   * (a measured best meeting the target, or an exhausted experiment budget), that canonical result is returned and the controller
+   * failure is deliberately not attached. The failure interrupted only work that recovery then completed exactly as a
+   * resume would; those result shapes carry no evidence field, and a terminal replay rebuilds the result solely from
+   * durable rows, so attaching it live would make the first result differ from every replay.
+   */
+  private async terminalizeFailure(r: Runtime, state: RunDurableState, evidence: readonly BlockerEvidence[]): Promise<AutoresearchRunResult> {
+    const secrets = Object.values(r.policy.environment)
+    // Every durable or worktree mutation below first re-proves the controller claim (block() does so itself).
+    const guard = (): void => this.assertClaim(r)
+    const failure = (): Promise<AutoresearchRunResult> => this.block(r, { kind: 'blocked', runId: r.runId, code: 'controller-failed', evidence, lock: 'release-after-persist' }, true)
+    // A ready run that has met its target or exhausted its budget completes exactly as drive() completes it on every
+    // ready directive, before restoring HEAD or proposing: recovery already settled that outcome successfully.
+    const completion = (best: BestResult, nextOrdinal: number): Promise<AutoresearchRunResult> | undefined => {
+      const status = r.policy.target !== undefined && isTargetReached(r.policy.metricDirection, best.metric, r.policy.target) ? 'target-reached' : nextOrdinal > r.policy.maxExperiments ? 'budget-limited' : undefined
+      if (status === undefined) return undefined
+      guard()
+      return this.complete(r, status, best)
+    }
+    const blockedByRecovery = (directive: Extract<RecoveryDirective, { kind: 'blocked' }>): Promise<AutoresearchRunResult> => this.block(r, { ...directive, evidence: [...directive.evidence, ...evidence] }, true)
+    const resumable = (cause: unknown): never => { throw new ResumableControllerFailure(cause) }
+    const restoreOrResume = async (restore: () => Promise<void>, terminalize: () => Promise<AutoresearchRunResult> = failure): Promise<AutoresearchRunResult> => {
+      guard()
+      try { await restore() }
+      catch (error) {
+        if (!(error instanceof GitBoundaryError)) throw error
+        return resumable(error)
+      }
+      return terminalize()
+    }
+    // A fresh signal the settled run aborter never aborts, but a claim loss does (recordClaimFailure).
+    this.failureCleanup = new AbortController()
+    if (this.claimFailure !== undefined) this.failureCleanup.abort(this.claimFailure)
+    const cleanupSignal = this.failureCleanup.signal
+    const options = { ...r.gitOptions, signal: cleanupSignal }
+    const reconcile = (): Promise<RecoveryDirective> => { guard(); return reconcileRecovery(this.ctx, { ...r, signal: cleanupSignal }) }
+    if (state === 'initializing') return failure()
+    if (state === 'ready') {
+      const best = durableBest(r.tracker, r.runId)
+      const completed = completion(best, nextCandidateOrdinal(r.tracker, r.runId))
+      if (completed) return completed
+      // A quiescent proposal failure whose own restoration failed (its verdict is durable in the last run checkpoint): once
+      // restored, persist drive()'s round-failed verdict with the proposal's evidence, followed by the controller failure
+      // that interrupted it. A resume reads the same checkpoint when this restoration also fails.
+      const proposalFailure = pendingProposalFailure(r.tracker, r.runId)
+      const roundFailed = proposalFailure && (async (): Promise<AutoresearchRunResult> => {
+        guard()
+        this.finishProposalFailure(r, proposalFailure, evidence)
+        const settled = await reconcile()
+        if (settled.kind === 'terminal') { guard(); return this.returnTerminal(r, settled) }
+        if (settled.kind === 'blocked') return blockedByRecovery(settled)
+        throw new Error(`proposal failure recovery settled as ${settled.kind}`)
+      })
+      return restoreOrResume(() => restoreAcceptedWorktree(this.ctx, r.gitExecutable, r.identity.worktree, r.identity, best.commit, options), roundFailed || failure)
+    }
+    let recovery: RecoveryDirective
+    try { recovery = await reconcile() }
+    catch (error) {
+      // The baseline never moves HEAD: without any durable attempt outcome there is nothing to finalize, so terminalize
+      // directly. A recorded outcome is authority and must not be overwritten as crashed: stay nonterminal for a resume.
+      if (state === 'baseline-running' && !hasDurableAttemptOutcome(r.tracker, r.runId)) return failure()
+      throw error
+    }
+    // A durably classified attempt outcome is authority (baseline or candidate): finalize it before terminalizing,
+    // exactly as drive() does on resume, instead of committing a measured experiment as crashed.
+    if (recovery.kind === 'finalize-evaluation' && state !== 'candidate-prepared') {
+      guard()
+      if (recovery.evaluation.policyViolation) this.finalizeFrozenMismatch(r, recovery.experiment, recovery.evaluation, recovery.evaluation.policyViolation.message)
+      else await this.finalizeEvaluation(r, recovery.experiment, recovery.evaluation)
+      recovery = await reconcile()
+    }
+    // A committed terminal baseline whose run transition did not land settles exactly as drive() would.
+    if (recovery.kind === 'settle-baseline') {
+      guard()
+      this.settleBaseline(r, recovery)
+      recovery = await reconcile()
+    }
+    if (recovery.kind === 'blocked') return blockedByRecovery(recovery)
+    // A failed baseline outcome settles to its own canonical terminal result (baseline-blocked, cancelled or blocked).
+    if (recovery.kind === 'terminal') { guard(); return this.returnTerminal(r, recovery) }
+    // A measured baseline is the accepted best: unless it already completes the run, terminalize the controller failure
+    // with it, from the accepted HEAD.
+    if (recovery.kind === 'ready') {
+      const completed = completion(recovery.best, recovery.nextOrdinal)
+      if (completed) return completed
+      const restoreCommit = recovery.restoreCommit
+      return restoreOrResume(() => restoreAcceptedWorktree(this.ctx, r.gitExecutable, r.identity.worktree, r.identity, restoreCommit, options))
+    }
+    // The baseline has no durable outcome (no attempt, or a proven-quiescent attempt without one): nothing moved HEAD.
+    if (recovery.kind === 'evaluate' && recovery.experiment.kind === 'baseline') return failure()
+    // Candidate committed but not yet evaluated (or proven quiescent without an outcome): reject it back to accepted HEAD.
+    if (recovery.kind === 'evaluate' && recovery.experiment.kind === 'candidate') {
+      const commit = recovery.commit
+      const experimentId = recovery.experiment.experimentId
+      return restoreOrResume(async () => {
+        // A candidate-prepared resume otherwise requires the worktree to match the candidate exactly: durably mark the
+        // rejection before its first destructive step, so a partial rejection stays resumable instead of reading as an
+        // external mutation that would block the run and retain its lock.
+        if (state === 'candidate-prepared') r.tracker.checkpointRun(r.runId, { intent: { kind: CANDIDATE_REJECTION_INTENT, experimentId, candidateCommit: commit } })
+        await reconcileRejectedHead(this.ctx, r.gitExecutable, r.identity.worktree, r.identity, commit, durableBest(r.tracker, r.runId).commit, options)
+      })
+    }
+    // Candidate snapshot not yet durably committed: discard it back to the accepted commit. Its audit ref and branch move
+    // may already have landed before the commit was recorded, which is a valid rejection state.
+    if (recovery.kind === 'commit-candidate') {
+      const experimentId = recovery.experiment.experimentId
+      return restoreOrResume(() => restoreAcceptedAfterCandidateCommit(this.ctx, r.gitExecutable, r.identity.worktree, r.identity, experimentId, durableBest(r.tracker, r.runId).commit, options))
+    }
+    if (recovery.kind === 'reconcile-candidate') {
+      guard()
+      try { await this.reconcileCandidate(r, recovery, cleanupSignal, guard) }
+      catch (error) {
+        // The reject path has already checkpointed a recoverable `git-reconciliation-blocked` outcome, exactly as drive()
+        // does; the accept path (reconcileAcceptedHead) throws GitBoundaryError and keeps its durable reconciliation intent.
+        // Neither proves the accepted HEAD, and a resume retries both.
+        if (error instanceof RejectedReconciliationBlockedError) {
+          const best = durableBest(r.tracker, r.runId)
+          return decodeRunResult({ ...common(r), status: 'blocked', best, evidence: [...evidence, ...error.evidence.map(message => ({ code: error.code, message: boundedFailureMessage(redactConfiguredSecrets(message, secrets)), artifacts: [] }))] }, r.policy.metricDirection)
+        }
+        if (error instanceof GitBoundaryError) return resumable(error)
+        throw error
+      }
+      const settled = await reconcile()
+      // reconcileCandidate already restored the accepted HEAD; an accept or reject that exhausts the budget completes.
+      if (settled.kind === 'ready') return completion(settled.best, settled.nextOrdinal) ?? failure()
+      if (settled.kind === 'blocked') return blockedByRecovery(settled)
+      if (settled.kind === 'terminal') { guard(); return this.returnTerminal(r, settled) }
+      return resumable(new Error(`candidate reconciliation settled as ${settled.kind}`))
+    }
+    return resumable(new Error(`${state} failure recovery returned ${recovery.kind}`))
+  }
+
   private async returnTerminal(r: Runtime, directive: Extract<RecoveryDirective, { kind: 'terminal' }>): Promise<AutoresearchRunResult> {
     const row = r.tracker.getRun(r.runId)!
     const validatedArtifacts = directive.artifacts.map(publicArtifact)
@@ -756,24 +994,38 @@ export class AutoresearchRunController {
     if (directive.state === 'completed') value = { ...facts, status: r.policy.target !== undefined && best && isTargetReached(r.policy.metricDirection, best.metric, r.policy.target) ? 'target-reached' : 'budget-limited', ...(r.policy.target !== undefined && best && isTargetReached(r.policy.metricDirection, best.metric, r.policy.target) ? { target: r.policy.target } : {}), best }
     else if (directive.state === 'baseline-blocked') value = baselineBlocked(r, validatedArtifacts)
     else if (directive.state === 'cancelled') value = cancelledResult(r, directive.lastState, validatedArtifacts)
-    else if (directive.state === 'blocked' && best) value = { ...facts, status: 'blocked', best, evidence: evidenceFromRun(row) }
-    else value = { ...facts, status: 'round-failed', reason: String(row['terminal_reason'] ?? directive.state), evidence: evidenceFromRun(row), ...(best ? { best } : {}) }
+    else if (directive.state === 'blocked' && best) value = { ...facts, status: 'blocked', best, evidence: durableControllerFailureEvidence(r.tracker, r.runId, row) ?? evidenceFromRun(row) }
+    else value = { ...facts, status: 'round-failed', reason: String(row['terminal_reason'] ?? directive.state), evidence: durableControllerFailureEvidence(r.tracker, r.runId, row) ?? evidenceFromRun(row), ...(best ? { best } : {}) }
     return this.finish(r, value, directive.lock !== 'retain')
   }
 
   private async finish(r: Runtime, specific: Record<string, unknown>, release = true): Promise<AutoresearchRunResult> {
-    const result = decodeRunResult({ ...common(r), ...specific }, r.policy.metricDirection)
+    // The terminal transition is already durable: release a provably quiescent run's lock before result decoding and the
+    // presentation-only TSV export, so neither can strand the lock of a finished run.
     const recovery = r.tracker.recoveryState(r.runId)
     const safeRelease = release && recovery.run['terminal_quiescent'] === 1 && recovery.processDisposition === 'quiescent'
+    if (safeRelease) recoverTerminalRunLock(r.tracker, r.runId)
+    const result = decodeRunResult({ ...common(r), ...specific }, r.policy.metricDirection)
     const successful = result.status === 'target-reached' || result.status === 'budget-limited'
     const removeWorktree = !this.options.config.retainWorktrees && (!this.options.config.cleanupWorktreesOnSuccess || successful)
+    // Export precedes retention so its artifact availability column reflects the run as it finished.
     if (this.options.config.exportTsv) r.tracker.exportTsv(r.runId, r.tracker.layout.resolve(join('exports', `${r.runId}.tsv`)))
-    if (safeRelease && removeWorktree) await removeRunWorktree(this.ctx, r.gitExecutable, r.discovery, r.identity, r.gitOptions)
     if (safeRelease) {
-      recoverTerminalRunLock(r.tracker, r.runId)
       applyRunRetention(r.tracker, r.runId, this.options.config)
+      if (removeWorktree) await this.removeTerminalWorktree(r)
     }
     return result
+  }
+
+  /**
+   * Worktree removal is best-effort cleanup of an already durable, quiescent terminal run, so it runs after the lock is
+   * released and never decides the result. Plain `git worktree remove` refuses modified or untracked files (for example
+   * evaluator output) and is deliberately never forced: that data stays in the retained worktree, exactly as with
+   * `retainWorktrees: true`, and a later terminal replay retries the removal once the worktree is clean.
+   */
+  private async removeTerminalWorktree(r: Runtime): Promise<void> {
+    try { await removeRunWorktree(this.ctx, r.gitExecutable, r.discovery, r.identity, r.gitOptions) }
+    catch (error) { if (!(error instanceof GitBoundaryError)) throw error }
   }
 }
 
@@ -782,6 +1034,14 @@ function normalizedGitReconciliationEvidence(error: GitBoundaryError): readonly 
     .map(message => message.trim().replace(/[\0\r\n]+/gu, ' '))
     .filter(message => message.length > 0)
   return evidence.length > 0 ? evidence : ['Git reconciliation failed while restoring the accepted HEAD']
+}
+
+/** Every process is quiescent but the accepted HEAD is unproven: keep the run nonterminal and resumable instead of locking it terminally. */
+class ResumableControllerFailure extends Error {
+  constructor(override readonly cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause))
+    this.name = 'ResumableControllerFailure'
+  }
 }
 
 class RejectedReconciliationBlockedError extends Error {
@@ -799,7 +1059,21 @@ function normalizedReason(value: string): string { const text = value.trim().rep
 function parseJson(value: unknown): unknown { if (typeof value !== 'string') return undefined; try { return JSON.parse(value) } catch { return undefined } }
 function artifact(r: Runtime, experimentId: string, attemptId: string, item: { kind: string; location: string; sizeBytes: number; sha256: string; truncated: boolean }): ArtifactRecord { return { artifactId: `${attemptId}-${item.kind}`, runId: r.runId, experimentId, attemptId, kind: item.kind, location: item.location, sizeBytes: item.sizeBytes, sha256: item.sha256, owner: 'evaluator', retention: 'retain', metadata: { truncated: item.truncated } } }
 function isFrozenEvaluatorViolation(error: unknown): error is FrozenEvaluatorBoundaryError { return error instanceof FrozenEvaluatorBoundaryError }
-function boundedMismatchMessage(error: unknown): string { const message = (error instanceof Error ? error.message : String(error)).trim(); return (message || 'frozen evaluator files differ from the immutable manifest').slice(0, 4096) }
+/** Raw controller error text is display evidence: scrub exact configured environment values, control characters, and length. */
+function controllerFailureMessage(error: unknown, secrets: readonly string[]): string { return boundedFailureMessage(redactConfiguredSecrets(error instanceof Error ? error.message : String(error), secrets)) }
+/**
+ * Tool and job adapters render only `error.message`, so an aggregate carries each wrapped error's bounded, scrubbed text
+ * (for example a Git index.lock cause) in its own message; `errors` and `cause` keep the original objects for callers.
+ */
+function controllerAggregateError(summary: string, parts: readonly (readonly [label: string, error: unknown])[], secrets: readonly string[]): AggregateError {
+  const details = parts.map(([label, error]) => `${label}: ${controllerFailureMessage(error, secrets).slice(0, AGGREGATE_DETAIL_CHARS)}`)
+  return new AggregateError(parts.map(([, error]) => error), `${summary} (${details.join('; ')})`, { cause: parts[0]?.[1] })
+}
+const AGGREGATE_DETAIL_CHARS = 1024
+/** Bounds before trimming: a cut at 4096 characters can otherwise end in whitespace or split a surrogate pair, which the result decoder rejects. */
+function boundedText(text: string, fallback: string): string { return text.slice(0, 4096).replace(/[\uD800-\uDBFF]$/u, '').trim() || fallback }
+function boundedFailureMessage(message: string): string { return boundedText(message.replace(/[\0-\x1f\x7f]+/gu, ' '), 'autoresearch controller failed unexpectedly') }
+function boundedMismatchMessage(error: unknown): string { return boundedText(error instanceof Error ? error.message : String(error), 'frozen evaluator files differ from the immutable manifest') }
 function experimentFacts(evaluation: RecoveredEvaluation, extra: Record<string, unknown>) { return { ...extra, exitCode: evaluation.exit.exitCode, signal: evaluation.exit.signal, timedOut: evaluation.exit.timedOut } as never }
 function optionalBest(tracker: DurableTracker, runId: string): BestResult | undefined { const row = tracker.getRun(runId); return row?.['best_metric'] === null || row?.['best_metric'] === undefined ? undefined : { metric: Number(row['best_metric']), commit: String(row['best_commit']), experimentId: String(row['best_experiment_id']) } }
 function durableBest(tracker: DurableTracker, runId: string): BestResult { const best = optionalBest(tracker, runId); if (!best) throw new Error('durable best result is missing'); return best }
@@ -811,6 +1085,66 @@ function publicArtifact(row: Pick<ArtifactRecord, 'artifactId' | 'kind' | 'locat
 function artifacts(tracker: DurableTracker, runId: string) { return (tracker.database.prepare(`SELECT a.artifact_id, a.kind, a.location, a.size_bytes, a.sha256 FROM artifacts a LEFT JOIN experiments e ON e.run_id = a.run_id AND e.experiment_id = a.experiment_id LEFT JOIN attempts t ON t.run_id = a.run_id AND t.attempt_id = a.attempt_id WHERE a.run_id = ? ORDER BY COALESCE(e.ordinal, -1), COALESCE(t.ordinal, -1), a.kind, a.artifact_id`).all(runId) as Record<string, unknown>[]).map(row => ({ artifactId: String(row['artifact_id']), kind: String(row['kind']), location: String(row['location']), sizeBytes: Number(row['size_bytes']), sha256: String(row['sha256']) })) }
 function common(r: Runtime, validatedArtifacts: readonly PublicArtifact[] = artifacts(r.tracker, r.runId)) { return { runId: r.runId, tracker: r.tracker.path, counts: counts(r.tracker, r.runId), artifacts: validatedArtifacts } }
 function errorEvidence(error: unknown): { code: string; message: string } { return { code: error instanceof ProposalAgentError ? error.code : String((error as { code?: unknown }).code ?? 'round-failed'), message: error instanceof Error ? error.message : String(error) } }
+const CONTROLLER_FAILURE_OUTCOME = 'controller-failure'
+const PROPOSAL_FAILURE_INTENT = 'restore-after-proposal-failure'
+interface ProposalFailureEvidence { readonly code: string; readonly message: string }
+/**
+ * A ready run whose latest round-relevant run checkpoint is a proposal failure's restoration intent has not yet persisted
+ * that failure's round-failed verdict. Trailing ready->ready cancellation checkpoints record no round progress (a Host
+ * disposal can land while failure recovery retries the restoration), so they are skipped; legacy intents without typed
+ * evidence, or any other later checkpoint, return undefined.
+ */
+function pendingProposalFailure(tracker: DurableTracker, runId: string): ProposalFailureEvidence | undefined {
+  const run = tracker.getRun(runId)
+  if (run?.['state'] !== 'ready') return undefined
+  const rows = tracker.database.prepare("SELECT from_state, to_state, intent_json FROM transitions WHERE run_id = ? AND scope = 'run' ORDER BY sequence DESC").iterate(runId) as Iterable<Record<string, unknown>>
+  let record: Record<string, unknown> | undefined
+  for (const row of rows) {
+    if (row['to_state'] !== 'ready') return undefined
+    const intent = parseJson(row['intent_json'])
+    if (!intent || typeof intent !== 'object' || Array.isArray(intent)) return undefined
+    const candidate = intent as Record<string, unknown>
+    if (candidate['kind'] === 'cancellation' && row['from_state'] === 'ready') continue
+    record = candidate
+    break
+  }
+  if (!record) return undefined
+  if (record['kind'] !== PROPOSAL_FAILURE_INTENT || Object.keys(record).sort().join(',') !== 'code,commit,kind,message') return undefined
+  if (record['commit'] !== run['best_commit'] || typeof record['code'] !== 'string' || !record['code'] || typeof record['message'] !== 'string') return undefined
+  return { code: record['code'], message: record['message'] }
+}
+/** Losing the controller claim is not an owned failure: another controller may be driving the run. */
+const CLAIM_LOSS_CODES: ReadonlySet<string> = new Set(['run-controller-claim-lost', 'run-controller-lost'])
+/** Typed Git failures keep their machine code by field origin; only the display text is scrubbed and bounded. */
+function controllerFailureEvidence(error: unknown, secrets: readonly string[]): BlockerEvidence[] {
+  if (error instanceof GitBoundaryError) return normalizedGitReconciliationEvidence(error).map(message => ({ code: error.code, message: boundedFailureMessage(redactConfiguredSecrets(message, secrets)), artifacts: [] }))
+  return [{ code: 'controller-failed', message: controllerFailureMessage(error, secrets), artifacts: [] }]
+}
+/**
+ * The complete evidence of a terminalized controller failure lives in its terminal run transition. It is used only when
+ * that transition is the run's last one and agrees with the row's authoritative terminal reason; otherwise the row facts
+ * alone are returned.
+ */
+function durableControllerFailureEvidence(tracker: DurableTracker, runId: string, row: Record<string, unknown>): BlockerEvidence[] | undefined {
+  const last = tracker.database.prepare("SELECT to_state, outcome_json FROM transitions WHERE run_id = ? AND scope = 'run' ORDER BY sequence DESC LIMIT 1").get(runId)
+  if (!last || !['blocked', 'round-failed'].includes(String(row['state'])) || last['to_state'] !== row['state']) return undefined
+  const outcome = parseJson(last['outcome_json'])
+  if (!outcome || typeof outcome !== 'object' || Array.isArray(outcome)) return undefined
+  const record = outcome as Record<string, unknown>
+  if (record['kind'] !== CONTROLLER_FAILURE_OUTCOME || Object.keys(record).sort().join(',') !== 'evidence,kind' || !Array.isArray(record['evidence']) || record['evidence'].length === 0) return undefined
+  const evidence: BlockerEvidence[] = []
+  for (const item of record['evidence'] as unknown[]) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return undefined
+    const entry = item as Record<string, unknown>
+    if (Object.keys(entry).sort().join(',') !== 'code,message' || typeof entry['code'] !== 'string' || !entry['code'] || typeof entry['message'] !== 'string' || !entry['message']) return undefined
+    evidence.push({ code: entry['code'], message: entry['message'], artifacts: [] })
+  }
+  return evidence[0]!.message === row['terminal_reason'] ? evidence : undefined
+}
+/** The ordinal the next candidate would take, computed exactly as recovery's ready directive computes it. */
+function nextCandidateOrdinal(tracker: DurableTracker, runId: string): number { return Number(tracker.database.prepare("SELECT COALESCE(MAX(ordinal), 0) AS n FROM experiments WHERE run_id = ? AND kind = 'candidate'").get(runId)?.['n'] ?? 0) + 1 }
+/** Any recorded attempt outcome of this run is durable evaluator authority that terminal failure persistence must not overwrite. */
+function hasDurableAttemptOutcome(tracker: DurableTracker, runId: string): boolean { return tracker.database.prepare('SELECT 1 FROM attempts WHERE run_id = ? AND (outcome_json IS NOT NULL OR exited_at IS NOT NULL) LIMIT 1').get(runId) !== undefined }
 function evidenceFromRun(row: Record<string, unknown>): BlockerEvidence[] { return [{ code: String(row['blocked_code'] ?? 'terminal'), message: String(row['terminal_reason'] ?? 'run terminated'), artifacts: [] }] }
 function baselineBlocked(r: Runtime, refs: PublicArtifact[]): Record<string, unknown> {
   const experiment = r.tracker.database.prepare("SELECT experiment_id FROM experiments WHERE run_id = ? AND kind = 'baseline' ORDER BY ordinal LIMIT 1").get(r.runId)
@@ -891,8 +1225,9 @@ function readonlyTerminalReplay(r: Runtime, directive: Extract<RecoveryDirective
   if (state === 'completed') value = { ...common(r, refs), status: r.policy.target !== undefined && best && isTargetReached(r.policy.metricDirection, best.metric, r.policy.target) ? 'target-reached' : 'budget-limited', ...(r.policy.target !== undefined && best && isTargetReached(r.policy.metricDirection, best.metric, r.policy.target) ? { target: r.policy.target } : {}), best }
   else if (state === 'baseline-blocked') value = baselineBlocked(r, refs)
   else if (state === 'cancelled' && directive.state === 'cancelled') value = cancelledResult(r, directive.lastState, refs)
-  else if (state === 'blocked' && best) value = { ...common(r, refs), status: 'blocked', best, evidence: evidenceFromRun(row) }
-  else value = { ...common(r, refs), status: 'round-failed', reason: String(row['terminal_reason'] ?? state), evidence: evidenceFromRun(row), ...(best ? { best } : {}) }
+  // Exactly as the claimed replay (returnTerminal) does, so a contended claim never changes the replayed evidence.
+  else if (state === 'blocked' && best) value = { ...common(r, refs), status: 'blocked', best, evidence: durableControllerFailureEvidence(r.tracker, r.runId, row) ?? evidenceFromRun(row) }
+  else value = { ...common(r, refs), status: 'round-failed', reason: String(row['terminal_reason'] ?? state), evidence: durableControllerFailureEvidence(r.tracker, r.runId, row) ?? evidenceFromRun(row), ...(best ? { best } : {}) }
   return decodeRunResult(value, r.policy.metricDirection)
 }
 
