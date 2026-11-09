@@ -103,6 +103,7 @@ From that repository, ask the agent to call:
 - `repository` defaults to the agent's current working directory, and a relative path resolves against it. After the agent changes directory, the target must remain inside the Session's original directory or the repository containing it, and cannot be a nested repository, linked worktree, or Git directory reference to another repository. Use a fresh, Git-safe `run_tag` for each new run.
 - Runs are background jobs by default. Inspect or stop them with `job_list`, `job_output`, and `job_kill`; use `"mode": "foreground"` to wait for completion.
 - Cancellation waits for evaluator cleanup, reconciles the accepted Git state, and releases the run lock only after durable terminal settlement.
+- If restoring the accepted Git state hits a transient Git failure (for example a stale `index.lock`), the cancel reports an `AggregateError` and the run keeps its lock. Fix the cause, then resume the run with `resume_run_id`: it finishes the cancellation as `cancelled` and releases the lock instead of continuing research.
 - Plugin unload or hot reload cancels active runs and waits for proposal children and jobs to settle.
 - Optional inputs: `target` (stopping threshold), `timeout_ms` (per-attempt watchdog), and `constraints` (advisory guidance, not acceptance rules).
 - To resume, replace `run_tag` and `evaluator_id` with `resume_run_id` and retain the original run policy. The stored evaluator registration is revalidated before execution.

@@ -378,13 +378,18 @@ export async function verifyCandidateTree(ctx: GitContext, executable: string, w
 }
 
 
-export async function commitCandidate(ctx: GitContext, executable: string, worktree: string, identity: RunGitIdentity, experimentId: string, snapshot: CandidateSnapshot, validatedPaths: readonly string[], options: Omit<GitCommandOptions, 'cwd'>): Promise<CandidateCommit> {
+/**
+ * `rejectedAuditCommits` lists audit commits whose rejection durably began before the commit was recorded: that rejection
+ * may already have reset the worktree towards the accepted tree, so only the recovered commit's lineage is verified and the
+ * following checkoutCandidateForEvaluation re-establishes the exact candidate worktree.
+ */
+export async function commitCandidate(ctx: GitContext, executable: string, worktree: string, identity: RunGitIdentity, experimentId: string, snapshot: CandidateSnapshot, validatedPaths: readonly string[], options: Omit<GitCommandOptions, 'cwd'>, rejectedAuditCommits: readonly string[] = []): Promise<CandidateCommit> {
   const auditRef = `${identity.candidateRefPrefix}${safeIdentity(experimentId, 'experimentId')}`
   const existingAudit = await readOptionalRef(ctx, executable, auditRef, worktree, options)
   if (existingAudit) {
     const diffStats = parseDiffStats((await runGit(ctx, executable, ['diff', '--no-renames', '--numstat', '-z', snapshot.parentCommit, existingAudit, '--', ...validatedPaths.map(path => `:(literal)${path}`)], { ...options, cwd: worktree })).stdout)
     const recovered = { parentCommit: snapshot.parentCommit, candidateCommit: existingAudit, auditRef, changedPaths: [...validatedPaths], diffStats }
-    await verifyCandidateTree(ctx, executable, worktree, experimentId, snapshot, recovered, options)
+    await verifyCandidateTree(ctx, executable, worktree, experimentId, snapshot, recovered, options, !rejectedAuditCommits.includes(existingAudit))
     return recovered
   }
   const prepared = await prepareCandidateTree(ctx, executable, worktree, identity, experimentId, snapshot, validatedPaths, options)
@@ -437,12 +442,14 @@ export async function restoreAcceptedWorktree(ctx: GitContext, executable: strin
 /**
  * Restores the accepted HEAD for a candidate whose snapshot commit may be partially applied: once its run-owned audit ref
  * exists, the branch may already point at the candidate (a valid rejection state), so reject it back to the accepted
- * commit; without an audit ref nothing moved the branch and the plain accepted restoration applies.
+ * commit; without an audit ref nothing moved the branch and the plain accepted restoration applies. `beforeRejection`
+ * and `beforeDiscard` run before the first destructive step of the respective path.
  */
-export async function restoreAcceptedAfterCandidateCommit(ctx: GitContext, executable: string, worktree: string, identity: RunGitIdentity, experimentId: string, expectedAcceptedCommit: string, options: Omit<GitCommandOptions, 'cwd'>): Promise<void> {
+export async function restoreAcceptedAfterCandidateCommit(ctx: GitContext, executable: string, worktree: string, identity: RunGitIdentity, experimentId: string, expectedAcceptedCommit: string, options: Omit<GitCommandOptions, 'cwd'>, beforeRejection?: (auditCommit: string) => void, beforeDiscard?: () => void): Promise<void> {
   const auditRef = `${identity.candidateRefPrefix}${safeIdentity(experimentId, 'experimentId')}`
   const audit = await readOptionalRef(ctx, executable, auditRef, worktree, options)
-  if (audit === undefined) return restoreAcceptedWorktree(ctx, executable, worktree, identity, expectedAcceptedCommit, options)
+  if (audit === undefined) { beforeDiscard?.(); return restoreAcceptedWorktree(ctx, executable, worktree, identity, expectedAcceptedCommit, options) }
+  beforeRejection?.(audit)
   return reconcileRejectedHead(ctx, executable, worktree, identity, audit, expectedAcceptedCommit, options)
 }
 export function releaseTerminalRunLock(tracker: DurableTracker, runId: string): boolean {

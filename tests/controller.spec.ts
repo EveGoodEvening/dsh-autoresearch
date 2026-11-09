@@ -3385,6 +3385,384 @@ describe('controller real Git/SQLite outcomes', { timeout: 30_000 }, () => {
       expect(execFileSync('git', ['-C', durable.ready.worktree, 'status', '--porcelain=v1']).toString()).toBe('')
     })
 
+    it('rejects a cancelled candidate whose quiescent attempt has no durable outcome and releases the lock', async () => {
+      let controller!: AutoresearchRunController
+      const f = controllerFixture([{ stdout: '{"score":10}\n' }, { stdout: '{"score":9}\n' }], [worktree => writeFileSync(join(worktree, 'src', 'code.ts'), 'export const n = 2\n')])
+      const transition = DurableTracker.prototype.transitionExperiment
+      let armed = false; let injected = false
+      vi.spyOn(DurableTracker.prototype, 'transitionExperiment').mockImplementation(function (experimentId, state, facts, at) {
+        if (state === 'running' && experimentId.includes('-candidate-')) armed = true
+        return transition.call(this, experimentId, state, facts, at)
+      })
+      // The candidate evaluator exits cleanly and is proven quiescent; the Host then cancels while its output is persisted,
+      // and the artifact write fails (ENOSPC), so the attempt has durable quiescence but no outcome.
+      const write = EvaluatorArtifactWriter.prototype.write
+      vi.spyOn(EvaluatorArtifactWriter.prototype, 'write').mockImplementation(function (this: EvaluatorArtifactWriter, ...args: Parameters<EvaluatorArtifactWriter['write']>) {
+        if (!armed) return write.apply(this, args)
+        injected = true
+        controller.cancel('operator stop while candidate output is persisted')
+        throw Object.assign(new Error('injected ENOSPC artifact write'), { code: 'ENOSPC' })
+      })
+      controller = createCaseController(f, { max_experiments: 1 })
+      const result = await controller.run(); const ready = await controller.ready
+      vi.restoreAllMocks()
+      expect(injected).toBe(true)
+      expect(result).toMatchObject({ status: 'cancelled', best: { metric: 10 } })
+      const durable = failedRun(result)
+      expect(durable.run).toMatchObject({ state: 'cancelled', terminal_quiescent: 1 })
+      expect(durable.attempts.at(-1)).toEqual({ spawned_at: expect.any(String), exited_at: null, process_tree_quiescent: 1, outcome_json: null })
+      expect(durable.lock?.['released_at']).toEqual(expect.any(String))
+      const gitCommonDir = String(durable.run['git_common_dir'])
+      expect(sharedActiveLocks(gitCommonDir)).toEqual([])
+      const best = String(durable.run['best_commit'])
+      expect(execFileSync('git', ['-C', ready.worktree, 'rev-parse', 'HEAD']).toString().trim()).toBe(best)
+      expect(execFileSync('git', ['-C', f.root, 'rev-parse', `refs/heads/${ready.branch}`]).toString().trim()).toBe(best)
+      expect(execFileSync('git', ['-C', ready.worktree, 'status', '--porcelain=v1']).toString()).toBe('')
+      await controller.dispose()
+      expect(await createCaseController(f, { max_experiments: 1 }, result.runId).run()).toEqual(result)
+      expect(await createCaseController(f, { ...terminalInput, run_tag: 'after-cancelled-outcome-failure' }).run()).toMatchObject({ status: 'budget-limited' })
+    })
+
+    it('settles a cancellation that aborts candidate checkout after its branch moved, before the commit was recorded', async () => {
+      let controller!: AutoresearchRunController
+      let proposed = false; let branchMoved = false; let cancelledAt: string | undefined
+      const f = controllerFixture([{ stdout: '{"score":10}\n' }], [worktree => { writeFileSync(join(worktree, 'src', 'code.ts'), 'export const n = 2\n'); proposed = true }], {}, { gitSpawnFailure: spec => {
+        // checkoutCandidateForEvaluation moves the run branch to the candidate (`update-ref refs/heads/<branch> <candidate> <parent>`),
+        // then the owner cancels while its read-tree is in flight: the abort kills that Git command before recordCandidateCommit.
+        if (proposed && !branchMoved && spec.argv.includes('update-ref') && spec.argv.some(arg => arg.startsWith('refs/heads/'))) branchMoved = true
+        else if (branchMoved && cancelledAt === undefined && spec.argv.includes('read-tree')) { cancelledAt = spec.argv.at(-1); controller.cancel('operator stop during candidate checkout') }
+        return undefined
+      } })
+      const record = vi.spyOn(DurableTracker.prototype, 'recordCandidateCommit')
+      controller = createCaseController(f, { max_experiments: 1 })
+      const result = await controller.run(); const ready = await controller.ready
+      expect(branchMoved).toBe(true); expect(cancelledAt).toEqual(expect.any(String))
+      expect(record).not.toHaveBeenCalled()
+      vi.restoreAllMocks()
+      expect(result).toMatchObject({ status: 'cancelled', lastState: 'candidate-prepared', best: { metric: 10 } })
+      expect(decodeRunResult(result, 'minimize')).toEqual(result)
+      const durable = failedRun(result)
+      expect(durable.run).toMatchObject({ state: 'cancelled', terminal_quiescent: 1 })
+      expect(durable.lock?.['released_at']).toEqual(expect.any(String))
+      const gitCommonDir = String(durable.run['git_common_dir'])
+      expect(sharedActiveLocks(gitCommonDir)).toEqual([])
+      expect(candidateAuditCommits(f.root, result.runId)).toEqual([cancelledAt])
+      const best = String(durable.run['best_commit'])
+      expect(execFileSync('git', ['-C', ready.worktree, 'rev-parse', 'HEAD']).toString().trim()).toBe(best)
+      expect(execFileSync('git', ['-C', f.root, 'rev-parse', `refs/heads/${ready.branch}`]).toString().trim()).toBe(best)
+      expect(execFileSync('git', ['-C', ready.worktree, 'status', '--porcelain=v1']).toString()).toBe('')
+      expect(f.subprocess.evaluatorSpawns).toBe(1)
+      await controller.dispose()
+      expect(await createCaseController(f, { max_experiments: 1 }, result.runId).run()).toEqual(result)
+      expect(await createCaseController(f, { ...terminalInput, run_tag: 'after-checkout-cancellation' }).run()).toMatchObject({ status: 'budget-limited' })
+    })
+
+    // `read-tree` #1 and `clean` #1 fail inside the candidate rejection (`clean` only after the worktree was reset to the
+    // accepted tree); `read-tree` #2 fails in the final accepted-HEAD restoration, after the rejection fully succeeded.
+    it.each([
+      ['candidate-prepared', 'read-tree', 1], ['candidate-prepared', 'clean', 1], ['candidate-prepared', 'read-tree', 2],
+      ['candidate-running', 'read-tree', 1], ['candidate-running', 'clean', 1], ['candidate-running', 'read-tree', 2],
+    ] as const)('keeps a %s cancellation nonterminal and settles it on resume when its quiescent candidate restoration fails on %s #%s', async (phase, command, nth) => {
+      let controller!: AutoresearchRunController
+      let cancelled = false; let failures = 0; let matches = 0
+      const matching = (argv: readonly string[]) => command === 'clean' ? argv.includes('clean') : argv.includes('read-tree') && argv.includes('--reset')
+      // The candidate-running case spends one candidate evaluation before cancelling; its resume reruns the attempt.
+      const f = controllerFixture([{ stdout: '{"score":10}\n' }, { stdout: '{"score":9}\n' }, { stdout: '{"score":9}\n' }], [worktree => writeFileSync(join(worktree, 'src', 'code.ts'), 'export const n = 2\n')], {}, { gitSpawnFailure: spec => cancelled && failures === 0 && matching(spec.argv) && ++matches === nth ? (failures++, new Error('fatal: injected transient index.lock rejection failure')) : undefined })
+      if (phase === 'candidate-prepared') {
+        const transition = DurableTracker.prototype.transitionExperiment
+        vi.spyOn(DurableTracker.prototype, 'transitionExperiment').mockImplementation(function (experimentId, state, facts, at) {
+          if (!cancelled && experimentId.includes('-candidate-') && state === 'running') { cancelled = true; controller.cancel('stop after candidate checkout'); throw new Error('checkout cancellation barrier') }
+          return transition.call(this, experimentId, state, facts, at)
+        })
+      } else {
+        const transition = DurableTracker.prototype.transitionExperiment
+        let armed = false
+        vi.spyOn(DurableTracker.prototype, 'transitionExperiment').mockImplementation(function (experimentId, state, facts, at) {
+          if (state === 'running' && experimentId.includes('-candidate-')) armed = true
+          return transition.call(this, experimentId, state, facts, at)
+        })
+        const write = EvaluatorArtifactWriter.prototype.write
+        vi.spyOn(EvaluatorArtifactWriter.prototype, 'write').mockImplementation(function (this: EvaluatorArtifactWriter, ...args: Parameters<EvaluatorArtifactWriter['write']>) {
+          if (!armed || cancelled) return write.apply(this, args)
+          cancelled = true
+          controller.cancel('operator stop while candidate output is persisted')
+          throw Object.assign(new Error('injected ENOSPC artifact write'), { code: 'ENOSPC' })
+        })
+      }
+      controller = createCaseController(f, { max_experiments: 1 })
+      const failure = await controller.run().then(() => undefined, (error: unknown) => error); const ready = await controller.ready
+      vi.restoreAllMocks()
+      expect(failures).toBe(1)
+      expect(failure).toBeInstanceOf(AggregateError)
+      expect((failure as AggregateError).message).toMatch(/^autoresearch run was cancelled but its accepted HEAD could not be restored; the run remains nonterminal with its lock held so a resume can retry reconciliation \(cancellation: .+; restoration: .*injected transient index\.lock rejection failure/u)
+      // No terminal row with unproven quiescence: the lock stays held only by a nonterminal, resumable run.
+      const tracker = DurableTracker.openReadOnly(ready.tracker)
+      let gitCommonDir: string
+      try {
+        expect(tracker.getRun(ready.runId)).toMatchObject({ state: phase, terminal_quiescent: null })
+        gitCommonDir = String(tracker.getRun(ready.runId)!['git_common_dir'])
+        // The failed restoration precedes the cancelled commitment: the unresolved candidate keeps its pre-cancel state.
+        expect(tracker.database.prepare("SELECT state FROM experiments WHERE run_id = ? AND kind = 'candidate'").get(ready.runId)?.['state']).toBe(phase === 'candidate-prepared' ? 'baseline-pending' : 'running')
+        // A candidate-prepared rejection is durably marked before its first destructive step.
+        if (phase === 'candidate-prepared') expect(tracker.listTransitions(ready.runId).map(row => (JSON.parse(String(row['intent_json'] ?? 'null')) as { kind?: string } | null)?.kind)).toContain('controller-failure-candidate-rejection')
+      } finally { tracker.close() }
+      expect(sharedActiveLocks(gitCommonDir)).toEqual([{ run_id: ready.runId }])
+      await controller.dispose()
+      // Once the transient condition clears, a resume settles the durable cancellation (never continues research), with the
+      // operator's recorded reason, from the accepted baseline HEAD, and releases the lock.
+      const resumed = await createCaseController(f, { max_experiments: 1 }, ready.runId).run()
+      const reason = phase === 'candidate-prepared' ? 'stop after candidate checkout' : 'operator stop while candidate output is persisted'
+      expect(resumed).toMatchObject({ status: 'cancelled', lastState: phase, reason, best: { metric: 10 } })
+      const durable = failedRun(resumed)
+      expect(durable.run).toMatchObject({ state: 'cancelled', terminal_quiescent: 1, terminal_reason: reason })
+      expect(durable.lock?.['released_at']).toEqual(expect.any(String))
+      expect(sharedActiveLocks(gitCommonDir)).toEqual([])
+      expect(f.subprocess.evaluatorSpawns).toBe(phase === 'candidate-prepared' ? 1 : 2)
+      expect(execFileSync('git', ['-C', ready.worktree, 'rev-parse', 'HEAD']).toString().trim()).toBe(String(durable.run['best_commit']))
+      expect(execFileSync('git', ['-C', ready.worktree, 'status', '--porcelain=v1']).toString()).toBe('')
+      expect(await createCaseController(f, { max_experiments: 1 }, ready.runId).run()).toEqual(resumed)
+    })
+
+    it('settles a partially rejected commit-candidate cancellation on resume after its audit ref landed', async () => {
+      let controller!: AutoresearchRunController
+      let proposed = false; let branchMoved = false; let cancelledAt: string | undefined; let cleanFailures = 0
+      const f = controllerFixture([{ stdout: '{"score":10}\n' }, { stdout: '{"score":9}\n' }], [worktree => { writeFileSync(join(worktree, 'src', 'code.ts'), 'export const n = 2\n'); proposed = true }], {}, { gitSpawnFailure: spec => {
+        // Cancel during checkoutCandidateForEvaluation after the branch moved, then fail the rejection's `clean -ffdx` after
+        // its `read-tree --reset -u <accepted>` already reset the candidate edits away.
+        if (proposed && !branchMoved && spec.argv.includes('update-ref') && spec.argv.some(arg => arg.startsWith('refs/heads/'))) branchMoved = true
+        else if (branchMoved && cancelledAt === undefined && spec.argv.includes('read-tree')) { cancelledAt = spec.argv.at(-1); controller.cancel('operator stop during candidate checkout') }
+        else if (cancelledAt !== undefined && cleanFailures === 0 && spec.argv.includes('clean')) { cleanFailures++; return new Error('fatal: injected transient clean failure') }
+        return undefined
+      } })
+      controller = createCaseController(f, { max_experiments: 1 })
+      const failure = await controller.run().then(() => undefined, (error: unknown) => error); const ready = await controller.ready
+      expect(cleanFailures).toBe(1); expect(cancelledAt).toEqual(expect.any(String))
+      expect(failure).toBeInstanceOf(AggregateError)
+      expect((failure as AggregateError).message).toMatch(/^autoresearch run was cancelled but its accepted HEAD could not be restored; the run remains nonterminal with its lock held so a resume can retry reconciliation \(cancellation: .+; restoration: .*injected transient clean failure/u)
+      const tracker = DurableTracker.openReadOnly(ready.tracker)
+      let gitCommonDir: string
+      try {
+        expect(tracker.getRun(ready.runId)).toMatchObject({ state: 'candidate-prepared', terminal_quiescent: null })
+        expect(tracker.database.prepare("SELECT candidate_commit FROM experiments WHERE run_id = ? AND kind = 'candidate'").get(ready.runId)?.['candidate_commit']).toBeNull()
+        expect(tracker.listTransitions(ready.runId).map(row => JSON.parse(String(row['intent_json'] ?? 'null')) as { kind?: string; candidateCommit?: string } | null).filter(intent => intent?.kind === 'controller-failure-candidate-rejection').map(intent => intent!.candidateCommit)).toEqual([cancelledAt])
+        gitCommonDir = String(tracker.getRun(ready.runId)!['git_common_dir'])
+      } finally { tracker.close() }
+      expect(sharedActiveLocks(gitCommonDir)).toEqual([{ run_id: ready.runId }])
+      // The worktree already holds the accepted tree: the resume settles the durable cancellation (never evaluating the
+      // candidate), rejecting the partial branch move back to the accepted HEAD, and releases the lock instead of blocking
+      // on an inexact candidate worktree.
+      await controller.dispose()
+      const resumed = await createCaseController(f, { max_experiments: 1 }, ready.runId).run()
+      expect(resumed).toMatchObject({ status: 'cancelled', lastState: 'candidate-prepared', reason: 'operator stop during candidate checkout', best: { metric: 10 } })
+      const durable = failedRun(resumed)
+      expect(durable.run).toMatchObject({ state: 'cancelled', terminal_quiescent: 1 })
+      expect(durable.run['best_commit']).not.toBe(cancelledAt)
+      expect(sharedActiveLocks(gitCommonDir)).toEqual([])
+      expect(f.subprocess.evaluatorSpawns).toBe(1)
+      const best = String(durable.run['best_commit'])
+      expect(execFileSync('git', ['-C', ready.worktree, 'rev-parse', 'HEAD']).toString().trim()).toBe(best)
+      expect(execFileSync('git', ['-C', f.root, 'rev-parse', `refs/heads/${ready.branch}`]).toString().trim()).toBe(best)
+      expect(execFileSync('git', ['-C', ready.worktree, 'status', '--porcelain=v1']).toString()).toBe('')
+      expect(await createCaseController(f, { max_experiments: 1 }, ready.runId).run()).toEqual(resumed)
+    })
+
+    it('keeps a partially rejected commit-candidate controller failure resumable after its audit ref landed', async () => {
+      let proposed = false; let branchMoved = false; let failedAt: string | undefined; let cleanFailures = 0
+      const f = controllerFixture([{ stdout: '{"score":10}\n' }, { stdout: '{"score":9}\n' }], [worktree => { writeFileSync(join(worktree, 'src', 'code.ts'), 'export const n = 2\n'); proposed = true }], {}, { gitSpawnFailure: spec => {
+        // A non-cancel failure inside checkoutCandidateForEvaluation after the branch moved (before the commit is recorded),
+        // then the failure-path rejection's `clean -ffdx` fails after its `read-tree --reset -u <accepted>` already reset
+        // the candidate edits away.
+        if (proposed && !branchMoved && spec.argv.includes('update-ref') && spec.argv.some(arg => arg.startsWith('refs/heads/'))) branchMoved = true
+        else if (branchMoved && failedAt === undefined && spec.argv.includes('read-tree')) { failedAt = spec.argv.at(-1); return new Error('fatal: injected candidate checkout failure') }
+        else if (failedAt !== undefined && cleanFailures === 0 && spec.argv.includes('clean')) { cleanFailures++; return new Error('fatal: injected transient clean failure') }
+        return undefined
+      } })
+      const controller = createCaseController(f, { max_experiments: 1 })
+      const failure = await controller.run().then(() => undefined, (error: unknown) => error); const ready = await controller.ready
+      expect(cleanFailures).toBe(1); expect(failedAt).toEqual(expect.any(String))
+      expect(failure).toBeInstanceOf(AggregateError)
+      expect((failure as AggregateError).message).toMatch(/^autoresearch run failed and its accepted HEAD could not be restored.*injected transient clean failure/u)
+      const tracker = DurableTracker.openReadOnly(ready.tracker)
+      let gitCommonDir: string
+      try {
+        expect(tracker.getRun(ready.runId)).toMatchObject({ state: 'candidate-prepared', terminal_quiescent: null })
+        expect(tracker.database.prepare("SELECT candidate_commit FROM experiments WHERE run_id = ? AND kind = 'candidate'").get(ready.runId)?.['candidate_commit']).toBeNull()
+        expect(tracker.listTransitions(ready.runId).map(row => JSON.parse(String(row['intent_json'] ?? 'null')) as { kind?: string; candidateCommit?: string } | null).filter(intent => intent?.kind === 'controller-failure-candidate-rejection').map(intent => intent!.candidateCommit)).toEqual([failedAt])
+        gitCommonDir = String(tracker.getRun(ready.runId)!['git_common_dir'])
+      } finally { tracker.close() }
+      expect(sharedActiveLocks(gitCommonDir)).toEqual([{ run_id: ready.runId }])
+      // The worktree already holds the accepted tree: the resume verifies only the audit commit's lineage, re-checks out the
+      // candidate exactly, evaluates it and releases the lock instead of blocking on an inexact candidate worktree.
+      await controller.dispose()
+      const resumed = await createCaseController(f, { max_experiments: 1 }, ready.runId).run()
+      expect(resumed).toMatchObject({ status: 'budget-limited', best: { metric: 9 } })
+      const durable = failedRun(resumed)
+      expect(durable.run).toMatchObject({ state: 'completed', terminal_quiescent: 1, best_commit: failedAt })
+      expect(sharedActiveLocks(gitCommonDir)).toEqual([])
+      expect(f.subprocess.evaluatorSpawns).toBe(2)
+      expect(execFileSync('git', ['-C', ready.worktree, 'rev-parse', 'HEAD']).toString().trim()).toBe(failedAt)
+      expect(execFileSync('git', ['-C', ready.worktree, 'status', '--porcelain=v1']).toString()).toBe('')
+    })
+
+    // `read-tree` fails before touching the worktree; `clean` fails after `read-tree --reset -u <accepted>` already
+    // discarded the unaudited candidate edits. Either way the discard was durably marked first, so the resume settles the
+    // cancellation from the accepted HEAD instead of re-preparing a snapshot whose edits may be gone.
+    it.each([undefined, 'read-tree', 'clean'] as const)('settles a commit-candidate cancellation before its audit ref exists (restoration failure: %s)', async failing => {
+      let controller!: AutoresearchRunController
+      let proposed = false; let cancelled = false; let failures = 0
+      const matching = (argv: readonly string[]) => failing === 'clean' ? argv.includes('clean') : argv.includes('read-tree') && argv.includes('--reset')
+      const f = controllerFixture([{ stdout: '{"score":10}\n' }, { stdout: '{"score":9}\n' }], [worktree => { writeFileSync(join(worktree, 'src', 'code.ts'), 'export const n = 2\n'); proposed = true }], {}, { gitSpawnFailure: spec => {
+        // Cancel while prepareCandidateTree creates the candidate commit: the audit `update-ref` never runs.
+        if (proposed && !cancelled && spec.argv.includes('commit-tree')) { cancelled = true; controller.cancel('operator stop during candidate commit') }
+        else if (failing && cancelled && failures === 0 && matching(spec.argv)) { failures++; return new Error(`fatal: injected transient ${failing} restoration failure`) }
+        return undefined
+      } })
+      controller = createCaseController(f, { max_experiments: 1 })
+      let error: unknown
+      const result = await controller.run().catch((caught: unknown) => { error = caught; return undefined }); const ready = await controller.ready
+      expect(cancelled).toBe(true)
+      expect(candidateAuditCommits(f.root, ready.runId)).toEqual([])
+      const startCommit = execFileSync('git', ['-C', f.root, 'rev-list', '--max-parents=0', 'HEAD']).toString().trim()
+      const expectCancelled = (settled: Awaited<ReturnType<AutoresearchRunController['run']>>): void => {
+        expect(settled).toMatchObject({ status: 'cancelled', lastState: 'candidate-prepared', reason: 'operator stop during candidate commit', best: { metric: 10 } })
+        expect(decodeRunResult(settled, 'minimize')).toEqual(settled)
+        const durable = failedRun(settled)
+        expect(durable.run).toMatchObject({ state: 'cancelled', terminal_quiescent: 1 })
+        expect(durable.lock?.['released_at']).toEqual(expect.any(String))
+        expect(sharedActiveLocks(String(durable.run['git_common_dir']))).toEqual([])
+        expect(execFileSync('git', ['-C', ready.worktree, 'rev-parse', 'HEAD']).toString().trim()).toBe(startCommit)
+        expect(execFileSync('git', ['-C', f.root, 'rev-parse', `refs/heads/${ready.branch}`]).toString().trim()).toBe(startCommit)
+        expect(execFileSync('git', ['-C', ready.worktree, 'status', '--porcelain=v1']).toString()).toBe('')
+        expect(f.subprocess.evaluatorSpawns).toBe(1)
+      }
+      if (!failing) {
+        expect(error).toBeUndefined()
+        expectCancelled(result!)
+        return
+      }
+      expect(failures).toBe(1)
+      expect(error).toBeInstanceOf(AggregateError)
+      expect((error as AggregateError).message).toMatch(new RegExp(`^autoresearch run was cancelled but its accepted HEAD could not be restored; the run remains nonterminal with its lock held so a resume can retry reconciliation \\(cancellation: .+; restoration: .*injected transient ${failing} restoration failure`, 'u'))
+      const tracker = DurableTracker.openReadOnly(ready.tracker)
+      let gitCommonDir: string
+      try {
+        expect(tracker.getRun(ready.runId)).toMatchObject({ state: 'candidate-prepared', terminal_quiescent: null })
+        expect(tracker.listTransitions(ready.runId).map(row => JSON.parse(String(row['intent_json'] ?? 'null')) as { kind?: string; reason?: string } | null).filter(intent => intent?.kind === 'cancellation-candidate-discard').map(intent => intent!.reason)).toEqual(['operator stop during candidate commit'])
+        gitCommonDir = String(tracker.getRun(ready.runId)!['git_common_dir'])
+      } finally { tracker.close() }
+      expect(sharedActiveLocks(gitCommonDir)).toEqual([{ run_id: ready.runId }])
+      await controller.dispose()
+      const resumed = await createCaseController(f, { max_experiments: 1 }, ready.runId).run()
+      expectCancelled(resumed)
+      expect(await createCaseController(f, { max_experiments: 1 }, ready.runId).run()).toEqual(resumed)
+      expect(await createCaseController(f, { ...terminalInput, run_tag: 'after-discarded-cancellation' }).run()).toMatchObject({ status: 'budget-limited' })
+    })
+
+    it('keeps a cancelled candidate evaluation nonterminal when its quiescent rejection hits a transient Git failure', async () => {
+      let controller!: AutoresearchRunController
+      let cancelled = false; let failures = 0
+      const f = controllerFixture([{ stdout: '{"score":10}\n' }, { hang: true, edit: () => { cancelled = true; controller.cancel('operator stop during candidate evaluation') } }], [worktree => writeFileSync(join(worktree, 'src', 'code.ts'), 'export const n = 2\n')], {}, { gitSpawnFailure: spec => cancelled && failures === 0 && spec.argv.includes('read-tree') && spec.argv.includes('--reset') ? (failures++, new Error('fatal: injected transient index.lock rejection failure')) : undefined })
+      controller = createCaseController(f, { max_experiments: 1 })
+      const failure = await controller.run().then(() => undefined, (error: unknown) => error); const ready = await controller.ready
+      expect(failures).toBe(1)
+      expect(failure).toBeInstanceOf(AggregateError)
+      expect((failure as AggregateError).message).toMatch(/^autoresearch run was cancelled but its accepted HEAD could not be restored; the run remains nonterminal with its lock held so a resume can retry reconciliation \(cancellation: .+; restoration: .*injected transient index\.lock rejection failure/u)
+      const tracker = DurableTracker.openReadOnly(ready.tracker)
+      let gitCommonDir: string
+      try {
+        // The cancelled attempt outcome is durable and whole-tree quiescent; no terminal row with unproven quiescence exists.
+        expect(tracker.getRun(ready.runId)).toMatchObject({ state: 'deciding', terminal_quiescent: null })
+        gitCommonDir = String(tracker.getRun(ready.runId)!['git_common_dir'])
+      } finally { tracker.close() }
+      expect(sharedActiveLocks(gitCommonDir)).toEqual([{ run_id: ready.runId }])
+      await controller.dispose()
+      // Once the transient condition clears, the resume reconciles the durable cancel outcome and releases the lock.
+      const resumed = await createCaseController(f, { max_experiments: 1 }, ready.runId).run()
+      // The fresh controller settles the durable cancel outcome with the operator's durable cancellation reason.
+      expect(resumed).toMatchObject({ status: 'cancelled', reason: 'operator stop during candidate evaluation', best: { metric: 10 } })
+      const durable = failedRun(resumed)
+      expect(durable.run).toMatchObject({ state: 'cancelled', terminal_reason: 'operator stop during candidate evaluation', terminal_quiescent: 1 })
+      expect(sharedActiveLocks(gitCommonDir)).toEqual([])
+      expect(f.subprocess.evaluatorSpawns).toBe(2)
+      expect(execFileSync('git', ['-C', ready.worktree, 'rev-parse', 'HEAD']).toString().trim()).toBe(String(durable.run['best_commit']))
+      expect(execFileSync('git', ['-C', ready.worktree, 'status', '--porcelain=v1']).toString()).toBe('')
+    })
+
+    // A plain resume (no new cancel) whose discard restoration fails transiently again must stay on the cancellation path:
+    // one more failure is retried as a cancellation within the same resume; two leave it nonterminal for the next resume.
+    // Neither may route the resumable cancellation error through controller-failure terminalization.
+    it.each([1, 2])('settles a resumed commit-candidate discard as cancelled when %s resume restoration attempt(s) fail transiently', async resumeFailures => {
+      let controller!: AutoresearchRunController
+      let proposed = false; let cancelled = false; let failuresAllowed = 1; let failures = 0
+      const f = controllerFixture([{ stdout: '{"score":10}\n' }, { stdout: '{"score":9}\n' }], [worktree => { writeFileSync(join(worktree, 'src', 'code.ts'), 'export const n = 2\n'); proposed = true }], {}, { gitSpawnFailure: spec => {
+        // Cancel while prepareCandidateTree creates the candidate commit (no audit ref), then fail the discard's restoration.
+        if (proposed && !cancelled && spec.argv.includes('commit-tree')) { cancelled = true; controller.cancel('operator stop during candidate commit') }
+        else if (cancelled && failures < failuresAllowed && spec.argv.includes('read-tree') && spec.argv.includes('--reset')) { failures++; return new Error('fatal: injected transient read-tree restoration failure') }
+        return undefined
+      } })
+      controller = createCaseController(f, { max_experiments: 1 })
+      const failure = await controller.run().then(() => undefined, (error: unknown) => error); const ready = await controller.ready
+      expect(failures).toBe(1)
+      expect(failure).toBeInstanceOf(AggregateError)
+      await controller.dispose()
+      failuresAllowed = 1 + resumeFailures
+      const expectCancelled = (settled: unknown): void => {
+        expect(settled).toMatchObject({ status: 'cancelled', lastState: 'candidate-prepared', reason: 'operator stop during candidate commit', best: { metric: 10 } })
+        const durable = failedRun(settled as Awaited<ReturnType<AutoresearchRunController['run']>>)
+        expect(durable.run).toMatchObject({ state: 'cancelled', terminal_reason: 'operator stop during candidate commit', terminal_quiescent: 1 })
+        expect(durable.lock?.['released_at']).toEqual(expect.any(String))
+        expect(sharedActiveLocks(String(durable.run['git_common_dir']))).toEqual([])
+        expect(f.subprocess.evaluatorSpawns).toBe(1)
+        expect(execFileSync('git', ['-C', ready.worktree, 'status', '--porcelain=v1']).toString()).toBe('')
+      }
+      const resumedController = createCaseController(f, { max_experiments: 1 }, ready.runId)
+      const resumed = await resumedController.run().then(value => value, (error: unknown) => error)
+      expect(failures).toBe(failuresAllowed)
+      await resumedController.dispose()
+      if (resumeFailures === 1) { expectCancelled(resumed); return }
+      expect(resumed).toBeInstanceOf(AggregateError)
+      expect((resumed as AggregateError).message).toMatch(/^autoresearch run was cancelled but its accepted HEAD could not be restored/u)
+      const tracker = DurableTracker.openReadOnly(ready.tracker)
+      let gitCommonDir: string
+      try {
+        expect(tracker.getRun(ready.runId)).toMatchObject({ state: 'candidate-prepared', terminal_quiescent: null })
+        gitCommonDir = String(tracker.getRun(ready.runId)!['git_common_dir'])
+      } finally { tracker.close() }
+      expect(sharedActiveLocks(gitCommonDir)).toEqual([{ run_id: ready.runId }])
+      expectCancelled(await createCaseController(f, { max_experiments: 1 }, ready.runId).run())
+    })
+
+    it('blocks git-external-mutation and retains the lock when a cancelled candidate rejection finds a moved branch', async () => {
+      let controller!: AutoresearchRunController
+      let cancelled = false; let moved: string | undefined
+      const f = controllerFixture([{ stdout: '{"score":10}\n' }, { hang: true, edit: () => { cancelled = true; controller.cancel('operator stop during candidate evaluation') } }], [worktree => writeFileSync(join(worktree, 'src', 'code.ts'), 'export const n = 2\n')], {}, { gitSpawnFailure: spec => {
+        // Just before reconcileRejectedHead reads the branch (after verifying the candidate's parent), an external writer
+        // moves the run branch to an unrelated commit: an unexpected ref, not a transient Git failure.
+        if (cancelled && moved === undefined && spec.argv.includes('rev-parse') && spec.argv.some(arg => /^[0-9a-f]{40}\^$/u.test(arg))) {
+          const ready = readyRef!
+          const tree = execFileSync('git', ['-C', ready.worktree, 'rev-parse', 'HEAD^{tree}']).toString().trim()
+          moved = execFileSync('git', ['-C', ready.worktree, 'commit-tree', tree, '-m', 'external unrelated commit'], { env: { ...process.env, GIT_AUTHOR_NAME: 'x', GIT_AUTHOR_EMAIL: 'x@example.invalid', GIT_COMMITTER_NAME: 'x', GIT_COMMITTER_EMAIL: 'x@example.invalid' } }).toString().trim()
+          execFileSync('git', ['-C', ready.worktree, 'update-ref', `refs/heads/${ready.branch}`, moved])
+        }
+        return undefined
+      } })
+      let readyRef: Awaited<AutoresearchRunController['ready']> | undefined
+      controller = createCaseController(f, { max_experiments: 1 })
+      void controller.ready.then(value => { readyRef = value }, () => undefined)
+      const result = await controller.run(); const ready = await controller.ready
+      expect(moved).toEqual(expect.any(String))
+      expect(result).toMatchObject({ status: 'blocked', best: { metric: 10 }, evidence: [{ code: 'rejected-reconcile-identity' }] })
+      const durable = failedRun(result)
+      expect(durable.run).toMatchObject({ state: 'blocked', blocked_code: 'git-external-mutation' })
+      expect(durable.lock?.['released_at']).toBeNull()
+      expect(sharedActiveLocks(String(durable.run['git_common_dir']))).toEqual([{ run_id: ready.runId }])
+      await controller.dispose()
+      // The retained block replays identically instead of becoming resumable.
+      expect(await createCaseController(f, { max_experiments: 1 }, ready.runId).run()).toMatchObject({ status: 'blocked', best: { metric: 10 }, evidence: [{ message: result.status === 'blocked' ? result.evidence[0]!.message : '' }] })
+      expect(failedRun(result).run).toMatchObject({ state: 'blocked', blocked_code: 'git-external-mutation' })
+      expect(sharedActiveLocks(String(durable.run['git_common_dir']))).toEqual([{ run_id: ready.runId }])
+    })
+
     it('retains the lock and the worktree when persisting a non-quiescent proposal child outcome fails', async () => {
       const f = controllerFixture([{ stdout: '{"score":10}\n' }], [worktree => writeFileSync(join(worktree, 'src', 'code.ts'), 'export const n = 2\n')], { dispose: () => { throw new Error('injected child disposal failure') } })
       const original = DurableTracker.prototype.transitionRun
