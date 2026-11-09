@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Resolve default and relative repository targets from the agent's effective
+  working directory, allowing runs after changing into a repository inside the
+  original workspace. Keep the original workspace as the authorization boundary
+  and reject outside or nested repository escapes. Explicit absolute targets
+  retain their existing behavior. ([`8e912a2`](https://github.com/EveGoodEvening/dsh-autoresearch/commit/8e912a236561630512665b30aec37d0987872c9d))
+- Recover unexpected controller failures by reconciling durable evaluator
+  outcomes and restoring accepted HEAD before releasing active-run locks, so
+  failed runs do not block subsequent runs with `repository-active-limit`.
+  Keep Git restoration failures resumable and retain locks when process
+  quiescence is unproven. Release quiescent terminal locks before result
+  rendering, TSV export, or best-effort worktree cleanup can fail.
+  ([`dec9aa8`](https://github.com/EveGoodEvening/dsh-autoresearch/commit/dec9aa88df73dda3d755dbad4d80f65b37a85e14))
+
 ## v0.0.5
 
 ### Changed
