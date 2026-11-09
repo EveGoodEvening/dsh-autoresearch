@@ -14,7 +14,7 @@ import {
   verifyExactWorktree, type CandidateSnapshot, type ControllerProcessIdentity, type GitCommandOptions, type GitConfigBaseline,
   type RepositoryDiscovery, type RunGitIdentity,
 } from './git.js'
-import { CANDIDATE_REJECTION_INTENT, classifyDurableRegistration, reconcileRecovery, type RecoveredEvaluation, type RecoveredExperiment, type RecoveryDirective } from './recovery.js'
+import { CANDIDATE_DISCARD_INTENT, CANDIDATE_REJECTION_INTENT, classifyDurableRegistration, reconcileRecovery, type RecoveredEvaluation, type RecoveredExperiment, type RecoveryDirective } from './recovery.js'
 import { DurableTracker, TRACKER_SCHEMA_VERSION, serializeDurablePolicy, serializeRedactedDurablePolicy, type ArtifactRecord, type HostFailureFacts } from './tracker.js'
 import { applyRunRetention, sweepRepositoryRetention } from './retention.js'
 import { StateLayout } from './state-layout.js'
@@ -446,6 +446,22 @@ export class AutoresearchRunController {
       return readonlyTerminalReplay(runtime, directive)
     }
     this.assertClaim(runtime)
+    // A cancellation that reported its restoration failure (AggregateError) left a durable marker: a resume settles that
+    // cancellation with the operator's recorded reason instead of continuing research. A cancellation request that never
+    // reached restoration (e.g. a prepared controller disposed before running) keeps the ordinary resume semantics.
+    const resumedState = String(runtime.tracker.getRun(runtime.runId)?.['state']) as RunDurableState
+    // A durable proposal-failure verdict recorded before the cancellation still finishes as round-failed.
+    if (!this.cancellationRequested && !isTerminalState(resumedState) && !pendingProposalFailure(runtime.tracker, runtime.runId)) {
+      const pendingCancellation = pendingCancellationRestoration(runtime.tracker, runtime.runId)
+      if (pendingCancellation !== undefined) {
+        // Already durable: do not checkpoint the same request again.
+        this.cancellationPersisted = true
+        this.cancel(pendingCancellation)
+        // Readiness follows drive()'s rule: published only once the branch/worktree allocation is durable.
+        if (resumedState !== 'initializing' && !this.readySettled) { this.readySettled = true; this.resolveReady({ runId: runtime.runId, tracker: runtime.tracker.path, branch: runtime.identity.branch, worktree: runtime.identity.worktree }) }
+        return this.cancelled(runtime)
+      }
+    }
     let directive = await reconcileRecovery(this.ctx, { ...runtime, signal: this.aborter.signal })
     while (true) {
       this.assertClaim(runtime)
@@ -478,8 +494,19 @@ export class AutoresearchRunController {
       }
       if (directive.kind === 'finalize-evaluation') { if (directive.evaluation.policyViolation) this.finalizeFrozenMismatch(runtime, directive.experiment, directive.evaluation, directive.evaluation.policyViolation.message); else await this.finalizeEvaluation(runtime, directive.experiment, directive.evaluation); directive = await reconcileRecovery(this.ctx, { ...runtime, signal: this.aborter.signal }); continue }
       if (directive.kind === 'settle-baseline') { this.settleBaseline(runtime, directive); directive = await reconcileRecovery(this.ctx, { ...runtime, signal: this.aborter.signal }); continue }
-      if (directive.kind === 'commit-candidate') { await this.commitRecoveredCandidate(runtime, directive.experiment, directive.snapshot, directive.validatedPaths); this.assertClaim(runtime); directive = await reconcileRecovery(this.ctx, { ...runtime, signal: this.aborter.signal }); continue }
-      if (directive.kind === 'reconcile-candidate') { await this.reconcileCandidate(runtime, directive); this.assertClaim(runtime); directive = await reconcileRecovery(this.ctx, { ...runtime, signal: this.aborter.signal }); continue }
+      if (directive.kind === 'commit-candidate' && directive.discardedByCancellation) {
+        // A cancellation already began discarding this unaudited snapshot (its edits may be gone, so it cannot be re-staged):
+        // settle that durable cancellation instead of re-preparing the candidate. Request it as a cancellation (aborting the
+        // run aborter) so a restoration failure here is retried by execute() as a cancellation, never terminalized as a
+        // controller failure.
+        this.cancel(directive.discardedByCancellation.reason)
+        return this.cancelled(runtime)
+      }
+      if (directive.kind === 'commit-candidate') { await this.commitRecoveredCandidate(runtime, directive.experiment, directive.snapshot, directive.validatedPaths, directive.rejectedAuditCommits); this.assertClaim(runtime); directive = await reconcileRecovery(this.ctx, { ...runtime, signal: this.aborter.signal }); continue }
+      if (directive.kind === 'reconcile-candidate') {
+        // A resumed durable cancel outcome settles with the operator's durably checkpointed reason, not this controller's default.
+        if (directive.outcome.kind === 'cancel' && !this.cancellationRequested) this.cancelReason = durableCancellationReason(runtime.tracker, runtime.runId) ?? this.cancelReason
+        await this.reconcileCandidate(runtime, directive); this.assertClaim(runtime); directive = await reconcileRecovery(this.ctx, { ...runtime, signal: this.aborter.signal }); continue }
       if (directive.kind === 'ready') {
         if (runtime.policy.target !== undefined && isTargetReached(runtime.policy.metricDirection, directive.best.metric, runtime.policy.target)) return this.complete(runtime, 'target-reached', directive.best)
         if (directive.nextOrdinal > runtime.policy.maxExperiments) return this.complete(runtime, 'budget-limited', directive.best)
@@ -545,10 +572,10 @@ export class AutoresearchRunController {
     r.tracker.transitionRun(r.runId, 'round-failed', { terminalReason: evidence.message, blockedCode: evidence.code, quiescent: true, ...(controllerFailure.length > 0 ? { outcome: { kind: CONTROLLER_FAILURE_OUTCOME, evidence: [evidence, ...controllerFailure].map(({ code, message }) => ({ code, message })) } } : {}) })
   }
 
-  private async commitRecoveredCandidate(r: Runtime, experiment: RecoveredExperiment, snapshot: CandidateSnapshot, validatedPaths: readonly string[]): Promise<void> {
+  private async commitRecoveredCandidate(r: Runtime, experiment: RecoveredExperiment, snapshot: CandidateSnapshot, validatedPaths: readonly string[], rejectedAuditCommits: readonly string[] = []): Promise<void> {
     const canonicalSnapshot = { ...snapshot, gitConfig: { files: snapshot.gitConfig.files.map(file => ({ logicalPath: file.logicalPath, path: file.path, exists: file.exists, ...(file.sha256 === undefined ? {} : { sha256: file.sha256 }) })), allowedPaths: [...snapshot.gitConfig.allowedPaths] } }
     r.tracker.checkpointRun(r.runId, { intent: { kind: 'candidate-commit', experimentId: experiment.experimentId, snapshot: canonicalSnapshot, validatedPaths } })
-    const candidate = await commitCandidate(this.ctx, r.gitExecutable, r.identity.worktree, r.identity, experiment.experimentId, canonicalSnapshot, validatedPaths, { ...r.gitOptions, signal: this.aborter.signal })
+    const candidate = await commitCandidate(this.ctx, r.gitExecutable, r.identity.worktree, r.identity, experiment.experimentId, canonicalSnapshot, validatedPaths, { ...r.gitOptions, signal: this.aborter.signal }, rejectedAuditCommits)
     await checkoutCandidateForEvaluation(this.ctx, r.gitExecutable, r.identity.worktree, r.identity, candidate.candidateCommit, experiment.parentCommit, { ...r.gitOptions, signal: this.aborter.signal })
     r.tracker.recordCandidateCommit(experiment.experimentId, candidate.candidateCommit, { changedPaths: candidate.changedPaths, ...(candidate.diffStats === undefined ? {} : { diffStats: candidate.diffStats }) }, Object.values(r.policy.environment))
     r.tracker.checkpointRun(r.runId, { outcome: { kind: 'candidate-committed', candidateCommit: candidate.candidateCommit, parentCommit: candidate.parentCommit, auditRef: candidate.auditRef, ...(candidate.diffStats === undefined ? {} : { diffStats: candidate.diffStats }) } })
@@ -707,6 +734,11 @@ export class AutoresearchRunController {
     throw new RejectedReconciliationBlockedError(error.code, evidence)
   }
 
+  /** Durably marks the rejection of an unrecorded candidate audit commit before its first destructive step. */
+  private markCandidateRejection(r: Runtime, experimentId: string): (auditCommit: string) => void {
+    return candidateCommit => { r.tracker.checkpointRun(r.runId, { intent: { kind: CANDIDATE_REJECTION_INTENT, experimentId, candidateCommit } }) }
+  }
+
   private async complete(r: Runtime, status: 'target-reached' | 'budget-limited', best: BestResult): Promise<AutoresearchRunResult> {
     if (r.tracker.getRun(r.runId)?.['state'] !== 'completed') r.tracker.transitionRun(r.runId, 'completed', { best, terminalReason: status, quiescent: true })
     return this.finish(r, { status, ...(status === 'target-reached' ? { target: r.policy.target! } : {}), best })
@@ -749,17 +781,45 @@ export class AutoresearchRunController {
     // Recovery also selects the latest terminal experiment: cancelled evaluator
     // outcomes are no longer unresolved, and an interrupted acceptance must finish
     // its validated transaction before choosing the accepted commit to restore.
+    const gitOptions = { ...r.gitOptions, signal: cleanupSignal }
+    // Every attempt is durably quiescent on these restorations (recovery returned no uncertainty): a Git failure (a
+    // transient index lock, an EBUSY clean, a partial rejection) must not become a terminal row with unproven quiescence,
+    // which could never release its lock. Leave the run nonterminal with its lock and cancellation intent held, exactly as
+    // the unexpected-failure path does, so a resume retries reconciliation; genuinely unexpected refs block on that resume.
+    const resumable = (error: Error): never => {
+      // Durably mark the reported, unfinished cancellation so a resume settles it instead of continuing research.
+      let marker: unknown
+      try { r.tracker.checkpointRun(r.runId, { intent: { kind: CANCELLATION_RESTORATION_PENDING_INTENT, reason: this.cancelReason } }) }
+      catch (markerError) { marker = markerError }
+      throw controllerAggregateError('autoresearch run was cancelled but its accepted HEAD could not be restored; the run remains nonterminal with its lock held so a resume can retry reconciliation', [['cancellation', new Error(this.cancelReason)], ['restoration', error], ...(marker === undefined ? [] : [['marker', marker] as const])], Object.values(r.policy.environment))
+    }
+    const restoreOrResume = async (restore: () => Promise<void>): Promise<void> => {
+      try { await restore() }
+      catch (error) {
+        if (!(error instanceof GitBoundaryError)) throw error
+        resumable(error)
+      }
+    }
     if (state === 'candidate-prepared') {
       const recovery = await reconcileRecovery(this.ctx, { ...r, signal: cleanupSignal })
       if (recovery.kind === 'blocked') return this.block(r, recovery)
       if (recovery.kind === 'evaluate' && !recovery.rerun && recovery.attemptOrdinal === 1) {
-        try {
-          await reconcileRejectedHead(this.ctx, r.gitExecutable, r.identity.worktree, r.identity, recovery.commit, durableBest(r.tracker, r.runId).commit, { ...r.gitOptions, signal: cleanupSignal })
-        } catch (error) {
-          if (!(error instanceof GitBoundaryError)) throw error
-          return this.block(r, { kind: 'blocked', runId: r.runId, code: 'git-external-mutation', evidence: [{ code: error.code, message: error.message, artifacts: [] }], lock: 'retain' })
-        }
-      } else if (recovery.kind !== 'commit-candidate') {
+        const { commit, experiment } = recovery
+        await restoreOrResume(async () => {
+          // A partial rejection must stay resumable: recovery then verifies the candidate lineage only, not an exact worktree.
+          r.tracker.checkpointRun(r.runId, { intent: { kind: CANDIDATE_REJECTION_INTENT, experimentId: experiment.experimentId, candidateCommit: commit } })
+          await reconcileRejectedHead(this.ctx, r.gitExecutable, r.identity.worktree, r.identity, commit, durableBest(r.tracker, r.runId).commit, gitOptions)
+        })
+      } else if (recovery.kind === 'commit-candidate') {
+        // The audit ref and branch move may already have landed before the commit was recorded (an abort inside
+        // checkoutCandidateForEvaluation): reject that partial snapshot back to the accepted commit before settling. Mark
+        // the rejection of that audit commit first, so a partial rejection's resume verifies its lineage only. Without an
+        // audit ref, mark the discard of the unaudited snapshot first: a partial discard leaves edits that cannot be
+        // re-staged, so its resume settles this cancellation instead of re-preparing the candidate.
+        const experimentId = recovery.experiment.experimentId
+        const reason = this.cancelReason
+        await restoreOrResume(() => restoreAcceptedAfterCandidateCommit(this.ctx, r.gitExecutable, r.identity.worktree, r.identity, experimentId, durableBest(r.tracker, r.runId).commit, gitOptions, this.markCandidateRejection(r, experimentId), () => { r.tracker.checkpointRun(r.runId, { intent: { kind: CANDIDATE_DISCARD_INTENT, experimentId, reason } }) }))
+      } else {
         return this.block(r, { kind: 'blocked', runId: r.runId, code: 'attempt-uncertain', evidence: [{ code: 'attempt-uncertain', message: `prepared candidate cancellation lacks pre-spawn authority (${recovery.kind})`, artifacts: [] }], lock: 'retain' })
       }
     }
@@ -770,20 +830,32 @@ export class AutoresearchRunController {
         recovery = await reconcileRecovery(this.ctx, { ...r, signal: cleanupSignal })
       }
       if (recovery.kind === 'blocked') return this.block(r, recovery)
-      if (recovery.kind !== 'reconcile-candidate') return this.block(r, { kind: 'blocked', runId: r.runId, code: 'attempt-uncertain', evidence: [{ code: 'attempt-uncertain', message: `candidate cancellation lacks a durable reconciliation outcome (${recovery.kind})`, artifacts: [] }], lock: 'retain' })
-      try { await this.reconcileCandidate(r, recovery, cleanupSignal) }
-      catch (error) {
-        if (!(error instanceof RejectedReconciliationBlockedError)) throw error
-        return this.block(r, { kind: 'blocked', runId: r.runId, code: 'git-external-mutation', evidence: error.evidence.map(message => ({ code: error.code, message, artifacts: [] })), lock: 'retain' })
+      if (recovery.kind === 'evaluate' && recovery.experiment.kind === 'candidate') {
+        // recovery returns evaluate only when every attempt is durably quiescent without an outcome (or none spawned): no
+        // process is uncertain, so reject the candidate back to accepted HEAD and settle the cancellation, releasing the lock.
+        const commit = recovery.commit
+        await restoreOrResume(() => reconcileRejectedHead(this.ctx, r.gitExecutable, r.identity.worktree, r.identity, commit, durableBest(r.tracker, r.runId).commit, gitOptions))
+      } else {
+        if (recovery.kind !== 'reconcile-candidate') return this.block(r, { kind: 'blocked', runId: r.runId, code: 'attempt-uncertain', evidence: [{ code: 'attempt-uncertain', message: `candidate cancellation lacks a durable reconciliation outcome (${recovery.kind})`, artifacts: [] }], lock: 'retain' })
+        try { await this.reconcileCandidate(r, recovery, cleanupSignal) }
+        catch (error) {
+          if (!(error instanceof RejectedReconciliationBlockedError)) throw error
+          // Unexpected refs or lineage block and retain authority. Any other Git failure of this quiescent rejection (an
+          // index lock, an EBUSY clean, a partial reset) keeps its recoverable `git-reconciliation-blocked` checkpoint and
+          // stays nonterminal with the lock held, so a resume retries the rejection instead of a permanently retained lock.
+          if (UNEXPECTED_REJECTION_STATE_CODES.has(error.code)) return this.block(r, { kind: 'blocked', runId: r.runId, code: 'git-external-mutation', evidence: error.evidence.map(message => ({ code: error.code, message, artifacts: [] })), lock: 'retain' })
+          return resumable(error)
+        }
+        const settled = await reconcileRecovery(this.ctx, { ...r, signal: cleanupSignal })
+        if (settled.kind === 'blocked') return this.block(r, settled)
+        if (settled.kind === 'terminal') return this.returnTerminal(r, settled)
       }
-      const settled = await reconcileRecovery(this.ctx, { ...r, signal: cleanupSignal })
-      if (settled.kind === 'blocked') return this.block(r, settled)
-      if (settled.kind === 'terminal') return this.returnTerminal(r, settled)
     }
     const unresolved = r.tracker.recoveryState(r.runId).unresolvedExperiment
     const best = optionalBest(r.tracker, r.runId)
+    // Restore before committing the unresolved experiment: a failed restoration then leaves its durable state resumable.
+    if (best) await restoreOrResume(() => restoreAcceptedWorktree(this.ctx, r.gitExecutable, r.identity.worktree, r.identity, best.commit, gitOptions))
     if (unresolved && ['baseline-pending','running'].includes(String(unresolved['state']))) r.tracker.commitTerminalExperiment(String(unresolved['experiment_id']), 'cancelled', { failureCode: 'cancelled', failureMessage: this.cancelReason })
-    if (best) await restoreAcceptedWorktree(this.ctx, r.gitExecutable, r.identity.worktree, r.identity, best.commit, { ...r.gitOptions, signal: cleanupSignal })
     r.tracker.transitionRun(r.runId, 'cancelled', { terminalReason: this.cancelReason, quiescent: true, ...(best ? { best } : {}) })
     const directive = await reconcileRecovery(this.ctx, { ...r, signal: cleanupSignal })
     if (directive.kind === 'blocked') return this.block(r, directive)
@@ -959,7 +1031,7 @@ export class AutoresearchRunController {
     // may already have landed before the commit was recorded, which is a valid rejection state.
     if (recovery.kind === 'commit-candidate') {
       const experimentId = recovery.experiment.experimentId
-      return restoreOrResume(() => restoreAcceptedAfterCandidateCommit(this.ctx, r.gitExecutable, r.identity.worktree, r.identity, experimentId, durableBest(r.tracker, r.runId).commit, options))
+      return restoreOrResume(() => restoreAcceptedAfterCandidateCommit(this.ctx, r.gitExecutable, r.identity.worktree, r.identity, experimentId, durableBest(r.tracker, r.runId).commit, options, this.markCandidateRejection(r, experimentId)))
     }
     if (recovery.kind === 'reconcile-candidate') {
       guard()
@@ -1044,6 +1116,9 @@ class ResumableControllerFailure extends Error {
   }
 }
 
+/** Rejection failures that prove refs, lineage, audit or Git configuration differ from the durable run, not a transient Git error. */
+const UNEXPECTED_REJECTION_STATE_CODES: ReadonlySet<string> = new Set(['rejected-reconcile-identity', 'rejected-reconcile-lineage', 'accepted-reconcile-audit', 'git-config-unsafe'])
+
 class RejectedReconciliationBlockedError extends Error {
   constructor(readonly code: string, readonly evidence: readonly string[]) {
     super(evidence[0] ?? code)
@@ -1112,6 +1187,30 @@ function pendingProposalFailure(tracker: DurableTracker, runId: string): Proposa
   if (record['kind'] !== PROPOSAL_FAILURE_INTENT || Object.keys(record).sort().join(',') !== 'code,commit,kind,message') return undefined
   if (record['commit'] !== run['best_commit'] || typeof record['code'] !== 'string' || !record['code'] || typeof record['message'] !== 'string') return undefined
   return { code: record['code'], message: record['message'] }
+}
+/** Run-scope intent a cancellation persists when it reports a restoration failure and leaves the run nonterminal. */
+const CANCELLATION_RESTORATION_PENDING_INTENT = 'cancellation-restoration-pending'
+/** The reason of the latest unfinished cancellation whose restoration failure was reported, if any. */
+function pendingCancellationRestoration(tracker: DurableTracker, runId: string): string | undefined {
+  const rows = tracker.database.prepare("SELECT intent_json FROM transitions WHERE run_id = ? AND scope = 'run' ORDER BY sequence DESC").iterate(runId) as Iterable<Record<string, unknown>>
+  for (const row of rows) {
+    const intent = parseJson(row['intent_json'])
+    if (!intent || typeof intent !== 'object' || Array.isArray(intent)) continue
+    const candidate = intent as Record<string, unknown>
+    if (candidate['kind'] === CANCELLATION_RESTORATION_PENDING_INTENT && typeof candidate['reason'] === 'string' && candidate['reason']) return candidate['reason']
+  }
+  return undefined
+}
+/** The reason of the latest run-scope cancellation intent a controller durably checkpointed for this run, if any. */
+function durableCancellationReason(tracker: DurableTracker, runId: string): string | undefined {
+  const rows = tracker.database.prepare("SELECT intent_json FROM transitions WHERE run_id = ? AND scope = 'run' ORDER BY sequence DESC").iterate(runId) as Iterable<Record<string, unknown>>
+  for (const row of rows) {
+    const intent = parseJson(row['intent_json'])
+    if (!intent || typeof intent !== 'object' || Array.isArray(intent)) continue
+    const candidate = intent as Record<string, unknown>
+    if (candidate['kind'] === 'cancellation' && typeof candidate['reason'] === 'string' && candidate['reason']) return candidate['reason']
+  }
+  return undefined
 }
 /** Losing the controller claim is not an owned failure: another controller may be driving the run. */
 const CLAIM_LOSS_CODES: ReadonlySet<string> = new Set(['run-controller-claim-lost', 'run-controller-lost'])

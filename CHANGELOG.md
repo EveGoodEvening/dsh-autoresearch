@@ -16,6 +16,14 @@
   quiescence is unproven. Release quiescent terminal locks before result
   rendering, TSV export, or best-effort worktree cleanup can fail.
   ([`dec9aa8`](https://github.com/EveGoodEvening/dsh-autoresearch/commit/dec9aa88df73dda3d755dbad4d80f65b37a85e14))
+- Settle candidate-phase cancellations whose processes are provably quiescent:
+  reject or discard the candidate back to accepted HEAD, including a candidate
+  checkout interrupted after its branch moved, and release the active-run lock.
+  Transient Git failures during that restoration keep the run nonterminal and
+  resumable with its cancellation reason instead of retaining the lock
+  permanently; externally moved refs still block and retain it. Such a
+  cancellation reports an `AggregateError`; resuming the run finishes it as
+  `cancelled` and releases the lock rather than continuing research.
 
 ## v0.0.5
 

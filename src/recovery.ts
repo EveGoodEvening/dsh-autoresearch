@@ -17,7 +17,7 @@ export type RecoveryDirective =
   | { readonly kind: 'initialize'; readonly runId: RunId; readonly startCommit: FullCommitSha; readonly reuseLock: boolean }
   | { readonly kind: 'settle-baseline'; readonly runId: RunId; readonly experiment: RecoveredExperiment; readonly outcome: ({ readonly kind: 'accept'; readonly metric: number } | { readonly kind: 'fail'; readonly state: 'crashed' | 'timed-out' | 'policy-violation' | 'cancelled'; readonly code: string; readonly message: string; readonly quiescent: boolean }) }
   | { readonly kind: 'ready'; readonly runId: RunId; readonly best: BestResult; readonly nextOrdinal: number; readonly restoreCommit: FullCommitSha }
-  | { readonly kind: 'commit-candidate'; readonly runId: RunId; readonly experiment: RecoveredExperiment; readonly snapshot: CandidateSnapshot; readonly validatedPaths: readonly string[] }
+  | { readonly kind: 'commit-candidate'; readonly runId: RunId; readonly experiment: RecoveredExperiment; readonly snapshot: CandidateSnapshot; readonly validatedPaths: readonly string[]; readonly rejectedAuditCommits: readonly string[]; readonly discardedByCancellation?: { readonly reason: string } }
   | { readonly kind: 'evaluate'; readonly runId: RunId; readonly experiment: RecoveredExperiment; readonly commit: FullCommitSha; readonly createExperiment: boolean; readonly attemptOrdinal: number; readonly rerun: boolean }
   | { readonly kind: 'finalize-evaluation'; readonly runId: RunId; readonly experiment: RecoveredExperiment; readonly evaluation: RecoveredEvaluation }
   | { readonly kind: 'reconcile-candidate'; readonly runId: RunId; readonly experiment: RecoveredExperiment; readonly candidateCommit: FullCommitSha; readonly expectedAcceptedCommit: FullCommitSha; readonly outcome: ({ readonly kind: 'accept' | 'reject'; readonly metric: number } | { readonly kind: 'continue-failure'; readonly terminalExperimentState: 'crashed' | 'timed-out'; readonly code: 'spawn' | 'exit' | 'signal' | 'timeout' | 'output-limit' | 'metric-protocol' } | { readonly kind: 'terminal-block'; readonly code: 'provenance-mismatch' | 'recovery-rerun-exhausted'; readonly message: string } | { readonly kind: 'cancel'; readonly terminalExperimentState: 'cancelled' }) }
@@ -99,7 +99,12 @@ export async function reconcileRecovery(ctx: Context, request: RecoveryRequest):
       try {
         if (request.registration) validateFrozenCandidatePaths(intent, { evaluatorFiles: request.registration.registration.evaluatorFiles, datasetFiles: request.registration.registration.dataset.kind === 'local' ? request.registration.registration.dataset.files : [] })
         const validatedPaths = validateCandidate(intent, request.policy)
-        return { kind: 'commit-candidate', runId: request.runId, experiment, snapshot: intent, validatedPaths }
+        // A rejection of the unrecorded audit commit that durably began may have reset the worktree before failing.
+        const transitions = request.tracker.listTransitions(request.runId)
+        const rejectedAuditCommits = candidateRejectionCommits(transitions, experiment.experimentId)
+        // A cancellation that durably began discarding the unaudited snapshot may have reset its edits before failing.
+        const discardReason = candidateDiscardReason(transitions, experiment.experimentId)
+        return { kind: 'commit-candidate', runId: request.runId, experiment, snapshot: intent, validatedPaths, rejectedAuditCommits, ...(discardReason === undefined ? {} : { discardedByCancellation: { reason: discardReason } }) }
       } catch (error) { return gitBlocked(request, error) }
     }
     if (!inspection.auditCommits.includes(experiment.candidateCommit)) return blocked(request, 'commit-missing', 'candidate audit ref is absent', 'retain')
@@ -431,16 +436,31 @@ function frozenMismatchAuthority(tracker: DurableTracker, experimentId: string, 
 }
 function decodeExit(row: Row): EvaluatorAttemptFacts { return { ...(row['provider_pid'] === null ? {} : { providerPid: integer(row['provider_pid']) }), ...(row['spawned_at'] === null ? {} : { spawnedAt: text(row['spawned_at']) }), exitedAt: text(row['exited_at']), exitCode: row['exit_code'] === null ? null : integer(row['exit_code']), signal: row['signal'] === null ? null : text(row['signal']), timedOut: row['timed_out'] === 1, cancelled: text(row['failure_code']) === 'cancelled', processTreeQuiescent: row['process_tree_quiescent'] === 1, ...(row['failure_code'] === null ? {} : { failureCode: text(row['failure_code']) }), ...(row['failure_message'] === null ? {} : { failureMessage: text(row['failure_message']) }) } }
 function spawnProvenance(row: Row): string { const intent = json(row['spawn_intent_json']); return intent && typeof intent === 'object' ? String((intent as Record<string, unknown>).provenanceSha256 ?? (intent as Record<string, unknown>).provenance_sha256 ?? '') : '' }
-/** Run-scope intent the controller persists before rejecting a recorded candidate-prepared commit on an unexpected failure. */
+/** Run-scope intent the controller persists before rejecting a candidate-prepared commit (recorded, or an unrecorded audit commit) on an unexpected failure or cancellation. */
 export const CANDIDATE_REJECTION_INTENT = 'controller-failure-candidate-rejection'
-function hasCandidateRejectionIntent(transitions: Row[], experimentId: string, candidateCommit: string): boolean {
-  return transitions.some(row => {
-    if (row['scope'] !== 'run') return false
+function candidateRejectionCommits(transitions: Row[], experimentId: string): string[] {
+  return transitions.flatMap(row => {
+    if (row['scope'] !== 'run') return []
     const intent = json(row['intent_json'])
-    if (!intent || typeof intent !== 'object' || Array.isArray(intent)) return false
+    if (!intent || typeof intent !== 'object' || Array.isArray(intent)) return []
     const object = intent as Record<string, unknown>
-    return object.kind === CANDIDATE_REJECTION_INTENT && object.experimentId === experimentId && object.candidateCommit === candidateCommit
+    return object.kind === CANDIDATE_REJECTION_INTENT && object.experimentId === experimentId && typeof object.candidateCommit === 'string' ? [object.candidateCommit] : []
   })
+}
+/** Run-scope intent a cancellation persists before discarding an unaudited candidate snapshot back to the accepted tree. */
+export const CANDIDATE_DISCARD_INTENT = 'cancellation-candidate-discard'
+function candidateDiscardReason(transitions: Row[], experimentId: string): string | undefined {
+  for (const row of transitions) {
+    if (row['scope'] !== 'run') continue
+    const intent = json(row['intent_json'])
+    if (!intent || typeof intent !== 'object' || Array.isArray(intent)) continue
+    const object = intent as Record<string, unknown>
+    if (object.kind === CANDIDATE_DISCARD_INTENT && object.experimentId === experimentId && typeof object.reason === 'string' && object.reason) return object.reason
+  }
+  return undefined
+}
+function hasCandidateRejectionIntent(transitions: Row[], experimentId: string, candidateCommit: string): boolean {
+  return candidateRejectionCommits(transitions, experimentId).includes(candidateCommit)
 }
 function findCandidateIntent(transitions: Row[], experimentId: string): CandidateSnapshot | undefined { for (const row of [...transitions].reverse()) { if (row['experiment_id'] !== null && row['experiment_id'] !== experimentId) continue; const intent = json(row['intent_json']); if (!intent || typeof intent !== 'object') continue; const object = intent as Record<string, unknown>; const snapshot = (object.snapshot ?? (object.kind === 'candidate-snapshot' ? object : undefined)) as CandidateSnapshot | undefined; if (snapshot?.parentCommit && Array.isArray(snapshot.changed) && Array.isArray(snapshot.ignoredUntracked) && snapshot.gitConfig) return { ...snapshot, gitConfig: { files: snapshot.gitConfig.files.map(file => ({ logicalPath: file.logicalPath, path: file.path, exists: file.exists, ...(file.sha256 === undefined ? {} : { sha256: file.sha256 }) })), allowedPaths: [...snapshot.gitConfig.allowedPaths] } } } }
 function terminalExperimentState(row: Row): 'crashed' | 'timed-out' | 'policy-violation' | 'cancelled' | undefined { const value = text(row['state']); return ['crashed', 'timed-out', 'policy-violation', 'cancelled'].includes(value) ? value as 'crashed' | 'timed-out' | 'policy-violation' | 'cancelled' : undefined }
