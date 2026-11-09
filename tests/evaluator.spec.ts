@@ -21,6 +21,7 @@ interface FakeOptions {
   waitQuiescent?: boolean
   settleOnAbort?: boolean
   spawnError?: Error
+  doneError?: Error
 }
 
 const roots: string[] = []
@@ -50,6 +51,15 @@ function fakeRuntime(options: FakeOptions = {}) {
         let settle!: (value: { exitCode: number | null; signal: NodeJS.Signals | null }) => void
         const done = new Promise<{ exitCode: number | null; signal: NodeJS.Signals | null }>((resolve) => { settle = resolve })
         const normal = (): void => settle({ exitCode: options.exitCode === undefined ? 0 : options.exitCode, signal: options.signal ?? null })
+        if (options.doneError !== undefined) {
+          const failed = Promise.reject(options.doneError)
+          return {
+            stdin: undefined, stdout: undefined, stderr: undefined, done: failed,
+            collected: { stdout: { readFrom: () => options.stdout ?? reader('') }, stderr: { readFrom: () => options.stderr ?? reader('') } },
+            terminate: () => { terminated += 1 },
+            waitForExit: async () => { waited += 1; return options.waitQuiescent ?? true },
+          }
+        }
         if (options.settleOnAbort) next.signal?.addEventListener('abort', normal, { once: true })
         else queueMicrotask(normal)
         return {
@@ -466,6 +476,27 @@ describe('host-owned evaluator execution', () => {
     expect(setup.value.persistence.outcome?.[0]).toMatchObject({ kind: 'failed', code: 'cancelled', exit: { cancelled: true, exitCode: null, signal: null } })
   })
 
+  it.each([
+    ['artifact writer creation', 'factory'],
+    ['empty-artifact write', 'artifact'],
+    ['outcome persistence', 'outcome'],
+  ] as const)('persists no-spawn quiescence and rethrows when %s fails for an already-aborted caller', async (_label, site) => {
+    const controller = new AbortController(); controller.abort()
+    const runtime = fakeRuntime()
+    const setup = options(runtime, { signal: controller.signal })
+    const quiescence: unknown[] = []
+    setup.value.persistence.persistAttemptQuiescent = facts => { setup.value.persistence.events.push('quiescent'); quiescence.push(facts) }
+    if (site === 'factory') setup.value.artifactWriterFactory = () => { throw new Error('injected artifact writer failure') }
+    else if (site === 'artifact') {
+      const mint = setup.value.artifactWriterFactory
+      setup.value.artifactWriterFactory = () => { const writer = mint(); writer.write = () => { throw new Error('injected ENOSPC artifact write') }; return writer }
+    } else setup.value.persistence.persistAttemptOutcome = () => { setup.value.persistence.events.push('outcome'); throw new Error('injected outcome persistence failure') }
+    await expect(runEvaluator(setup.value)).rejects.toThrow(site === 'factory' ? 'injected artifact writer failure' : site === 'artifact' ? 'injected ENOSPC artifact write' : 'injected outcome persistence failure')
+    expect(runtime.spec).toBeUndefined()
+    expect(quiescence).toEqual([{ processTreeQuiescent: true }])
+    expect(setup.value.persistence.events).toEqual(site === 'outcome' ? ['intent', 'outcome', 'quiescent'] : ['intent', 'quiescent'])
+  })
+
   it('never persists arbitrary provider spawn exception text', async () => {
     const secretProviderText = 'ENOENT /home/alice/private-token-file'
     const setup = options(fakeRuntime({ spawnError: new Error(secretProviderText) }))
@@ -772,6 +803,56 @@ describe('host-owned evaluator execution', () => {
     outcomeThrowing.value.persistence.persistAttemptOutcome = () => { throw new Error(secret) }
     await expect(runEvaluator(outcomeThrowing.value)).rejects.toThrow('[REDACTED]')
     await expect(runEvaluator(outcomeThrowing.value)).rejects.not.toThrow(secret)
+  })
+
+  it.each([true, false])('persists proven quiescence (%s) and rethrows when the provider outcome rejects after spawn', async waitQuiescent => {
+    const runtime = fakeRuntime({ doneError: new Error('injected provider exit-collection failure'), waitQuiescent })
+    const setup = options(runtime)
+    const quiescence: unknown[] = []
+    setup.value.persistence.persistAttemptQuiescent = facts => { setup.value.persistence.events.push('quiescent'); quiescence.push(facts) }
+    await expect(runEvaluator(setup.value)).rejects.toThrow('injected provider exit-collection failure')
+    expect(runtime.terminated).toBe(1)
+    expect(runtime.waited).toBe(1)
+    expect(setup.value.persistence.outcome).toBeUndefined()
+    // Only a provider-confirmed exit becomes durable quiescence; an unproven tree is never recorded as quiescent.
+    expect(quiescence).toEqual(waitQuiescent ? [{ processTreeQuiescent: true }] : [])
+    expect(setup.value.persistence.events).toEqual(waitQuiescent ? ['intent', 'observed', 'quiescent'] : ['intent', 'observed'])
+  })
+
+  it.each([
+    ['artifact write', 'artifact'],
+    ['outcome persistence', 'outcome'],
+  ] as const)('persists proven quiescence and rethrows when %s fails after a clean exit', async (_label, site) => {
+    for (const waitQuiescent of [true, false]) {
+      const setup = options(fakeRuntime({ stdout: reader('{"score":1}\n'), waitQuiescent }))
+      const quiescence: unknown[] = []
+      setup.value.persistence.persistAttemptQuiescent = facts => { setup.value.persistence.events.push('quiescent'); quiescence.push(facts) }
+      if (site === 'artifact') {
+        const mint = setup.value.artifactWriterFactory
+        setup.value.artifactWriterFactory = () => { const writer = mint(); writer.write = () => { throw new Error('injected ENOSPC artifact write') }; return writer }
+      } else {
+        setup.value.persistence.persistAttemptOutcome = () => { setup.value.persistence.events.push('outcome'); throw new Error('injected outcome persistence failure') }
+      }
+      await expect(runEvaluator(setup.value)).rejects.toThrow(site === 'artifact' ? 'injected ENOSPC artifact write' : 'injected outcome persistence failure')
+      // Only a provider-confirmed exit becomes durable quiescence; an unproven tree is never recorded as quiescent.
+      expect(quiescence).toEqual(waitQuiescent ? [{ processTreeQuiescent: true }] : [])
+      const before = site === 'artifact' ? ['intent', 'observed'] : ['intent', 'observed', 'outcome']
+      expect(setup.value.persistence.events).toEqual(waitQuiescent ? [...before, 'quiescent'] : before)
+    }
+  })
+
+  it('rethrows the original outcome persistence failure when its quiescence record also fails', async () => {
+    const setup = options(fakeRuntime({ stdout: reader('{"score":1}\n') }))
+    setup.value.persistence.persistAttemptOutcome = () => { throw new Error('injected outcome persistence failure') }
+    setup.value.persistence.persistAttemptQuiescent = () => { throw new Error('injected quiescence record failure') }
+    await expect(runEvaluator(setup.value)).rejects.toThrow('injected outcome persistence failure')
+  })
+
+  it('rethrows the original provider failure when its quiescence record also fails', async () => {
+    const setup = options(fakeRuntime({ doneError: new Error('injected provider exit-collection failure') }))
+    setup.value.persistence.persistAttemptQuiescent = () => { throw new Error('injected quiescence record failure') }
+    await expect(runEvaluator(setup.value)).rejects.toThrow('injected provider exit-collection failure')
+    expect(setup.value.persistence.outcome).toBeUndefined()
   })
 
   it.each([

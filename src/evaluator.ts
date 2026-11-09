@@ -124,6 +124,12 @@ export type EvaluatorResult = DurableAttemptOutcome & { readonly artifacts: read
 export interface EvaluatorPersistence {
   persistSpawnIntent(intent: Readonly<{ argv: readonly string[]; cwd: string; env: Readonly<Record<string, string>>; provenanceSha256: string }>): void
   persistSpawnObserved(facts: Readonly<{ spawnedAt: string }>): void
+  /**
+   * Records proven whole-process-tree quiescence for an attempt that ends without a durable outcome (a provider failure
+   * after spawn, or a stream read, artifact write or outcome persistence failure after exit). It is called best-effort only
+   * after the provider confirmed exit, never for an unproven tree.
+   */
+  persistAttemptQuiescent?(facts: Readonly<{ processTreeQuiescent: true }>): void
   persistAttemptOutcome(outcome: DurableAttemptOutcome, artifacts: readonly EvaluatorArtifactInput[]): void
 }
 
@@ -295,7 +301,10 @@ export async function runEvaluator(options: EvaluatorRunOptions): Promise<Evalua
   const argv = Object.freeze([options.evaluation.command, ...options.evaluation.args])
   const durableIntent = deepFreeze({ argv: argv.map(value => redact(value, secrets)), cwd: redact(cwd, secrets), env: persistedEnv, provenanceSha256: provenance.sha256 })
   persistSafely(() => options.persistence.persistSpawnIntent(durableIntent), secrets)
-  const artifactWriter = options.artifactWriterFactory()
+  // Before spawn every failure leaves a provably quiescent (empty) process tree; record it before rethrowing.
+  const persistUnspawnedQuiescence = (): void => { try { options.persistence.persistAttemptQuiescent?.({ processTreeQuiescent: true }) } catch { /* the attempt stays durably uncertain */ } }
+  let artifactWriter: EvaluatorArtifactWriter
+  try { artifactWriter = options.artifactWriterFactory() } catch (error) { persistUnspawnedQuiescence(); throw error }
   const controller = new AbortController()
   let cause: 'timeout' | 'cancelled' | undefined
   const cancel = (): void => { if (cause === undefined) cause = 'cancelled'; controller.abort() }
@@ -307,8 +316,12 @@ export async function runEvaluator(options: EvaluatorRunOptions): Promise<Evalua
     const facts: EvaluatorAttemptFacts = {
       exitedAt: now().toISOString(), exitCode: null, signal: null, timedOut: false, cancelled: true, processTreeQuiescent: true,
     }
-    const artifacts = artifactWriter.write(undefined, undefined, secrets)
-    return persistOutcome(failedOutcome('cancelled', 'evaluator cancelled', facts), artifacts)
+    // No process was ever spawned, so the (empty) tree is provably quiescent: keep that proof durable even when the
+    // empty-artifact write or outcome persistence fails, or the attempt would stay uncertain and retain the run lock.
+    try {
+      const artifacts = artifactWriter.write(undefined, undefined, secrets)
+      return persistOutcome(failedOutcome('cancelled', 'evaluator cancelled', facts), artifacts)
+    } catch (error) { persistUnspawnedQuiescence(); throw error }
   }
   const timeout = setTimeout(() => { if (cause === undefined) cause = 'timeout'; controller.abort() }, options.timeoutMs)
   let handle: SubprocessHandle | undefined
@@ -363,29 +376,39 @@ export async function runEvaluator(options: EvaluatorRunOptions): Promise<Evalua
     }
     quiescent = await handle.waitForExit()
   }
-  const stdoutRead = handle?.collected.stdout?.readFrom(0)
-  const stderrRead = handle?.collected.stderr?.readFrom(0)
-  const artifacts = artifactWriter.write(stdoutRead, stderrRead, secrets)
-  const facts: EvaluatorAttemptFacts = {
-    ...(spawnedAt === undefined ? {} : { spawnedAt }),
-    exitedAt: now().toISOString(), exitCode: outcome.exitCode, signal: outcome.signal,
-    timedOut: cause === 'timeout', cancelled: cause === 'cancelled', processTreeQuiescent: quiescent,
+  // Every failure from here on happens after the provider proved (or refuted) whole-tree quiescence. Without a durable
+  // outcome that proof would be lost, leaving the attempt durably uncertain and its run lock retained forever. Persist a
+  // proven quiescence best-effort before rethrowing, so recovery can rerun or reject the attempt; an unproven tree stays
+  // uncertain, and so does one whose quiescence record itself fails.
+  try {
+    const stdoutRead = handle?.collected.stdout?.readFrom(0)
+    const stderrRead = handle?.collected.stderr?.readFrom(0)
+    const artifacts = artifactWriter.write(stdoutRead, stderrRead, secrets)
+    const facts: EvaluatorAttemptFacts = {
+      ...(spawnedAt === undefined ? {} : { spawnedAt }),
+      exitedAt: now().toISOString(), exitCode: outcome.exitCode, signal: outcome.signal,
+      timedOut: cause === 'timeout', cancelled: cause === 'cancelled', processTreeQuiescent: quiescent,
+    }
+    let durableOutcome: DurableAttemptOutcome
+    if (frozenBoundaryFailure !== undefined) durableOutcome = failedOutcome('frozen-boundary', boundedBoundaryMessage(frozenBoundaryFailure), facts)
+    else if (executionFailure !== undefined && handle === undefined) durableOutcome = failedOutcome('spawn', 'evaluator provider spawn failed', facts)
+    // A provider failure after spawn has no classified outcome, but the tree was terminated and awaited above.
+    else if (executionFailure !== undefined) throw executionFailure
+    else if (cause === 'cancelled') durableOutcome = failedOutcome('cancelled', 'evaluator cancelled', facts)
+    else if (cause === 'timeout') durableOutcome = failedOutcome('timeout', 'evaluator timed out', facts)
+    else if (!quiescent) durableOutcome = failedOutcome('signal', 'evaluator process tree did not become quiescent', facts)
+    else if (outcome.signal !== null) durableOutcome = failedOutcome('signal', `evaluator terminated by ${outcome.signal}`, facts)
+    else if (outcome.exitCode !== 0) durableOutcome = failedOutcome('exit', `evaluator exited with code ${outcome.exitCode}`, facts)
+    else if (stdoutRead === undefined || stdoutRead.lossy) durableOutcome = failedOutcome('output-limit', 'evaluator stdout exceeded its authoritative parse limit', facts)
+    else {
+      try { durableOutcome = measuredOutcome(parseFinalLineMetric(stdoutRead.text, options.metricName), facts) }
+      catch { durableOutcome = failedOutcome('metric-protocol', 'evaluator metric protocol rejected', facts) }
+    }
+    return persistOutcome(durableOutcome, artifacts)
+  } catch (error) {
+    if (quiescent) try { options.persistence.persistAttemptQuiescent?.({ processTreeQuiescent: true }) } catch { /* the attempt stays durably uncertain */ }
+    throw error
   }
-  let durableOutcome: DurableAttemptOutcome
-  if (frozenBoundaryFailure !== undefined) durableOutcome = failedOutcome('frozen-boundary', boundedBoundaryMessage(frozenBoundaryFailure), facts)
-  else if (executionFailure !== undefined && handle === undefined) durableOutcome = failedOutcome('spawn', 'evaluator provider spawn failed', facts)
-  else if (executionFailure !== undefined) throw executionFailure
-  else if (cause === 'cancelled') durableOutcome = failedOutcome('cancelled', 'evaluator cancelled', facts)
-  else if (cause === 'timeout') durableOutcome = failedOutcome('timeout', 'evaluator timed out', facts)
-  else if (!quiescent) durableOutcome = failedOutcome('signal', 'evaluator process tree did not become quiescent', facts)
-  else if (outcome.signal !== null) durableOutcome = failedOutcome('signal', `evaluator terminated by ${outcome.signal}`, facts)
-  else if (outcome.exitCode !== 0) durableOutcome = failedOutcome('exit', `evaluator exited with code ${outcome.exitCode}`, facts)
-  else if (stdoutRead === undefined || stdoutRead.lossy) durableOutcome = failedOutcome('output-limit', 'evaluator stdout exceeded its authoritative parse limit', facts)
-  else {
-    try { durableOutcome = measuredOutcome(parseFinalLineMetric(stdoutRead.text, options.metricName), facts) }
-    catch { durableOutcome = failedOutcome('metric-protocol', 'evaluator metric protocol rejected', facts) }
-  }
-  return persistOutcome(durableOutcome, artifacts)
 }
 
 function boundedBoundaryMessage(error: FrozenEvaluatorBoundaryError): string {

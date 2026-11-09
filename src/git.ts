@@ -365,11 +365,16 @@ export async function prepareCandidateTree(ctx: GitContext, executable: string, 
   } finally { await rm(directory, { recursive: true, force: true }) }
 }
 
-export async function verifyCandidateTree(ctx: GitContext, executable: string, worktree: string, experimentId: string, snapshot: CandidateSnapshot, candidate: PreparedCandidateTree, options: Omit<GitCommandOptions, 'cwd'>): Promise<void> {
+/**
+ * `requireWorktree: false` verifies only the candidate commit's durable lineage, for a candidate whose controller-failure
+ * rejection durably began: that rejection may already have reset the worktree towards the accepted tree, and evaluation
+ * re-checks out the candidate exactly before any spawn.
+ */
+export async function verifyCandidateTree(ctx: GitContext, executable: string, worktree: string, experimentId: string, snapshot: CandidateSnapshot, candidate: PreparedCandidateTree, options: Omit<GitCommandOptions, 'cwd'>, requireWorktree = true): Promise<void> {
   const invoke = (args: readonly string[], env?: Readonly<Record<string, string | undefined>>) => runGit(ctx, executable, args, { ...options, cwd: worktree, ...(env ? { env } : {}) })
   if (candidate.parentCommit !== snapshot.parentCommit) throw new GitBoundaryError('candidate-lineage-invalid', 'Prepared candidate parent differs from the durable snapshot')
   await verifyRecoverableCandidate(invoke, candidate.candidateCommit, snapshot, candidate.changedPaths, experimentId)
-  await requireWorktreeMatches(invoke, candidate.candidateCommit)
+  if (requireWorktree) await requireWorktreeMatches(invoke, candidate.candidateCommit)
 }
 
 
@@ -428,6 +433,17 @@ export async function restoreAcceptedWorktree(ctx: GitContext, executable: strin
   const head = (await invoke(['rev-parse', '--verify', 'HEAD^{commit}'])).stdout.trim()
   if (accepted !== expectedAcceptedCommit || branch !== expectedAcceptedCommit || head !== expectedAcceptedCommit) throw new GitBoundaryError('restore-accepted-identity', 'Accepted ref, branch, and HEAD are not the durable restoration target')
   await invoke(['read-tree', '--reset', '-u', expectedAcceptedCommit]); await invoke(['clean', '-ffdx']); await verifyExactWorktree(ctx, executable, worktree, expectedAcceptedCommit, options)
+}
+/**
+ * Restores the accepted HEAD for a candidate whose snapshot commit may be partially applied: once its run-owned audit ref
+ * exists, the branch may already point at the candidate (a valid rejection state), so reject it back to the accepted
+ * commit; without an audit ref nothing moved the branch and the plain accepted restoration applies.
+ */
+export async function restoreAcceptedAfterCandidateCommit(ctx: GitContext, executable: string, worktree: string, identity: RunGitIdentity, experimentId: string, expectedAcceptedCommit: string, options: Omit<GitCommandOptions, 'cwd'>): Promise<void> {
+  const auditRef = `${identity.candidateRefPrefix}${safeIdentity(experimentId, 'experimentId')}`
+  const audit = await readOptionalRef(ctx, executable, auditRef, worktree, options)
+  if (audit === undefined) return restoreAcceptedWorktree(ctx, executable, worktree, identity, expectedAcceptedCommit, options)
+  return reconcileRejectedHead(ctx, executable, worktree, identity, audit, expectedAcceptedCommit, options)
 }
 export function releaseTerminalRunLock(tracker: DurableTracker, runId: string): boolean {
   const released = tracker.releaseActiveLock(runId)

@@ -9,7 +9,7 @@ import { DurableTracker, type ArtifactRecord, type RecoveryState } from './track
 import type { AttemptId, BestResult, BlockerEvidence, DurableRunPolicy, ExperimentId, FullCommitSha, RegistrationBlockEvidence, RunDurableState, RunId } from './types.js'
 import type { SQLOutputValue } from 'node:sqlite'
 
-export type RecoveryBlockCode = 'run-missing' | 'repository-mismatch' | 'start-commit-mismatch' | 'policy-mismatch' | 'provenance-mismatch' | 'lock-mismatch' | 'state-ambiguous' | 'commit-missing' | 'git-external-mutation' | 'protected-change' | 'artifact-incomplete' | 'attempt-uncertain' | 'decision-mismatch' | 'reconciliation-unauthorized' | 'recovery-rerun-exhausted'
+export type RecoveryBlockCode = 'run-missing' | 'repository-mismatch' | 'start-commit-mismatch' | 'policy-mismatch' | 'provenance-mismatch' | 'lock-mismatch' | 'state-ambiguous' | 'commit-missing' | 'git-external-mutation' | 'protected-change' | 'artifact-incomplete' | 'attempt-uncertain' | 'decision-mismatch' | 'reconciliation-unauthorized' | 'recovery-rerun-exhausted' | 'controller-failed'
 export interface RecoveredExperiment { readonly experimentId: ExperimentId; readonly ordinal: number; readonly kind: 'baseline' | 'candidate'; readonly parentCommit: FullCommitSha; readonly candidateCommit?: FullCommitSha }
 export type RecoveredEvaluation = ({ readonly kind: 'measured'; readonly attemptId: AttemptId; readonly metric: number; readonly provenanceSha256: string; readonly exit: EvaluatorAttemptFacts; readonly artifacts: readonly ArtifactRecord[] } | { readonly kind: 'failed'; readonly attemptId: AttemptId; readonly code: EvaluatorFailureCode | ControllerAttemptFailureCode; readonly message: string; readonly provenanceSha256: string; readonly exit: EvaluatorAttemptFacts; readonly artifacts: readonly ArtifactRecord[] }) & { readonly policyViolation?: { readonly code: 'provenance-mismatch'; readonly message: string } }
 export interface RecoveryRequest { readonly tracker: DurableTracker; readonly runId: RunId; readonly discovery: RepositoryDiscovery; readonly identity: RunGitIdentity; readonly policy: DurableRunPolicy; readonly policySha256: string; readonly provenanceSha256: string; readonly registration?: DurableRegistrationIdentity; readonly gitExecutable: string; readonly gitOptions: Omit<GitCommandOptions, 'cwd' | 'signal'>; readonly signal: AbortSignal }
@@ -104,7 +104,10 @@ export async function reconcileRecovery(ctx: Context, request: RecoveryRequest):
     }
     if (!inspection.auditCommits.includes(experiment.candidateCommit)) return blocked(request, 'commit-missing', 'candidate audit ref is absent', 'retain')
     if (intent) {
-      try { await verifyCandidateTree(ctx, request.gitExecutable, request.identity.worktree, experiment.experimentId, intent, { parentCommit: experiment.parentCommit, candidateCommit: experiment.candidateCommit, auditRef: `${request.identity.candidateRefPrefix}${experiment.experimentId}`, changedPaths: validateCandidate(intent, request.policy) }, { ...request.gitOptions, signal: request.signal }) }
+      // A controller-failure rejection that durably began may have reset the worktree before failing: verify the candidate's
+      // lineage only, since evaluation (or a retried rejection) re-establishes an exact worktree before any spawn.
+      const rejectionBegan = hasCandidateRejectionIntent(request.tracker.listTransitions(request.runId), experiment.experimentId, experiment.candidateCommit)
+      try { await verifyCandidateTree(ctx, request.gitExecutable, request.identity.worktree, experiment.experimentId, intent, { parentCommit: experiment.parentCommit, candidateCommit: experiment.candidateCommit, auditRef: `${request.identity.candidateRefPrefix}${experiment.experimentId}`, changedPaths: validateCandidate(intent, request.policy) }, { ...request.gitOptions, signal: request.signal }, !rejectionBegan) }
       catch (error) { return gitBlocked(request, error) }
     }
     return evaluationDirective(request, experiment, row, attempts)
@@ -345,6 +348,11 @@ function validateTerminalEvidence(request: RecoveryRequest, state: 'completed' |
     for (const experimentId of evaluatedExperiments) {
       const latest = attempts.filter(row => text(row['experiment_id']) === experimentId).at(-1)
       const experiment = experiments.find(row => text(row['experiment_id']) === experimentId)
+      // A controller failure, or a cancellation that rejected its candidate, terminalizes its running experiment without an
+      // evaluator exit; every attempt above is already proven quiescent.
+      const controllerFailed = text(experiment?.['failure_code']) === 'controller-failed' && text(request.tracker.getRun(request.runId)?.['blocked_code']) === 'controller-failed'
+      const cancelledWithoutOutcome = state === 'cancelled' && text(experiment?.['state']) === 'cancelled' && text(experiment?.['failure_code']) === 'cancelled'
+      if ((controllerFailed || cancelledWithoutOutcome) && (!latest || !latest['exited_at'])) continue
       if (!latest || !latest['exited_at'] && text(experiment?.['failure_code']) !== 'recovery-rerun-exhausted') throw new RecoveryEvidenceError('attempt-uncertain', `terminal evaluated experiment ${experimentId} lacks a completed evaluator attempt`)
       if (latest['exited_at'] && text(experiment?.['failure_code']) === 'provenance-mismatch') {
         const evaluation = reconstructEvaluation(request, decodeExperiment(experiment!), latest, true)
@@ -423,6 +431,17 @@ function frozenMismatchAuthority(tracker: DurableTracker, experimentId: string, 
 }
 function decodeExit(row: Row): EvaluatorAttemptFacts { return { ...(row['provider_pid'] === null ? {} : { providerPid: integer(row['provider_pid']) }), ...(row['spawned_at'] === null ? {} : { spawnedAt: text(row['spawned_at']) }), exitedAt: text(row['exited_at']), exitCode: row['exit_code'] === null ? null : integer(row['exit_code']), signal: row['signal'] === null ? null : text(row['signal']), timedOut: row['timed_out'] === 1, cancelled: text(row['failure_code']) === 'cancelled', processTreeQuiescent: row['process_tree_quiescent'] === 1, ...(row['failure_code'] === null ? {} : { failureCode: text(row['failure_code']) }), ...(row['failure_message'] === null ? {} : { failureMessage: text(row['failure_message']) }) } }
 function spawnProvenance(row: Row): string { const intent = json(row['spawn_intent_json']); return intent && typeof intent === 'object' ? String((intent as Record<string, unknown>).provenanceSha256 ?? (intent as Record<string, unknown>).provenance_sha256 ?? '') : '' }
+/** Run-scope intent the controller persists before rejecting a recorded candidate-prepared commit on an unexpected failure. */
+export const CANDIDATE_REJECTION_INTENT = 'controller-failure-candidate-rejection'
+function hasCandidateRejectionIntent(transitions: Row[], experimentId: string, candidateCommit: string): boolean {
+  return transitions.some(row => {
+    if (row['scope'] !== 'run') return false
+    const intent = json(row['intent_json'])
+    if (!intent || typeof intent !== 'object' || Array.isArray(intent)) return false
+    const object = intent as Record<string, unknown>
+    return object.kind === CANDIDATE_REJECTION_INTENT && object.experimentId === experimentId && object.candidateCommit === candidateCommit
+  })
+}
 function findCandidateIntent(transitions: Row[], experimentId: string): CandidateSnapshot | undefined { for (const row of [...transitions].reverse()) { if (row['experiment_id'] !== null && row['experiment_id'] !== experimentId) continue; const intent = json(row['intent_json']); if (!intent || typeof intent !== 'object') continue; const object = intent as Record<string, unknown>; const snapshot = (object.snapshot ?? (object.kind === 'candidate-snapshot' ? object : undefined)) as CandidateSnapshot | undefined; if (snapshot?.parentCommit && Array.isArray(snapshot.changed) && Array.isArray(snapshot.ignoredUntracked) && snapshot.gitConfig) return { ...snapshot, gitConfig: { files: snapshot.gitConfig.files.map(file => ({ logicalPath: file.logicalPath, path: file.path, exists: file.exists, ...(file.sha256 === undefined ? {} : { sha256: file.sha256 }) })), allowedPaths: [...snapshot.gitConfig.allowedPaths] } } } }
 function terminalExperimentState(row: Row): 'crashed' | 'timed-out' | 'policy-violation' | 'cancelled' | undefined { const value = text(row['state']); return ['crashed', 'timed-out', 'policy-violation', 'cancelled'].includes(value) ? value as 'crashed' | 'timed-out' | 'policy-violation' | 'cancelled' : undefined }
 function isExperimentTerminal(state: string): boolean { return !['baseline-pending', 'running'].includes(state) }

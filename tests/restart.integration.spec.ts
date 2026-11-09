@@ -18,7 +18,9 @@ const RESTART_TEST_TIMEOUT_MS = 60_000
 const DESCENDANT_START_TIMEOUT_MS = 20_000
 
 const roots: string[] = []
-afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
+afterEach(() => { vi.restoreAllMocks(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
+/** Thrown faults model process crashes, and a crashed process cannot terminalize its run in-process. */
+function simulateProcessCrashes(): void { vi.spyOn(AutoresearchRunController.prototype, 'unexpectedFailurePersistenceForTest').mockReturnValue(false) }
 
 async function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'autoresearch-restart-')); roots.push(root)
@@ -120,6 +122,7 @@ describe('controller restart and repository concurrency integration', () => {
   }, RESTART_TEST_TIMEOUT_MS)
   it('resumes after a public controller interruption following actual lock and worktree allocation', async () => {
     const f = await fixture()
+    simulateProcessCrashes()
     const original = DurableTracker.prototype.transitionRun
     let injected = false
     const fault = vi.spyOn(DurableTracker.prototype, 'transitionRun').mockImplementation(function (runId, to, facts, at) {
@@ -182,6 +185,7 @@ describe('controller restart and repository concurrency integration', () => {
     if (failures.length > 1) throw new AggregateError(failures, 'descendant restart test and fixture cleanup failed')
   }, RESTART_TEST_TIMEOUT_MS)
   it('reruns exactly once after a proven-quiescent attempt with no durable outcome', async () => {
+    simulateProcessCrashes()
     const f = await fixture(); const original = DurableTracker.prototype.recordAttemptOutcome; let interruptions = 0
     const fault = vi.spyOn(DurableTracker.prototype, 'recordAttemptOutcome').mockImplementation(function (attemptId, facts) {
       if (interruptions < 2) {
