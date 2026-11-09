@@ -1,6 +1,6 @@
 {
   "name": "dsh-autoresearch",
-  "version": "0.0.5",
+  "version": "0.0.6",
   "description": "Unofficial third-party plugin for bounded metric-driven autoresearch in DeepSeek Harness",
   "keywords": [
     "autoresearch",
