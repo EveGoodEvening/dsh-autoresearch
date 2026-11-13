@@ -35,6 +35,7 @@ Independent review each slice and whole union; coordinator runs project gates. P
 | W7 create dedicated stacked PRs | impl | 4 | todo | |
 | W8 merge #21, replay/retarget #22 | impl | 5 | todo | |
 | W9 final gates/review and merge #22 | review | 3,5 | todo | |
+| W10 explain baseline gate failure and establish valid full-gate invocation | research | 3 | active | Read-only baseline worker; no repeated confirmation run |
 
 ## Decision log
 - D1: New ledger selected because existing docs/plan/PLAN.md and CHECKLIST.md explicitly cover closed historical implementation; diagnostic issue bodies #21/#22 are references, not live checklists. Keep historical artifacts unchanged.
@@ -42,10 +43,13 @@ Independent review each slice and whole union; coordinator runs project gates. P
 - D3: Three existing AGENTS.md additions belong to preceding diagnosis in this conversation (npm statistics, evaluator defect, installed rc1/rc3 proof); preserve and include as diagnostic provenance in initial planning commit. No source changes exist.
 
 ## Findings and open questions
-- F1: Native pnpm absent from PATH in earlier diagnosis; coordinator/worker must find or provision isolated pnpm 11.7.0, not change global selection. Status: investigate in W1; triage Fix (tooling prerequisite).
+- F1: Resolved: `COREPACK_DEFAULT_TO_LATEST=0 corepack pnpm` selects 11.7.0 without global changes. Coordinator baseline typecheck passed (7.03 s) and build passed. Status: closed.
 - F2: #6 previously fixed canonical size rejection; #22 must not reinstate it. Status: acceptance constraint, closed.
 - F3: Windows and rc3 migration are out of scope; do not conflate them with these fixes. Status: scope boundary, closed.
+- F4: Baseline coverage failed before any functional edits: 674 passed, 10 skipped, one release.spec.ts nested release-scenarios prepare-barrier test timed out at 45 s; full suite 496.66 s. Triage Fix (verification prerequisite), active read-only investigation by a separate worker, output `issues-21-22-baseline.md`. Do not suppress the test or increase deadlines without justified design and independent review.
 
 ## Iteration log
 - I1: Assessed clean source at 75ecd4b, owned prior AGENTS notes, historical plans, one unrelated open PR #16; verified EveGoodEvening and squash-only repo. Choose durable ledger and delegated design before implementation; reject parallel code workers due shared runtime artifacts. Plan changes if design review reveals missing contract or impossible bound.
 - I2: Delegated W1 to an independent planning thread with maximum reasoning; clarified that shared delegation is a separate thread, not a Git worktree. Continue independent gate-tooling prerequisite while planner works; no source edits or PRs yet.
+- I3: Coordinator resolved package-manager access and passed baseline typecheck using Corepack's pinned pnpm 11.7.0; started gated baseline build/coverage while W1 performs read-only design. Reject duplicating worker exploration; await gate output before allowing source/test mutation.
+- I4: Baseline source gate failure is observed, not attributed to future fixes. Delegate independent read-only diagnosis of nested release timeout; planner receives exact output. Continue design/review while avoiding duplicate suites, timeout inflation and unrelated code changes. Source remains unchanged.
