@@ -76,6 +76,28 @@ function fakeRuntime(options: FakeOptions = {}) {
   }
 }
 
+// The direct command and its managed descendants have independent lifetimes.
+function gatedRuntime() {
+  const direct = Promise.withResolvers<SubprocessOutcome>()
+  const tree = Promise.withResolvers<boolean>()
+  const waiting = Promise.withResolvers<void>()
+  const terminating = Promise.withResolvers<void>()
+  let spec: SubprocessSpawnSpec | undefined
+  const terminate = vi.fn(() => { terminating.resolve() })
+  const handle: SubprocessHandle = {
+    stdin: undefined, stdout: undefined, stderr: undefined,
+    done: direct.promise,
+    collected: { stdout: { readFrom: () => reader('{"score":1.5}\n') }, stderr: { readFrom: () => reader('') } },
+    terminate,
+    waitForExit: () => { waiting.resolve(); return tree.promise },
+  }
+  return {
+    runtime: { spawn(next: SubprocessSpawnSpec) { spec = next; return handle } },
+    direct, tree, waiting: waiting.promise, terminating: terminating.promise, terminate,
+    get spec() { return spec },
+  }
+}
+
 class LocalReader implements SubprocessOutputReader {
   constructor(private readonly chunks: Buffer[], private readonly maxBytes: number) {}
   readFrom(fromByte: number): SubprocessOutputRead {
@@ -463,6 +485,90 @@ describe('host-owned evaluator execution', () => {
     expect(runtime.terminated).toBe(1)
   })
 
+  it.each(['timeout', 'cancelled', 'natural'] as const)('keeps the original deadline and first %s cause through independently gated tree exit', async first => {
+    vi.useFakeTimers()
+    const runtime = gatedRuntime()
+    const caller = new AbortController()
+    const setup = options(undefined, { subprocess: runtime.runtime, signal: caller.signal, timeoutMs: 100 })
+    let settled = false
+    const pending = runEvaluator(setup.value)
+    void pending.then(() => { settled = true }, () => { settled = true })
+    try {
+      await vi.advanceTimersByTimeAsync(40)
+      runtime.direct.resolve({ exitCode: 0, signal: null })
+      await runtime.waiting
+      expect(settled).toBe(false)
+      expect(setup.value.persistence.outcome).toBeUndefined()
+      if (first === 'cancelled') { caller.abort(); caller.abort() }
+      if (first !== 'natural') {
+        await vi.advanceTimersByTimeAsync(60)
+        expect(runtime.spec?.signal?.aborted).toBe(true)
+        expect(runtime.terminate).toHaveBeenCalledTimes(1)
+        caller.abort()
+        await vi.advanceTimersByTimeAsync(100)
+        expect(settled).toBe(false)
+        expect(setup.value.persistence.outcome).toBeUndefined()
+        expect(runtime.terminate).toHaveBeenCalledTimes(1)
+      }
+      runtime.tree.resolve(true)
+      const result = await pending
+      expect(result).toMatchObject({
+        ...(first === 'natural' ? { kind: 'measured', metric: 1.5 } : { kind: 'failed', code: first }),
+        exit: { exitCode: 0, signal: null, timedOut: first === 'timeout', cancelled: first === 'cancelled', processTreeQuiescent: true },
+      })
+      expect(result.exit).not.toHaveProperty('providerPid')
+      const { artifacts, ...durableOutcome } = result
+      expect(setup.value.persistence.outcome).toEqual([durableOutcome, artifacts])
+      caller.abort()
+      await vi.advanceTimersByTimeAsync(200)
+      expect(runtime.terminate).toHaveBeenCalledTimes(first === 'natural' ? 0 : 1)
+      if (first === 'natural') expect(runtime.spec?.signal?.aborted).toBe(false)
+    } finally {
+      runtime.direct.resolve({ exitCode: 0, signal: null })
+      runtime.tree.resolve(true)
+      await pending.catch(() => {})
+      vi.useRealTimers()
+    }
+  })
+
+  it.each(['false', 'rejected', 'terminate-throws'] as const)('never fabricates quiescence and removes abort authority after a %s drain', async mode => {
+    vi.useFakeTimers()
+    const runtime = gatedRuntime()
+    const caller = new AbortController()
+    const setup = options(undefined, { subprocess: runtime.runtime, signal: caller.signal, timeoutMs: 100 })
+    const quiescent = vi.fn()
+    setup.value.persistence.persistAttemptQuiescent = quiescent
+    if (mode === 'terminate-throws') runtime.terminate.mockImplementation(() => { throw new Error('termination failed') })
+    const pending = runEvaluator(setup.value)
+    const observed = pending.then(value => ({ value }), error => ({ error }))
+    try {
+      if (mode === 'terminate-throws') runtime.direct.reject(new Error('direct collection failed'))
+      else {
+        runtime.direct.resolve({ exitCode: 0, signal: null })
+        await runtime.waiting
+        if (mode === 'false') runtime.tree.resolve(false)
+        else runtime.tree.reject(new Error('range observation failed'))
+      }
+      const outcome = await observed
+      if (mode === 'false') {
+        expect(outcome).toMatchObject({ value: { kind: 'failed', code: 'signal', exit: { exitCode: 0, signal: null, processTreeQuiescent: false } } })
+      } else {
+        expect(outcome).toEqual({ error: new Error(mode === 'rejected' ? 'range observation failed' : 'termination failed') })
+        expect(setup.value.persistence.outcome).toBeUndefined()
+      }
+      expect(quiescent).not.toHaveBeenCalled()
+      caller.abort()
+      await vi.advanceTimersByTimeAsync(200)
+      expect(runtime.spec?.signal?.aborted).toBe(false)
+      expect(runtime.terminate).toHaveBeenCalledTimes(mode === 'terminate-throws' ? 1 : 0)
+    } finally {
+      runtime.direct.resolve({ exitCode: 0, signal: null })
+      runtime.tree.resolve(true)
+      await observed
+      vi.useRealTimers()
+    }
+  })
+
   it('records a durable cancelled no-spawn outcome for an already-aborted caller', async () => {
     const controller = new AbortController(); controller.abort()
     const runtime = fakeRuntime()
@@ -692,33 +798,43 @@ describe('host-owned evaluator execution', () => {
     expect(() => freezeEvaluatorProvenance(intermediate.paths.root, { evaluation: intermediate.value.evaluation, evaluatorFiles: ['linked/evaluate.mjs'], metricName: 'score', metricDirection: 'minimize' })).toThrow(/symbolic link/)
   })
 
-  it('terminates a spawn when the validated cwd is replaced during startup', async () => {
-    const setup = options()
-    const originalSpawn = setup.runtime.runtime.spawn
-    setup.runtime.runtime.spawn = spec => {
-      const handle = originalSpawn(spec)
-      rmSync(join(setup.paths.root, 'bench'), { recursive: true })
-      symlinkSync(tmpdir(), join(setup.paths.root, 'bench'), 'dir')
-      return handle
+  it('preserves a frozen-boundary failure when cancellation arrives while draining its spawned tree', async () => {
+    const runtime = gatedRuntime()
+    const caller = new AbortController()
+    const setup = options(undefined, { signal: caller.signal })
+    setup.value.subprocess = {
+      spawn(spec) {
+        const handle = runtime.runtime.spawn(spec)
+        rmSync(join(setup.paths.root, 'bench'), { recursive: true })
+        symlinkSync(tmpdir(), join(setup.paths.root, 'bench'), 'dir')
+        return handle
+      },
     }
-    const result = await runEvaluator(setup.value)
-    expect(result).toMatchObject({
-      kind: 'failed',
-      code: 'frozen-boundary',
-      message: 'evaluator cwd changed during evaluator startup',
-      exit: { spawnedAt: expect.any(String), processTreeQuiescent: true },
-    })
-    expect(setup.runtime.terminated).toBe(1)
-    expect(setup.runtime.waited).toBe(1)
-    expect(setup.value.persistence.events).toEqual(['intent', 'observed', 'outcome'])
-    expect(setup.value.persistence.observed).toEqual({ spawnedAt: result.exit.spawnedAt })
-    expect(result.exit).not.toHaveProperty('providerPid')
-    expect(setup.value.persistence.outcome?.[0]).toMatchObject({
-      kind: 'failed',
-      code: 'frozen-boundary',
-      message: 'evaluator cwd changed during evaluator startup',
-      exit: { spawnedAt: result.exit.spawnedAt, processTreeQuiescent: true },
-    })
+    const pending = runEvaluator(setup.value)
+    try {
+      await runtime.terminating
+      caller.abort()
+      expect(runtime.spec?.signal?.aborted).toBe(true)
+      expect(setup.value.persistence.outcome).toBeUndefined()
+      runtime.direct.resolve({ exitCode: 0, signal: null })
+      await runtime.waiting
+      expect(setup.value.persistence.outcome).toBeUndefined()
+      runtime.tree.resolve(true)
+      const result = await pending
+      expect(result).toMatchObject({
+        kind: 'failed', code: 'frozen-boundary', message: 'evaluator cwd changed during evaluator startup',
+        exit: { spawnedAt: expect.any(String), exitCode: 0, signal: null, cancelled: true, processTreeQuiescent: true },
+      })
+      expect(runtime.terminate).toHaveBeenCalledTimes(1)
+      expect(setup.value.persistence.events).toEqual(['intent', 'observed', 'outcome'])
+      expect(setup.value.persistence.observed).toEqual({ spawnedAt: result.exit.spawnedAt })
+      expect(result.exit).not.toHaveProperty('providerPid')
+      expect(setup.value.persistence.outcome?.[0]).toMatchObject({ kind: 'failed', code: 'frozen-boundary', exit: result.exit })
+    } finally {
+      runtime.direct.resolve({ exitCode: 0, signal: null })
+      runtime.tree.resolve(true)
+      await pending.catch(() => {})
+    }
   })
 
   it('binds cwd and argv to the frozen normalized policy and immutable controller worktree identity', async () => {
@@ -805,18 +921,32 @@ describe('host-owned evaluator execution', () => {
     await expect(runEvaluator(outcomeThrowing.value)).rejects.not.toThrow(secret)
   })
 
-  it.each([true, false])('persists proven quiescence (%s) and rethrows when the provider outcome rejects after spawn', async waitQuiescent => {
-    const runtime = fakeRuntime({ doneError: new Error('injected provider exit-collection failure'), waitQuiescent })
-    const setup = options(runtime)
+  it.each([true, false])('persists proven quiescence (%s) and preserves a rejected provider outcome across late cancellation', async waitQuiescent => {
+    const runtime = gatedRuntime()
+    const caller = new AbortController()
+    const setup = options(undefined, { subprocess: runtime.runtime, signal: caller.signal })
     const quiescence: unknown[] = []
     setup.value.persistence.persistAttemptQuiescent = facts => { setup.value.persistence.events.push('quiescent'); quiescence.push(facts) }
-    await expect(runEvaluator(setup.value)).rejects.toThrow('injected provider exit-collection failure')
-    expect(runtime.terminated).toBe(1)
-    expect(runtime.waited).toBe(1)
-    expect(setup.value.persistence.outcome).toBeUndefined()
-    // Only a provider-confirmed exit becomes durable quiescence; an unproven tree is never recorded as quiescent.
-    expect(quiescence).toEqual(waitQuiescent ? [{ processTreeQuiescent: true }] : [])
-    expect(setup.value.persistence.events).toEqual(waitQuiescent ? ['intent', 'observed', 'quiescent'] : ['intent', 'observed'])
+    const pending = runEvaluator(setup.value)
+    const failure = pending.catch(error => error)
+    try {
+      runtime.direct.reject(new Error('injected provider exit-collection failure'))
+      await runtime.waiting
+      caller.abort()
+      expect(runtime.spec?.signal?.aborted).toBe(true)
+      expect(quiescence).toEqual([])
+      expect(setup.value.persistence.outcome).toBeUndefined()
+      runtime.tree.resolve(waitQuiescent)
+      expect(await failure).toEqual(new Error('injected provider exit-collection failure'))
+      expect(runtime.terminate).toHaveBeenCalledTimes(1)
+      expect(setup.value.persistence.outcome).toBeUndefined()
+      // Only a provider-confirmed exit becomes durable quiescence; an unproven tree is never recorded as quiescent.
+      expect(quiescence).toEqual(waitQuiescent ? [{ processTreeQuiescent: true }] : [])
+      expect(setup.value.persistence.events).toEqual(waitQuiescent ? ['intent', 'observed', 'quiescent'] : ['intent', 'observed'])
+    } finally {
+      runtime.tree.resolve(waitQuiescent)
+      await failure
+    }
   })
 
   it.each([
