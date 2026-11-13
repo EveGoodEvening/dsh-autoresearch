@@ -1,5 +1,7 @@
 # Issues 21–22 stacked fixes ledger
 
+Status: complete. Both PRs merged sequentially and both Issues closed. This final accounting is committed on retained `fix/22-background-summary`, not claimed to be on `master` (D9).
+
 ## Control summary
 - Adaptive loop: assess evidence and repository state, choose the next bounded move, delegate, evaluate, update this ledger.
 - Coordinator owns light inspection, this ledger, project gates and commits; workers own exploration, implementation and independent review.
@@ -37,7 +39,7 @@ Independent review each slice and whole union; coordinator runs project gates. P
 | W6 independent whole-stack review | review | 1–3 | done | [Union review](issues-22-review-round1.md) accepts entire union, zero open Fix/Replan findings; fresh full703-test gate passed |
 | W7 create dedicated stacked PRs | impl | 4 | done | [PR23](https://github.com/EveGoodEvening/dsh-autoresearch/pull/23) ->master; [PR24](https://github.com/EveGoodEvening/dsh-autoresearch/pull/24) initially ->fix/21-evaluator-quiescence. Both created via EveGoodEvening; #22 implementation ec3d452 |
 | W8 merge #21, replay/retarget #22 | impl | 5 | done | PR23 squash merged4e9bfaf53e6587d589028b958fe252a4dac6ba60 at2026-11-13T13:57:40Z; explicit --onto replayed only3 #22 commits, no conflicts; PR24 retargeted master; lease-protected push |
-| W9 final gates/review and merge #22 | review | 3,5 | active | Final independent whole-scope/replay review accepts zero Fix/Replan. Rebased peers/typecheck/build and full coverage703pass10skip1117.80s + sequential packed smoke ok:true (total1417.48s,bg8) passed. Only actual PR24 merge/closure/master/accounting remain |
+| W9 final gates/review and merge #22 | review | 3,5 | done | Final review zero Fix/Replan; rebased peers/typecheck/build,703pass10skip1117.80s, packed smoke ok:true(total1417.48s). PR24 merged8dece8150293b12e6334451c837f64535a91fd13 at2026-11-13T14:23:48Z; issue22closed14:23:49Z; remote master full tree equals reviewed merge-head52d13af9307828df4a8097d62f97a1f401df35a2; local master fast-forwarded |
 | W10 explain baseline gate failure and establish valid full-gate invocation | research | 3 | done | [Baseline report](issues-21-22-baseline.md); unchanged serialized release wrapper 4/4 passed, 294.72 s. Explains controlled gate strategy, not proven original cause; full changed-tree coverage still required |
 | W11 resolve #22 supported bounded transport integration | design | 2 | done | [Transport design](issues-21-22-transport.md), adopted only with independent W12 non-prepend correction D8 |
 | W12 independently review #22 transport mechanism | review | 2 | done | [W12](issues-21-22-transport-review.md): accept viable supported mechanism with required non-prepend ordering correction; adopted D8, regression required in W5/W6 |
@@ -59,7 +61,7 @@ Independent review each slice and whole union; coordinator runs project gates. P
 - F2: #6 previously fixed canonical size rejection; #22 must not reinstate it. Status: acceptance constraint, closed.
 - F3: Windows and rc3 migration are out of scope; do not conflate them with these fixes. Status: scope boundary, closed.
 - F4: Baseline default-parallel coverage had one existing nested lifecycle45s timeout (674 passed,10 skipped). [Investigation](issues-21-22-baseline.md) found plausible contention, not a proven cause. Controlled unchanged complete release wrapper passed 4/4 at294.72s with inherited VITEST_MAX_WORKERS=1 and no deadlines/assertions changed. Verification prerequisite resolved; use same serialization for changed-tree full gates. Status: closed; do not describe focused pass as full coverage.
-- F5/T1: Jobs pre-registration cap and absent setter resolved by supported owner-lived post-execute two-block content projection; W12 requires non-prepend ordering so Host spill evaluates final shape. Triage Replan resolved D8; policy-order regression remains required in W5/W6. Status: closed design finding, no exemption from Host policy.
+- F5/T1: Supported owner-lived post-execute two-block projection adopted with W12 non-prepend correction; real spill-threshold policy-order regression verified in final703-test suite and accepted W6/final review. No exemption from Host policy. Status: closed (implemented and verified).
 - F6/R1: Corrected exact-handle cancellation tracking; unchanged consumer fails isolated old evaluator and passes fixed lifecycle; cleanup proven before driver intervention. [Independent round2](issues-21-review-round2.md) verified helper/old-source hashes and closed R1; zero further findings. Status: closed (fixed, not discarded).
 
 ## Iteration log
@@ -88,3 +90,21 @@ Independent review each slice and whole union; coordinator runs project gates. P
 - I23: PR23 merged first via squash+expected-head guard. origin/master4e9bfaf fetched; rebase --onto using exact old21tip9485a361 replayed only #22's three commits, conflict-free. Full Git tree identical before/after3052d657fe196085c3268be5b44597faf8f7ac45; protected lease push and PR24 base=master. Revalidate final rebased union rather than treating ancestry-only equality as gate waiver.
 - I24: Final whole-change/replay reviewer independently confirmed exact3-commit range-diff equality, old21/squash and pre/post replay tree identities, unchanged reviewed source/test hashes, verified PR23/issue21 closure and PR24 master target. Zero Fix/Replan findings. Adopt reviewed append-only final-accounting D9 and correct W12 commit metadata. No production/test changes; final bg8 gates continue.
 - I25: Final rebased gate chain completed green: peers clean, typecheck/build, fresh full coverage703passed10skipped1117.80s with unchanged thresholds (87.84/81.91/96.95/96.65%), then packed consumer/real DSH profile/authenticated Web and installed scenarios ok:true; total1417.48s. Final independent review already converged. No source/test changes since reviewed/gated union. Commit truthful pre-merge evidence, publish PR24 verification, then expected-head squash and actual closure/master proof.
+- I26: Expected-head squash merged PR24 as8dece8150293b12e6334451c837f64535a91fd13 at14:23:48Z after final green gates/review. Actual issue21closed13:57:41Z and issue22closed14:23:49Z verified via authenticated GH API. Fetched remote master, proved complete tree equals merge-head52d13af9307828df4a8097d62f97a1f401df35a2 and first squash is ancestor, fast-forwarded local master, returned to retained fix22 for truthful append-only final ledger. No implementation changes or third PR/direct master push.
+
+## Final acceptance gate
+
+| AC | Verified completion evidence |
+| --- | --- |
+| 1 | Minimal whole-tree evaluator lifetime fix; direct/tree, first-cause, real fallback and normal linux-scope kill/HMR regressions; corrected timer negative control; converged #21 round2; included in final703-test pass. |
+| 2 | Exact mandatory success envelope and D5 tiny-cap floor; actual stock job_output content/UTF-8/status, spill ordering and Host policy precedence, retained-HMR/isolation/replay and canonical resume/durable evidence; converged union/final reviews; final703-test pass. |
+| 3 | peers/typecheck/build and unchanged full coverage thresholds passed after implementation and again after replay; no lint script declared; sequential packed consumer/declaration/import/profile/authenticated-Web/runtime smoke ok:true. Source/tests unchanged afterward; only review/ledger accounting commits. No dependency/version/npm publication changes. |
+| 4 | Exactly PR23 and PR24 created through verified EveGoodEvening; initial bases master and fix/21-evaluator-quiescence respectively. No unrelated PR touched. |
+| 5 | PR23 squash4e9bfaf first; exact-boundary3-commit #22 replay and master retarget; final gates/review; PR24 squash8dece815 second. Both Issues closed; remote/local master contain both fixes, squash output tree matches merged head exactly. |
+
+- No open decisions; no open Fix/Replan/Ask findings; all firm sections reviewed; no unknown-until section remains.
+- No dropped or deferred work. D5 explicitly records the only user-approved AC contract adjustment; D7/D8 record resolved design replans with covering work items.
+- Work items not done: **none**. All W1–W13 are done; no blocker or deferral claimed.
+- Final independent whole-change REVIEW-LOOP converged: [final report](issues-21-22-final-review.md).
+- Final source verification: `pnpm peers check` → `pnpm run typecheck` → `pnpm run build` → `pnpm exec vitest run --coverage --maxWorkers=1 --no-file-parallelism` with inherited `VITEST_MAX_WORKERS=1` → sequential `pnpm run release:smoke`; all passed under heavy-gate. Existing10 skips unchanged, no deadlines/coverage weakened.
+- Final accounting location: this file on retained `fix/22-background-summary` (D9). Remote master contains both code fixes and the truthful pre-merge ledger snapshot; the post-merge ledger-only commit is deliberately not represented as a third merged PR.
