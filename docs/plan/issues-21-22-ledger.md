@@ -27,7 +27,7 @@ Independent review each slice and whole union; coordinator runs project gates. P
 | Item | Kind | AC | Status | Evidence |
 | --- | --- | --- | --- | --- |
 | W1 resolve design and test plan | design | 1–3 | active | [Planning worker](t3-thread://v2/97c551f1-aa14-49f0-a159-f347ef586a04/thread:delegated-task:command%3Amcp%3A42d2581d-e742-4045-a977-ea5a59aa49df%3Adelegate-task%3A27a2b1b1-b75c-4548-92f8-9e7fd1d3d082), shared checkout, no implementation edits authorized |
-| W2 independent plan review | review | 1–5 | todo | |
+| W2 independent plan review | review | 1–5 | active | [Independent plan reviewer](t3-thread://v2/97c551f1-aa14-49f0-a159-f347ef586a04/thread:delegated-task:command%3Amcp%3A42d2581d-e742-4045-a977-ea5a59aa49df%3Adelegate-task%3Acac2163a-57ec-46ea-8fa8-31c63051192f); output issues-21-22-plan-review.md |
 | W3 implement and verify #21 | impl | 1,3 | todo | |
 | W4 independently review #21 | review | 1,3 | todo | |
 | W5 implement and verify #22 | impl | 2,3 | todo | |
@@ -55,3 +55,4 @@ Independent review each slice and whole union; coordinator runs project gates. P
 - I3: Coordinator resolved package-manager access and passed baseline typecheck using Corepack's pinned pnpm 11.7.0; started gated baseline build/coverage while W1 performs read-only design. Reject duplicating worker exploration; await gate output before allowing source/test mutation.
 - I4: Baseline source gate failure is observed, not attributed to future fixes. Delegate independent read-only diagnosis of nested release timeout; planner receives exact output. Continue design/review while avoiding duplicate suites, timeout inflation and unrelated code changes. Source remains unchanged.
 - I5: Baseline worker completed bounded source/environment investigation; accept its contention hypothesis only as inference. Start one serialized whole release-wrapper check as the new verification boundary (not a repeated unchanged full baseline), retain exact assertions and deadlines. Await W1 and gate evidence.
+- I6: Start independent PLAN-REVIEW of AC, squash/rebase boundaries, concrete lifecycle/summary feasibility and current design artifact if available. Research/review outputs are disjoint; no implementation authorizes yet. Running gate owns source/build state until completion.
