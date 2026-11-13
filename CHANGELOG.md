@@ -8,6 +8,11 @@
   whole-process-tree exit, including when the direct command exits successfully
   while a descendant remains alive. Preserve the first timeout/cancellation
   cause and await quiescence before persisting outcomes or releasing run locks.
+- Preserve successful background results as complete JSON: keep small results
+  unchanged, otherwise retain identity, best metric/commit/experiment, counts,
+  optional target and `detailsOmitted: true`. This mandatory summary may exceed
+  tiny `maxResultChars` caps; independent Host spill/redaction/denial policies
+  still apply. Durable results and failure/cancellation output limits are unchanged.
 
 ## v0.0.6
 

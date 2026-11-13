@@ -390,12 +390,14 @@ describe('autoresearch production wiring', () => {
   it('returns the owner-relative registry failure without constructing a controller', async () => {
     state.startError = new Error('no attached job controller serves owner session')
     const test = harness()
+    const ownerEffects = parent.ctx.fiber.getEffects()
     await expect(test.tool.execute(input, execution())).resolves.toEqual({
       kind: 'background-start-failed', jobId: 'unregistered', status: 'failed', reason: 'no attached job controller serves owner session',
       evidence: [{ code: 'startup-failed', message: 'no attached job controller serves owner session', artifacts: [] }],
     })
     expect(state.controllers).toHaveLength(0)
     expect(test.activeObservers).toBe(0)
+    expect(parent.ctx.fiber.getEffects()).toEqual(ownerEffects)
   })
 
   it('settles rejecting preparation as failed while still cleaning up the controller', async () => {
@@ -415,6 +417,7 @@ describe('autoresearch production wiring', () => {
   it('settles partial registration without executing a controller when start throws after run()', async () => {
     state.throwAfterRun = true
     const test = harness()
+    const ownerEffects = parent.ctx.fiber.getEffects()
     await expect(test.tool.execute(input, execution())).resolves.toMatchObject({ kind: 'background-start-failed', jobId: 'unregistered', status: 'failed' })
     expect(state.controllers).toHaveLength(1)
     expect(state.controllers[0]?.prepare).not.toHaveBeenCalled()
@@ -422,6 +425,7 @@ describe('autoresearch production wiring', () => {
     expect(state.controllers[0]?.dispose).toHaveBeenCalledOnce()
     await expect(test.hooks?.done).resolves.toMatchObject({ status: 'failed' })
     expect(test.activeObservers).toBe(0)
+    expect(parent.ctx.fiber.getEffects()).toEqual(ownerEffects)
   })
 
   it('uses synchronous idempotent cancellation and maps settled cancellation to killed', async () => {

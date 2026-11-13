@@ -110,6 +110,8 @@ From that repository, ask the agent to call:
 
 Defaults: **20 candidates**, deployment cap **100**, **15-minute evaluator watchdog per attempt** (Host cap **60 minutes**), and **one active run per repository**. The baseline is separate from the candidate cap. Git has independent Host-only limits: `gitTimeoutMs` defaults to **900000** (integer range **1–2147483647**); `gitMaxStdoutBytes` and `gitMaxStderrBytes` each default to **1048576**, independently of evaluator output caps. See [Config](https://github.com/EveGoodEvening/dsh-autoresearch/blob/master/src/config.ts) for deployment limits and retention.
 
+Successful `job_output` keeps full JSON when it fits `maxResultChars` (default **16384**); otherwise it retains status, run/tracker identity, best metric/full commit/experiment, counts and applicable target with `detailsOmitted: true`. This mandatory summary and status framing may exceed tiny caps, including `1`; the cap limits details, not this minimum envelope. Independent Host spill, redaction, blocking, value replacement and caller cancellation still take precedence. SQLite, foreground/resume results and TSV remain complete; failure and completion-notice caps are unchanged.
+
 ## Behavior and safety
 
 - **Bounded scalar search.** Baseline first; one minimized or maximized scalar, strict improvement only. `constraints` and approval guidance are advisory, not acceptance rules or permission grants. Hard human approval must be enforced by Host policy. This does not establish scientific efficacy or fair resource allocation.

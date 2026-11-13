@@ -1,6 +1,62 @@
+import type { Disposable } from '@deepseek-ai/cordis'
+import type { Agent } from '@deepseek-ai/dsh-agent'
+import type {} from '@deepseek-ai/dsh-tools'
 import type { AutoresearchExperimentResult, AutoresearchRunResult, AutoresearchToolResult } from './types.js'
 
 const TRUNCATION_NOTICE = '\n… [truncated]'
+
+type SuccessfulRunResult = Extract<AutoresearchRunResult, { status: 'budget-limited' | 'target-reached' }>
+
+export interface SuccessfulJobOutput {
+  readonly state: { jobId: string; success?: { text: string; status: SuccessfulRunResult['status'] } }
+  readonly dispose: Disposable
+}
+
+/** Detail budget only: the exact mandatory success envelope is never sliced. */
+export function serializeSuccessfulRunResult(result: SuccessfulRunResult, maxChars: number): string {
+  const full = JSON.stringify(result)
+  if (full.length <= maxChars) return full
+  return JSON.stringify({
+    status: result.status,
+    runId: result.runId,
+    tracker: result.tracker,
+    best: result.best,
+    counts: result.counts,
+    ...(result.status === 'target-reached' ? { target: result.target } : {}),
+    detailsOmitted: true,
+  })
+}
+
+/** Owner-lived presentation only; never retains the controller or canonical result. */
+export function retainSuccessfulJobOutput(owner: Agent, maxBytes: number): SuccessfulJobOutput {
+  const state: SuccessfulJobOutput['state'] = { jobId: '' }
+  // Append: enclosing Host policies must evaluate the proposed two-block shape.
+  const dispose = owner.ctx.on('tools/post-execute', async (exec, result, next) => {
+    if (exec.name !== 'job_output' || exec.agent !== owner || !state.jobId) return next()
+    const args = exec.arguments
+    if (!args || typeof args !== 'object' || !('job_id' in args) || args.job_id !== state.jobId) return next()
+    const decision = await next()
+    if (decision.kind !== 'accept' || Object.hasOwn(decision, 'value') || Object.hasOwn(decision, 'content')
+      || result.isError || exec.signal.aborted || !state.success) return decision
+    const value = result.value
+    if (!value || typeof value !== 'object' || Array.isArray(value) || value['text'] !== state.success.text) return decision
+    const job = value['job']
+    if (!job || typeof job !== 'object' || Array.isArray(job) || job['id'] !== state.jobId
+      || job['kind'] !== 'autoresearch' || job['status'] !== 'completed' || job['detail'] !== state.success.status) return decision
+    const { text, status } = state.success
+    const suffix = `\n[status: completed, ${status}]`
+    const [block] = result.content
+    if (result.content.length !== 1 || block?.type !== 'text' || block.text !== text + suffix) return decision
+    // Subtract the actual suffix bytes, avoiding unsafe cap arithmetic at MAX_SAFE_INTEGER.
+    if (Buffer.byteLength(text, 'utf8') <= maxBytes - Buffer.byteLength(suffix, 'utf8')) return decision
+    return {
+      kind: 'accept',
+      content: [{ type: 'text', text }, { type: 'text', text: suffix }],
+      ...(decision.additionalContexts === undefined ? {} : { additionalContexts: decision.additionalContexts }),
+    }
+  })
+  return { state, dispose }
+}
 
 export function boundText(text: string, maxChars: number): string {
   if (!Number.isSafeInteger(maxChars) || maxChars < 1) throw new TypeError('maxChars must be a positive safe integer')
