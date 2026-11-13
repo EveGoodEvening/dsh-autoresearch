@@ -26,7 +26,7 @@ Independent review each slice and whole union; coordinator runs project gates. P
 ## Work items
 | Item | Kind | AC | Status | Evidence |
 | --- | --- | --- | --- | --- |
-| W1 resolve design and test plan | design | 1–3 | todo | |
+| W1 resolve design and test plan | design | 1–3 | active | [Planning worker](t3-thread://v2/97c551f1-aa14-49f0-a159-f347ef586a04/thread:delegated-task:command%3Amcp%3A42d2581d-e742-4045-a977-ea5a59aa49df%3Adelegate-task%3A27a2b1b1-b75c-4548-92f8-9e7fd1d3d082), shared checkout, no implementation edits authorized |
 | W2 independent plan review | review | 1–5 | todo | |
 | W3 implement and verify #21 | impl | 1,3 | todo | |
 | W4 independently review #21 | review | 1,3 | todo | |
@@ -48,3 +48,4 @@ Independent review each slice and whole union; coordinator runs project gates. P
 
 ## Iteration log
 - I1: Assessed clean source at 75ecd4b, owned prior AGENTS notes, historical plans, one unrelated open PR #16; verified EveGoodEvening and squash-only repo. Choose durable ledger and delegated design before implementation; reject parallel code workers due shared runtime artifacts. Plan changes if design review reveals missing contract or impossible bound.
+- I2: Delegated W1 to an independent planning thread with maximum reasoning; clarified that shared delegation is a separate thread, not a Git worktree. Continue independent gate-tooling prerequisite while planner works; no source edits or PRs yet.
