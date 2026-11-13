@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { Config, createEvaluatorRegistry, DEFAULT_CONFIG, normalizeRunPolicy, resolveConfig } from '../src/config.ts'
-import { boundText, renderExperimentResult, renderRunResult, renderToolResult } from '../src/render.ts'
+import { boundText, renderExperimentResult, renderRunResult, renderToolResult, serializeSuccessfulRunResult } from '../src/render.ts'
 import { ACTIVATION_AUTORESEARCH_TOOL_SCHEMA, decodeActivationToolInput, decodeExperimentResult, decodeRunResult, isTargetReached } from '../src/types.ts'
 import type { ActivationAutoresearchToolInput, MetricDirection } from '../src/types.ts'
 
@@ -117,6 +117,14 @@ describe('run result contracts', () => {
     const rendered = renderRunResult(decoded, DEFAULT_CONFIG.maxResultChars)
     expect(rendered).toHaveLength(DEFAULT_CONFIG.maxResultChars)
     expect(rendered).toMatch(/… \[truncated\]$/)
+    const full = JSON.stringify(value)
+    const selected = serializeSuccessfulRunResult(value, DEFAULT_CONFIG.maxResultChars)
+    expect(JSON.parse(selected)).toEqual({
+      status: value.status, runId: value.runId, tracker: value.tracker,
+      best, counts: value.counts, detailsOmitted: true,
+    })
+    expect(selected.length).toBeLessThanOrEqual(DEFAULT_CONFIG.maxResultChars)
+    expect(JSON.stringify(value)).toBe(full)
   })
 })
 
@@ -373,6 +381,46 @@ describe('configuration and policy normalization', () => {
     source.objective = 'mutated'
     expect(decoded).toMatchObject({ objective: 'improve', constraints: ['stable'], mutable_globs: ['src/**'] })
     expect(() => (decoded.mutable_globs as unknown as string[]).push('other/**')).toThrow()
+  })
+})
+
+describe('successful background JSON presentation', () => {
+  it.each([0, -17.25, 1e-300, -1.7976931348623157e308])('retains exact required values at detail-budget edges for metric %s', metric => {
+    const value = {
+      ...runBase,
+      status: 'budget-limited' as const,
+      runId: 'legacy-"run\\路径𝄞',
+      tracker: '/数据/"quoted"\\path/𝄞/tracker.sqlite',
+      best: { metric, commit: SHA_B, experimentId: `legacy-${'长𝄞\\"'.repeat(2_048)}` },
+      counts: { experimentsStarted: Number.MAX_SAFE_INTEGER - 1, experimentsCompleted: Number.MAX_SAFE_INTEGER - 1, attempts: Number.MAX_SAFE_INTEGER },
+      artifacts: [artifact, stderr],
+    }
+    const full = JSON.stringify(value)
+    const summary = { status: value.status, runId: value.runId, tracker: value.tracker, best: value.best, counts: value.counts, detailsOmitted: true }
+    const compact = JSON.stringify(summary)
+    for (const cap of [1, compact.length - 1, compact.length, compact.length + 1, full.length - 1, full.length, full.length + 1, Number.MAX_SAFE_INTEGER]) {
+      const selected = serializeSuccessfulRunResult(value, cap)
+      expect(selected, `cap ${cap}`).toBe(full.length <= cap ? full : compact)
+      expect(JSON.parse(selected)).toEqual(full.length <= cap ? value : summary)
+      expect(selected.length).toBeLessThanOrEqual(Math.max(cap, compact.length))
+      expect(BigInt(Buffer.byteLength(selected)) + 36n).toBeLessThanOrEqual(3n * BigInt(Math.max(cap, compact.length)) + 36n)
+    }
+    expect(JSON.stringify(value)).toBe(full)
+    expect(decodeRunResult(value, 'minimize')).toEqual(value)
+  })
+
+  it('preserves a baseline target of zero and all zero candidate counts even at cap one', () => {
+    const value = {
+      ...runBase, status: 'target-reached' as const, target: 0,
+      best: { ...best, metric: 0 }, counts: { experimentsStarted: 0, experimentsCompleted: 0, attempts: 1 },
+      artifacts: [artifact, stderr],
+    }
+    expect(JSON.parse(serializeSuccessfulRunResult(value, 1))).toEqual({
+      status: 'target-reached', runId: value.runId, tracker: value.tracker,
+      best: value.best, counts: value.counts, target: 0, detailsOmitted: true,
+    })
+    expect(serializeSuccessfulRunResult(value, JSON.stringify(value).length)).toBe(JSON.stringify(value))
+    expect(decodeRunResult(value, 'minimize')).toEqual(value)
   })
 })
 

@@ -128,7 +128,7 @@ export const Config: z<Config> = z.object({
   defaultMaxExperiments: positive(),
   maxExperiments: positive().default(DEFAULT_CONFIG.maxExperiments),
   maxHandoffChars: positive().default(DEFAULT_CONFIG.maxHandoffChars),
-  maxResultChars: positive().default(DEFAULT_CONFIG.maxResultChars),
+  maxResultChars: positive().default(DEFAULT_CONFIG.maxResultChars).description('Presentation detail budget. Successful background JSON retains a mandatory identity/best/counts/target summary even above tiny caps; independent Host spill, redaction, denial, value replacement and cancellation policies still apply. Canonical results are unchanged.'),
   maxStdoutBytes: positive().default(DEFAULT_CONFIG.maxStdoutBytes),
   maxStderrBytes: positive().default(DEFAULT_CONFIG.maxStderrBytes),
   defaultTimeoutMs: positive(),

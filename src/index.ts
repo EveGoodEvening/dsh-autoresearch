@@ -6,7 +6,8 @@ import type { ToolCallView } from '@deepseek-ai/dsh-tools'
 import { Config, resolveConfig } from './config.js'
 import type { Config as AutoresearchConfig } from './config.js'
 import { AutoresearchRunController, preflightAutoresearchRepository, validateAutoresearchRequest } from './controller.js'
-import { renderToolResult } from './render.js'
+import { renderToolResult, retainSuccessfulJobOutput, serializeSuccessfulRunResult } from './render.js'
+import type { SuccessfulJobOutput } from './render.js'
 import {
   ACTIVATION_AUTORESEARCH_TOOL_SCHEMA,
   AUTORESEARCH_TOOL_OUTPUT_SCHEMA,
@@ -60,12 +61,11 @@ function startupFailure(jobId: string, error: unknown, cancelled: boolean): Back
   }
 }
 
-function jobOutcome(result: AutoresearchRunResult, maxResultChars: number): JobOutcome {
-  const serialized = JSON.stringify(result)
+function jobOutcome(result: AutoresearchRunResult, maxResultChars: number): JobOutcome & { result: string } {
   const detail = result.status
-  if (result.status === 'cancelled') return { status: 'killed', detail, result: serialized }
-  if (result.status === 'baseline-blocked' || result.status === 'blocked' || result.status === 'round-failed') return { status: 'failed', detail, result: serialized }
-  return { status: 'completed', detail, result: serialized.length <= maxResultChars ? serialized : JSON.stringify({ status: result.status, runId: result.runId, tracker: result.tracker }) }
+  if (result.status === 'cancelled') return { status: 'killed', detail, result: JSON.stringify(result) }
+  if (result.status === 'baseline-blocked' || result.status === 'blocked' || result.status === 'round-failed') return { status: 'failed', detail, result: JSON.stringify(result) }
+  return { status: 'completed', detail, result: serializeSuccessfulRunResult(result, maxResultChars) }
 }
 
 function presentCall(args: ActivationAutoresearchToolInput): ToolCallView {
@@ -148,6 +148,7 @@ export function apply(ctx: Context, config: AutoresearchConfig = {}): void {
       }
       // The owner's jobs-injected child scope survives producer HMR; keep its listener through owner teardown.
       let observer: Fiber | undefined
+      let presentation: SuccessfulJobOutput | undefined
       let observing = false
       try {
         observer = parent.ctx.inject(['jobs'], ownerCtx => {
@@ -165,6 +166,7 @@ export function apply(ctx: Context, config: AutoresearchConfig = {}): void {
         await Promise.race([observer.await(), startupAbort.promise])
         if (!observing) throw new Error('owner job observer did not activate')
         if (cancelled) throw exec.signal.reason ?? new Error('autoresearch startup aborted')
+        presentation = retainSuccessfulJobOutput(parent, resolved.maxResultChars)
         const id = ctx.jobs.start({
           kind: 'autoresearch',
           label: `autoresearch: ${input.objective}`,
@@ -187,7 +189,11 @@ export function apply(ctx: Context, config: AutoresearchConfig = {}): void {
                 }
                 const result = await running
                 if (cancelled) return { status: 'killed', detail: cancelReason, result: JSON.stringify(result) }
-                return jobOutcome(result, resolved.maxResultChars)
+                const outcome = jobOutcome(result, resolved.maxResultChars)
+                if (result.status === 'budget-limited' || result.status === 'target-reached') {
+                  presentation!.state.success = { text: outcome.result, status: result.status }
+                }
+                return outcome
               } catch (error) {
                 readiness.resolve(startupFailure(jobId || 'unregistered', error, cancelled))
                 const failure = startupFailure(jobId || 'unregistered', error, cancelled)
@@ -218,6 +224,7 @@ export function apply(ctx: Context, config: AutoresearchConfig = {}): void {
           },
         })
         jobId = String(id)
+        presentation.state.jobId = jobId
         const startedHooks = hooks
         if (startedHooks) {
           // The owner's cleanup may drop the record immediately after the terminal event;
@@ -239,7 +246,10 @@ export function apply(ctx: Context, config: AutoresearchConfig = {}): void {
         return result as never
       } catch (error) {
         exec.signal.removeEventListener('abort', abortStartup)
-        if (!jobId) await observer?.dispose()
+        if (!jobId) {
+          presentation?.dispose()
+          await observer?.dispose()
+        }
         const startupCancelled = cancelled || exec.signal.aborted
         cancelReason = reason(error)
         if (controller && !cancellationApplied) {
