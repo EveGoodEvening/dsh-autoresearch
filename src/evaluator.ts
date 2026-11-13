@@ -331,50 +331,53 @@ export async function runEvaluator(options: EvaluatorRunOptions): Promise<Evalua
   let frozenBoundaryFailure: FrozenEvaluatorBoundaryError | undefined
   let terminationRequested = false
   let terminateOnAbort: (() => void) | undefined
+  let quiescent = false
   try {
-    assertPathIdentity(root, cwdIdentity, 'evaluator cwd')
-    revalidateAttemptBoundary(root, options.boundary, options.frozenFiles)
-    handle = options.subprocess.spawn({
-      argv, cwd, env, signal: controller.signal, graceMs: options.terminationGraceMs,
-      stdio: {
-        stdin: 'ignore',
-        stdout: { maxBytes: options.maxStdoutBytes, spill: { maxBytes: options.maxStdoutBytes } },
-        stderr: { maxBytes: options.maxStderrBytes, spill: { maxBytes: options.maxStderrBytes } },
-      },
-    })
-    spawnedAt = now().toISOString()
-    persistSafely(() => options.persistence.persistSpawnObserved({ spawnedAt: spawnedAt! }), secrets)
     try {
       assertPathIdentity(root, cwdIdentity, 'evaluator cwd')
       revalidateAttemptBoundary(root, options.boundary, options.frozenFiles)
+      handle = options.subprocess.spawn({
+        argv, cwd, env, signal: controller.signal, graceMs: options.terminationGraceMs,
+        stdio: {
+          stdin: 'ignore',
+          stdout: { maxBytes: options.maxStdoutBytes, spill: { maxBytes: options.maxStdoutBytes } },
+          stderr: { maxBytes: options.maxStderrBytes, spill: { maxBytes: options.maxStderrBytes } },
+        },
+      })
+      spawnedAt = now().toISOString()
+      persistSafely(() => options.persistence.persistSpawnObserved({ spawnedAt: spawnedAt! }), secrets)
+      try {
+        assertPathIdentity(root, cwdIdentity, 'evaluator cwd')
+        revalidateAttemptBoundary(root, options.boundary, options.frozenFiles)
+      } catch (error) {
+        if (error instanceof FrozenEvaluatorBoundaryError) frozenBoundaryFailure = error
+        else throw error
+      }
+      if (frozenBoundaryFailure === undefined) {
+        terminateOnAbort = (): void => {
+          if (!terminationRequested) { terminationRequested = true; handle?.terminate() }
+        }
+        controller.signal.addEventListener('abort', terminateOnAbort, { once: true })
+        if (controller.signal.aborted) terminateOnAbort()
+        try { outcome = await handle.done } catch (error) { executionFailure = error }
+      }
     } catch (error) {
       if (error instanceof FrozenEvaluatorBoundaryError) frozenBoundaryFailure = error
-      else throw error
+      else executionFailure = error
     }
-    if (frozenBoundaryFailure === undefined) {
-      terminateOnAbort = (): void => {
-        if (!terminationRequested) { terminationRequested = true; handle?.terminate() }
+    quiescent = handle === undefined
+    if (handle !== undefined) {
+      if ((cause !== undefined || executionFailure !== undefined || frozenBoundaryFailure !== undefined) && !terminationRequested) { terminationRequested = true; handle.terminate() }
+      if (frozenBoundaryFailure !== undefined || executionFailure !== undefined) {
+        try { outcome = await handle.done } catch (error) { if (executionFailure === undefined) executionFailure = error }
       }
-      controller.signal.addEventListener('abort', terminateOnAbort, { once: true })
-      if (controller.signal.aborted) terminateOnAbort()
-      try { outcome = await handle.done } catch (error) { executionFailure = error }
+      // Direct completion is not tree exit: retain the original deadline and cancellation authority until both settle.
+      quiescent = await handle.waitForExit()
     }
-  } catch (error) {
-    if (error instanceof FrozenEvaluatorBoundaryError) frozenBoundaryFailure = error
-    else executionFailure = error
   } finally {
     clearTimeout(timeout)
     callerSignal?.removeEventListener('abort', cancel)
     if (terminateOnAbort !== undefined) controller.signal.removeEventListener('abort', terminateOnAbort)
-  }
-
-  let quiescent = handle === undefined
-  if (handle !== undefined) {
-    if ((cause !== undefined || executionFailure !== undefined || frozenBoundaryFailure !== undefined) && !terminationRequested) { terminationRequested = true; handle.terminate() }
-    if (frozenBoundaryFailure !== undefined || executionFailure !== undefined) {
-      try { outcome = await handle.done } catch (error) { if (executionFailure === undefined) executionFailure = error }
-    }
-    quiescent = await handle.waitForExit()
   }
   // Every failure from here on happens after the provider proved (or refuted) whole-tree quiescence. Without a durable
   // outcome that proof would be lost, leaving the attempt durably uncertain and its run lock retained forever. Persist a

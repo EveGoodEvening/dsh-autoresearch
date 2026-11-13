@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Keep evaluator deadlines and cancellation active until the provider confirms
+  whole-process-tree exit, including when the direct command exits successfully
+  while a descendant remains alive. Preserve the first timeout/cancellation
+  cause and await quiescence before persisting outcomes or releasing run locks.
+
 ## v0.0.6
 
 ### Fixed

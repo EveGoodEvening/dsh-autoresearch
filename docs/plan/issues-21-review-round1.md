@@ -1,0 +1,29 @@
+# Issue #21 — independent implementation review, round 1
+
+Reviewed the owned diff against `6f83c19`, ledger AC1/AC3, approved design §3 and plan-review #21. Source/consumer inspection only; no tests, builds, source edits, commits, PR operations or delegation. The reported typecheck/build, 98 focused tests (223.51 s) and three provider rows (78.46 s) are supplied evidence, not independently observed runs. Final project gates remain the coordinator's responsibility.
+
+## Verdict
+
+**Fix: one Medium regression/AC-accounting finding. Zero production correctness/security findings identified. No Replan needed.** The evaluator lifetime change follows the approved design; the real fallback timeout row currently bypasses the timer lifecycle it needs to prove. Do not mark AC1 fully verified until R1 is resolved.
+
+### R1 — Medium — forced watchdog delivery can resurrect an already-cleared deadline
+
+- **Source:** `tests/fixtures/evaluator-quiescence.ts:90–101`; consumer `tests/composition.integration.spec.ts:561–569`.
+- `controlWatchdog()` saves a callback and `fire()` unconditionally invokes it. It does not observe production `clearTimeout()`. The pre-fix evaluator clears the watchdog after direct `done`; this helper can nevertheless deliver that cancelled callback after tree-wait entry.
+- This matters with the **actual** provider, not just a hypothetical fake: installed `@deepseek-ai/dsh-subprocess-local@0.2.2-rc.1/lib/runner-launch-B2zsQ1Dz.js:918–955` retains its own `spec.signal` abort listener until managed-range exit; its fallback path uses that binding at `:1020–1050`. The resurrected callback sets `cause = timeout` and aborts that signal, allowing the provider to terminate the descendant without the evaluator retaining its watchdog or explicit termination listener.
+- **[INFERENCE]** Therefore the old implementation can satisfy this timeout row's result/persistence assertions through the test-injected callback. No negative-control execution was performed here. A green row proves real fallback termination/classification after injected abort, not preservation of the original scheduled deadline. The independent-gate unit rows do exercise the real timer lifecycle; they do not repair this separately required real-provider regression.
+- **Recommendation: Fix, not Discard/Replan.** Make the watchdog seam respect cancellation of its exact timer handle (track the matching `clearTimeout` and refuse delivery after cancellation), while leaving provider/I/O/grace timers real. Preserve the original deadline and the direct-exit/live-child action boundary. Verify the corrected row rejects the pre-fix cleanup and passes the fixed code; external `finally` draining must not count as success.
+
+## Exact acceptance coverage
+
+| AC1 requirement | Inspected consumer evidence | Assessment |
+| --- | --- | --- |
+| Original deadline/caller authority through direct completion and tree wait | `src/evaluator.ts:308–380`; independent direct/tree gates in `tests/evaluator.spec.ts:488–531` | Production outer `finally` covers both waits; unit rows exercise timeout→cancel, cancel→timeout, repeated abort and natural exit without early outcome. |
+| First cause, direct `0/null`, boundary/provider precedence | `src/evaluator.ts:390–412`; evaluator tests `:488–531,801–842,924–950` | Classification order retained; tests assert exact exit facts, boundary failure precedence, and rejected-provider error plus conditional durable quiescence. |
+| False/rejected waits and termination errors remove authority without inventing proof | evaluator tests `:534–570`; existing persistence-failure tests `:952–985`; recovery `src/recovery.ts:165–168,253–256`; lock release `src/controller.ts:1074–1079` | Consumer checks cover absent quiescence on uncertain/error paths and harmless later abort/deadline. Recovery/release guards remain unchanged. |
+| Real fallback timeout after direct exit with live descendant | composition `:529–579`; fixture `tests/fixtures/loader/evaluator-exited-parent.mjs:7–17` | Real process/forwarding handles, atomic child-ready marker, observed `0/null`, evaluator wait-entry and live child are sound. **Timer-lifetime proof incomplete: R1.** Timeout row uses a persistence callback, not controller/SQLite/lock coverage. |
+| Normal-selection candidate `job_kill` and awaited HMR | composition `:581–633`; observation fixture `:39–67`; harness HMR `tests/fixtures/harness-composition.ts:183–205` | Selector forwards normally and logs the actual mode; actions follow real candidate edit/commit, direct exit and live-child checks. Non-consuming settlement and awaited old-fiber disposal are used. Native `linux-scope` execution is reported worker evidence, not asserted or independently observed here. |
+| Quiescence before persistence; canonical cancellation; accepted HEAD, locks/claims, caller and terminal resume | composition `:594–602,634–668` | Real tracker spy delegates the transaction only after child non-running assertion; SQL checks cover exact cancellation facts, local/shared lock release and claim removal. Real `job_output`, accepted worktree/ref restoration, child/job cleanup, one tool/prompt, unchanged caller and identical foreground resume/no extra attempt are asserted. |
+| Failure cleanup does not depend on broken caller cancellation | fixture `:70–79`; composition `:573–577,669–684` | Cleanup directly terminates/drains captured original handles before owner/Host disposal and restores observers afterward on the completed path. No failing-row/negative-control cleanup execution was observed; successful runs alone do not prove those paths. |
+
+**AC3 slice:** concise Unreleased changelog and updated project lesson are in scope; no dependency/version/controller-policy change in the owned implementation diff. Independent review is complete with R1 open; full-gate success is not certified by this report. **AC2/AC4/AC5:** outside W4; no #22, Windows or rc3 migration verdict.

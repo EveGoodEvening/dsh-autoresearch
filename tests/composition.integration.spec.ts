@@ -12,8 +12,14 @@ import type {} from '@deepseek-ai/dsh-tool-jobs'
 import { JobId, type JobEvent } from '@deepseek-ai/dsh-jobs'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { COMPOSITION_TERMINATION_GRACE_MS, composeHarness, assembledPrompt, executeTool, observeJobSettlement, type RealHarness } from './fixtures/harness-composition.ts'
+import { COMPOSITION_TERMINATION_GRACE_MS, composeHarness, assembledPrompt, executeTool, observeJobSettlement, packageRoot, type RealHarness } from './fixtures/harness-composition.ts'
 import { calls, holdModel, releaseModel } from './fixtures/loader/model-provider.ts'
+import { controlWatchdog, exitedParentEvaluator, exitingParentMarker, observeExitingEvaluators, operationDeadline, processIsRunning, type ExitedParentMarker } from './fixtures/evaluator-quiescence.ts'
+import { EvaluatorArtifactWriter } from '../src/evaluator-artifacts.ts'
+import { StateLayout } from '../src/state-layout.ts'
+import type { EvaluatorPersistence } from '../src/evaluator.ts'
+import type * as EvaluatorModule from '../src/evaluator.ts'
+import type { DurableTracker } from '../src/tracker.ts'
 
 const run = promisify(execFile)
 const active: RealHarness[] = []
@@ -136,6 +142,23 @@ function persistedBackgroundJobIds(cwd: string): string[] {
 
 const COVERAGE_SETTLEMENT_OVERHEAD_MS = 10_000
 const CANCELLATION_SETTLEMENT_TIMEOUT_MS = COMPOSITION_TERMINATION_GRACE_MS * 2 + COVERAGE_SETTLEMENT_OVERHEAD_MS
+
+async function callerSnapshot(cwd: string) {
+  const git = async (...args: string[]) => (await run('git', args, { cwd })).stdout.trimEnd()
+  return { head: await git('rev-parse', 'HEAD'), branch: await git('symbolic-ref', 'HEAD'), index: await git('write-tree'), status: await git('status', '--porcelain=v1', '--untracked-files=all') }
+}
+
+function inspectCancelledRun(tracker: string, runId: string) {
+  const db = new DatabaseSync(tracker, { readOnly: true })
+  try {
+    return {
+      run: db.prepare('SELECT * FROM runs WHERE run_id=?').get(runId)!,
+      attempts: db.prepare('SELECT * FROM attempts WHERE run_id=? ORDER BY created_at, attempt_id').all(runId),
+      experiments: db.prepare('SELECT * FROM experiments WHERE run_id=? ORDER BY ordinal').all(runId),
+      lock: db.prepare('SELECT * FROM active_locks WHERE run_id=?').get(runId)!,
+    }
+  } finally { db.close() }
+}
 
 describe('real Loader/profile production composition', () => {
   it('boots the shipped base profile keylessly with the opt-in stable autoresearch row and providers', async () => {
@@ -502,6 +525,164 @@ describe('real Loader/profile production composition', () => {
       await parent.dispose()
     }
   }, 30_000)
+
+  it.skipIf(process.platform !== 'linux')('times out a real fallback evaluator after direct 0/null exit but before descendant quiescence', async () => {
+    const marker = await exitingParentMarker()
+    const harness = await composeHarness()
+    active.push(harness)
+    const cwd = await repository(harness.root)
+    const observation = observeExitingEvaluators(harness.ctx, marker.path, true)
+    const deadline = operationDeadline(30_000)
+    const watchdog = controlWatchdog(137_123)
+    const runtime = await harness.ctx.loader.resolve('include').subtree!.import(join(packageRoot, 'lib/evaluator.js')) as typeof EvaluatorModule
+    const evaluation = { command: process.execPath, args: [exitedParentEvaluator, marker.path, 'always'] }
+    let pids: ExitedParentMarker | undefined
+    let persisted: Parameters<EvaluatorPersistence['persistAttemptOutcome']> | undefined
+    let settled = false
+    const pending = runtime.runEvaluator({
+      subprocess: harness.ctx.subprocess, worktree: cwd,
+      boundary: runtime.createEvaluatorBoundary(cwd, { evaluation, normalizedPolicySha256: 'a'.repeat(64) }),
+      evaluation, metricName: 'score', metricDirection: 'minimize',
+      timeoutMs: 137_123, terminationGraceMs: 30, maxStdoutBytes: 128, maxStderrBytes: 128,
+      artifactWriterFactory: () => EvaluatorArtifactWriter.mint(StateLayout.open(join(harness.root, 'timeout-artifacts')), 'run', 'baseline', 'attempt'),
+      persistence: {
+        persistSpawnIntent() {}, persistSpawnObserved() {},
+        persistAttemptOutcome(...facts) {
+          expect(pids).toBeDefined()
+          expect(processIsRunning(pids!.child)).toBe(false)
+          persisted = facts
+        },
+      },
+    })
+    void pending.then(() => { settled = true }, () => { settled = true })
+    try {
+      pids = await deadline.wait(Promise.race([marker.ready, pending.then(result => { throw new Error(`evaluator settled before descendant readiness: ${JSON.stringify(result)}`) })]))
+      const capture = observation.captures[0]!
+      expect(await deadline.wait(capture.handle.done)).toEqual({ exitCode: 0, signal: null })
+      await deadline.wait(capture.waiting)
+      expect(processIsRunning(pids.child)).toBe(true)
+      expect(settled).toBe(false)
+      expect(persisted).toBeUndefined()
+      expect(capture.mode).toBe('fallback')
+      watchdog.fire()
+      const result = await deadline.wait(pending)
+      expect(result).toMatchObject({ kind: 'failed', code: 'timeout', exit: { exitCode: 0, signal: null, timedOut: true, cancelled: false, processTreeQuiescent: true } })
+      expect(result.exit).not.toHaveProperty('providerPid')
+      expect(persisted?.[0]).toMatchObject({ kind: 'failed', code: 'timeout', exit: result.exit })
+      expect(processIsRunning(pids.child)).toBe(false)
+    } finally {
+      deadline.dispose()
+      const cleanup = operationDeadline(20_000)
+      try { await cleanup.wait(observation.drain()); await cleanup.wait(pending) }
+      finally { cleanup.dispose(); watchdog.restore(); observation.restore(); await marker.dispose() }
+    }
+  }, 60_000)
+
+  it.skipIf(process.platform !== 'linux').each(['job_kill', 'hmr'] as const)('awaits real exited-parent candidate tree cancellation through %s and preserves terminal recovery', async action => {
+    const marker = await exitingParentMarker()
+    const harness = await composeHarness({ autoresearchConfig: evaluatorConfig([exitedParentEvaluator, marker.path], 'minimize') })
+    active.push(harness)
+    const cwd = await repository(harness.root)
+    const before = await callerSnapshot(cwd)
+    const parent = await parentAgent(harness, cwd)
+    const terminal = observeJobSettlement(harness.ctx, parent.agent.id)
+    const observation = observeExitingEvaluators(harness.ctx, marker.path)
+    const { DurableTracker: NativeTracker } = await harness.ctx.loader.resolve('include').subtree!.import(join(packageRoot, 'lib/tracker.js')) as { DurableTracker: typeof DurableTracker }
+    const record = NativeTracker.prototype.recordAttemptOutcome
+    let pids: ExitedParentMarker | undefined
+    let persistedCancellation = false
+    const persistence = vi.spyOn(NativeTracker.prototype, 'recordAttemptOutcome').mockImplementation(function (...args) {
+      const checkpoint = args[1]
+      if (checkpoint.result.kind === 'failed' && checkpoint.result.code === 'cancelled') {
+        expect(pids).toBeDefined()
+        expect(processIsRunning(pids!.child)).toBe(false)
+        expect(checkpoint.facts).toMatchObject({ exitCode: 0, signal: null, cancelled: true, timedOut: false, processTreeQuiescent: true })
+        persistedCancellation = true
+      }
+      return record.apply(this, args)
+    })
+    const deadline = operationDeadline(60_000)
+    const operation = new AbortController()
+    const args = { ...request(cwd), objective: 'release accepted candidate', timeout_ms: 60_000 }
+    const execution = executeTool(harness.ctx, 'autoresearch', args, parent.agent, operation.signal)
+    let stopping: Promise<unknown> | undefined
+    try {
+      const started = await deadline.wait(execution)
+      expect(started.isError).toBe(false)
+      const ready = started.value as { jobId: string; runId: string; tracker: string; worktree: string }
+      expect(ready).toMatchObject({ kind: 'background', jobId: expect.any(String), runId: expect.any(String) })
+      pids = await deadline.wait(Promise.race([marker.ready, terminal.settled.then(event => { throw new Error(`job settled before descendant readiness: ${JSON.stringify(event)}`) })]))
+      expect(observation.captures).toHaveLength(2)
+      const capture = observation.captures[1]!
+      expect(await deadline.wait(capture.handle.done)).toEqual({ exitCode: 0, signal: null })
+      await deadline.wait(capture.waiting)
+      expect(processIsRunning(pids.child)).toBe(true)
+      expect(pids.score).toBe(0)
+      process.stdout.write(`exited-parent ${action}: normal provider selection=${capture.mode}, direct=0/null, descendant live\n`)
+      const running = inspectCancelledRun(ready.tracker, ready.runId)
+      const candidate = running.experiments.find(row => row.kind === 'candidate')!
+      expect((await run('git', ['rev-parse', 'HEAD'], { cwd: ready.worktree })).stdout.trim()).toBe(candidate.candidate_commit)
+      expect(candidate.candidate_commit).not.toBe(before.head)
+      expect(running.attempts.filter(attempt => attempt.outcome_json !== null)).toHaveLength(1)
+      if (action === 'job_kill') {
+        stopping = execute(harness, 'job_kill', { job_id: ready.jobId }, parent.agent).then(result => { expect(result.isError).toBe(false) })
+      } else stopping = harness.reloadAutoresearch()
+      await deadline.wait(stopping)
+      expect((await deadline.wait(terminal.settled)).job).toMatchObject({ id: ready.jobId, status: 'killed' })
+      expect(processIsRunning(pids.child)).toBe(false)
+      expect(persistedCancellation).toBe(true)
+      const output = await deadline.wait(execute(harness, 'job_output', { job_id: ready.jobId }, parent.agent))
+      expect(output.isError).toBe(false)
+      const cancelled = JSON.parse(stringProperty(output.value, 'text'))
+      expect(cancelled).toMatchObject({ runId: ready.runId, status: 'cancelled', quiescent: true, counts: { attempts: 2 }, best: { metric: 1, commit: before.head } })
+      const durable = inspectCancelledRun(ready.tracker, ready.runId)
+      expect(durable.run).toMatchObject({ state: 'cancelled', terminal_quiescent: 1, best_commit: before.head })
+      expect(durable.lock.released_at).not.toBeNull()
+      expect(durable.attempts).toHaveLength(2)
+      expect(durable.attempts.every(attempt => attempt.process_tree_quiescent === 1)).toBe(true)
+      const failed = durable.attempts.find(attempt => attempt.failure_code === 'cancelled')!
+      expect(failed).toMatchObject({ exit_code: 0, signal: null, timed_out: 0, process_tree_quiescent: 1, provider_pid: null })
+      expect(JSON.parse(String(failed.outcome_json))).toMatchObject({ kind: 'failed', code: 'cancelled' })
+      expect((await run('git', ['rev-parse', 'HEAD'], { cwd: ready.worktree })).stdout.trim()).toBe(before.head)
+      expect((await run('git', ['status', '--porcelain=v1', '--untracked-files=all'], { cwd: ready.worktree })).stdout).toBe('')
+      expect((await run('git', ['rev-parse', `refs/autoresearch/runs/${ready.runId}/accepted`], { cwd })).stdout.trim()).toBe(before.head)
+      const authority = new DatabaseSync(join(String(durable.run.git_common_dir), 'dsh-autoresearch-locks.sqlite'), { readOnly: true })
+      try {
+        expect(authority.prepare('SELECT * FROM active_locks WHERE run_id=?').all(ready.runId)).toEqual([])
+        expect(authority.prepare('SELECT * FROM controller_claims WHERE run_id=?').all(ready.runId)).toEqual([])
+      } finally { authority.close() }
+      expect(harness.ctx.agents.list().map(agent => agent.id)).toEqual([parent.agent.id])
+      expect(harness.ctx.jobs.list(parent.agent.id).every(job => !['running', 'stopping'].includes(job.status))).toBe(true)
+      expect(harness.ctx.tools.schemas().filter(tool => tool.name === 'autoresearch')).toHaveLength(1)
+      expect((await assembledPrompt(harness.ctx)).match(/Use autoresearch only/g)).toHaveLength(1)
+      const { run_tag: _tag, evaluator_id: _evaluator, mode: _mode, ...stable } = args
+      const resumed = await deadline.wait(execute(harness, 'autoresearch', { ...stable, resume_run_id: ready.runId, mode: 'foreground' }, parent.agent))
+      expect(resumed.isError).toBe(false)
+      expect(resumed.value).toMatchObject({ kind: 'foreground', run: cancelled })
+      if (!resumed.value || typeof resumed.value !== 'object' || !('run' in resumed.value)) throw new Error('terminal resume did not return its canonical run')
+      expect(resumed.value.run).toEqual(cancelled)
+      const replay = inspectCancelledRun(ready.tracker, ready.runId)
+      expect(replay.attempts).toEqual(durable.attempts)
+      expect(replay.experiments).toEqual(durable.experiments)
+      expect(observation.captures).toHaveLength(2)
+      expect(await callerSnapshot(cwd)).toEqual(before)
+    } finally {
+      deadline.dispose()
+      const cleanup = operationDeadline(20_000)
+      try {
+        await cleanup.wait(observation.drain())
+        operation.abort()
+        await cleanup.wait(parent.dispose())
+        await cleanup.wait(Promise.all([execution, stopping]))
+      } finally {
+        cleanup.dispose()
+        observation.restore()
+        persistence.mockRestore()
+        terminal.dispose()
+        await marker.dispose()
+      }
+    }
+  }, 90_000)
 })
 
 async function activationFailure(options: Parameters<typeof composeHarness>[0]): Promise<string> {
