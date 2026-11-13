@@ -16,19 +16,21 @@
 5. Merge #21 first, replay only #22 changes onto updated master after squash, retarget #22 to master, rerun relevant/full final gates and independent review as needed, then merge #22. Both issues close with accurate evidence and final master contains both fixes.
 
 ## Plan
-### Branch and integration strategy — firm; unreviewed
+### Branch and integration strategy — firm; reviewed @cc10183 (W2 report)
 Use `fix/21-evaluator-quiescence` then `fix/22-background-summary`. Repository permits squash merge only. After first merge, rebase second with explicit old-parent boundary to avoid replaying squashed #21 commits. No direct push to master; gh merge is explicitly requested. Historical implementation PLAN/CHECKLIST cover a closed older goal, not these issues; no competing active goal ledger found.
-### Fix designs and verification — firm; unreviewed
-Adopt [design sections 3 and 4](issues-21-22-design.md) with D5 superseding strict background admission in section 4.2: #21 extends existing lifetime finally through tree quiescence without changing error precedence; independent direct/tree gates plus real-provider timeout, job_kill and HMR regressions. #22 selects exact full small result or mandatory compact status/runId/tracker/best/counts/target/detailsOmitted envelope, with explicit minimum-envelope floor and bounded UTF-8/status framing. No new schema/migration/admission subsystem. Verify true job_output content and durable/full foreground resume. Independent PLAN-REVIEW precedes implementation; run code slices serially to avoid generated-lib races.
-### Final integration — firm; unreviewed
+### #21 fix design and verification — firm; reviewed @cc10183 (W2 report)
+Adopt [design §3](issues-21-22-design.md) and [independent review](issues-21-22-plan-review.md): extend existing lifetime finally through tree quiescence without changing error precedence; independent direct/tree gates plus real-provider timeout, job_kill and HMR regressions. Preserve original deadline, direct exit facts, awaited teardown and lock safety. Implement sequentially; never rebuild shared lib while another gate uses it.
+### #22 fix design and verification — unknown-until(T1 supported transport mechanism reviewed); unreviewed
+User-approved summary-floor contract D5 is firm: exact full small result or compact status/runId/tracker/best/counts/target/detailsOmitted envelope; no admission/schema/migration. W2 identified Jobs captures outputLimitBytes at registration and has no updater. Resolve concrete supported bounded transport mechanism before W5, covering actual model-facing job_output UTF-8/framing and preserving failed/killed behavior.
+### Final integration — firm; reviewed @cc10183 (W2 report)
 Independent review each slice and whole union; coordinator runs project gates. Publish stack before first merge. After squash/rebase, verify final branch and merge second PR, fast-forward local master and complete accounting.
 
 ## Work items
 | Item | Kind | AC | Status | Evidence |
 | --- | --- | --- | --- | --- |
 | W1 resolve design and test plan | design | 1–3 | done | [Planning output](issues-21-22-design.md); concrete tests, provider seam and pnpm wrapper proof; user resolved budget tradeoff in D5 |
-| W2 independent plan review | review | 1–5 | active | [Independent plan reviewer](t3-thread://v2/97c551f1-aa14-49f0-a159-f347ef586a04/thread:delegated-task:command%3Amcp%3A42d2581d-e742-4045-a977-ea5a59aa49df%3Adelegate-task%3Acac2163a-57ec-46ea-8fa8-31c63051192f); output issues-21-22-plan-review.md |
-| W3 implement and verify #21 | impl | 1,3 | todo | |
+| W2 independent plan review | review | 1–5 | done | [Review](issues-21-22-plan-review.md): #21/branch/integration approved; #22 T1 explicitly unfirm, covered by W11/W12 |
+| W3 implement and verify #21 | impl | 1,3 | active | Delegating bounded lifecycle implementation; gate must finish before shared rebuild/tests |
 | W4 independently review #21 | review | 1,3 | todo | |
 | W5 implement and verify #22 | impl | 2,3 | todo | |
 | W6 independent whole-stack review | review | 1–3 | todo | |
@@ -36,6 +38,8 @@ Independent review each slice and whole union; coordinator runs project gates. P
 | W8 merge #21, replay/retarget #22 | impl | 5 | todo | |
 | W9 final gates/review and merge #22 | review | 3,5 | todo | |
 | W10 explain baseline gate failure and establish valid full-gate invocation | research | 3 | active | [Baseline report](issues-21-22-baseline.md): nested worker contention plausible, unproven. Serialized full release wrapper verification running; no deadlines/assertions changed |
+| W11 resolve #22 supported bounded transport integration | design | 2 | todo | T1 from W2; no private Jobs mutation or absent setter |
+| W12 independently review #22 transport mechanism | review | 2 | todo | Must pass before W5 |
 
 ## Decision log
 - D1: New ledger selected because existing docs/plan/PLAN.md and CHECKLIST.md explicitly cover closed historical implementation; diagnostic issue bodies #21/#22 are references, not live checklists. Keep historical artifacts unchanged.
@@ -44,12 +48,14 @@ Independent review each slice and whole union; coordinator runs project gates. P
 - D4: Adopt inherited `VITEST_MAX_WORKERS=1` plus `--maxWorkers=1 --no-file-parallelism` for constrained local gates; unlike outer CLI flags alone the environment also reaches nested Vitest. Preserve all tests/coverage/deadlines. [Evidence and limits](issues-21-22-baseline.md). Reserve two heavy-gate slots for the finite verification rather than terminating unrelated processes.
 - D5 (user-approved replan): Asked via form how cap 1 should coexist with required summary fields. Options: mandatory-envelope floor vs strict pre-run background admission. User explicitly selected `mandatory_summary_floor`. Supersedes the exact-config-cap assumption in AC2 and design §4.2 recommendation; keep bounded complete required summary even if tiny cap is exceeded, no new rejection/identity-preflight changes. Preserve full small results and derive finite transport allowance for actual output plus UTF-8/framing. W5/W6/W9 cover revised AC2; no existing code to remove/rewrite. Plan diff: adopt compact serializer, remove proposed admission subsystem, keep all canonical/foreground guarantees. Revised sections unreviewed until W2.
 - D6: Revise D4 slot reservation only: the two-slot request had not launched because an unrelated holder occupies one slot. Cancelled only our queued request, then launched the same serialized complete wrapper in the free single capped slot. Do not block progress indefinitely waiting for another session or terminate its work; keep VITEST_MAX_WORKERS=1, deadlines/assertions and memory isolation unchanged. Record contention as remaining uncertainty, not gate waiver.
+- D7: Accept W2's independent approval for #21 and branch/merge strategy; implement #21 now. T1 is a concrete design unknown, not reason to alter user-approved floor. Split plan section and add W11/W12; W5 remains todo until reviewed supported mechanism. No #22 code exists to revert.
 
 ## Findings and open questions
 - F1: Resolved: `COREPACK_DEFAULT_TO_LATEST=0 corepack pnpm` selects 11.7.0 without global changes. Coordinator baseline typecheck passed (7.03 s) and build passed. Status: closed.
 - F2: #6 previously fixed canonical size rejection; #22 must not reinstate it. Status: acceptance constraint, closed.
 - F3: Windows and rc3 migration are out of scope; do not conflate them with these fixes. Status: scope boundary, closed.
 - F4: Baseline coverage failed before functional edits: 674 passed, 10 skipped, one release.spec.ts nested lifecycle case timed out at 45 s; full suite 496.66 s. [Read-only investigation](issues-21-22-baseline.md) narrows this to possible parallel contention or late teardown, not a proven prepare hang; no package contamination found. Triage Fix (verification prerequisite); verify inherited `VITEST_MAX_WORKERS=1` with full unchanged release wrapper, then full gates at implementation checkpoint. Do not suppress tests or increase deadlines.
+- F5/T1: Jobs captures transport limit before result exists; dynamic completion-time setter does not exist. Triage Replan; addressed by D7 plan split, W11/W12. Status: open design boundary; does not block #21.
 
 ## Iteration log
 - I1: Assessed clean source at 75ecd4b, owned prior AGENTS notes, historical plans, one unrelated open PR #16; verified EveGoodEvening and squash-only repo. Choose durable ledger and delegated design before implementation; reject parallel code workers due shared runtime artifacts. Plan changes if design review reveals missing contract or impossible bound.
@@ -60,3 +66,4 @@ Independent review each slice and whole union; coordinator runs project gates. P
 - I6: Start independent PLAN-REVIEW of AC, squash/rebase boundaries, concrete lifecycle/summary feasibility and current design artifact if available. Research/review outputs are disjoint; no implementation authorizes yet. Running gate owns source/build state until completion.
 - I7: W1 completed and exposed mathematical cap/required-fields conflict. Obtain explicit user choice instead of silently weakening AC2; adopt mandatory-summary floor (D5), reject admission complexity, send changed contract and complete design to independent reviewer. No implementation yet.
 - I8: Resource assessment found the two-slot gate queued behind an unrelated holder (one free slot, 6.3 GiB available). Cancel our queued request and use one gated slot for the unchanged serialized wrapper. Reject killing others or dropping test assertions. Independent reviewer is considering D5.
+- I9: W2 approves #21 and integration, rejects unimplementable dynamic transport assumption for #22. Start bounded #21 implementation, resolve #22 T1 via separate design worker on disjoint artifact. No implementation of unreviewed #22 section.
