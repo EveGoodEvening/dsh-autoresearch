@@ -1,6 +1,6 @@
 # Issues 21–22 stacked fixes ledger
 
-Status: complete. Both PRs merged sequentially and both Issues closed. This final accounting is committed on retained `fix/22-background-summary`, not claimed to be on `master` (D9).
+Status: fixes complete (both PRs merged and Issues closed); user-requested patch release active on `master` under D11. Completed accounting from the retained fix branch has been integrated into master by ledger-only cherry-picks e42e488/bd08c33.
 
 ## Control summary
 - Adaptive loop: assess evidence and repository state, choose the next bounded move, delegate, evaluate, update this ledger.
@@ -17,6 +17,7 @@ Status: complete. Both PRs merged sequentially and both Issues closed. This fina
 3. Both fixes are documented without unrelated changes, dependency upgrades, version bumps or publishing; independently reviewed and tested, with full project gates green.
 4. Dedicated branches and two stacked PRs exist: #21 PR targets master; #22 PR initially targets #21 branch. Use verified EveGoodEvening GH identity for all gh operations.
 5. Merge #21 first, replay only #22 changes onto updated master after squash, retarget #22 to master, rerun relevant/full final gates and independent review as needed, then merge #22. Both issues close with accurate evidence and final master contains both fixes.
+6. Release the merged fixes from master as the next unpublished patch (0.0.7): matching package version and CHANGELOG entry, reviewed/verified release metadata and packed artifact, committed/pushed master plus immutable matching v0.0.7 tag, actual publish workflow success and fresh exact-version/dist-tag/tarball-integrity availability evidence. Use EveGoodEvening; no dependency/source changes or tag rewriting.
 
 ## Plan
 ### Branch and integration strategy — firm; reviewed @cc10183 (W2 report)
@@ -27,6 +28,8 @@ Adopt [design §3](issues-21-22-design.md) and [independent review](issues-21-22
 Adopt [transport design](issues-21-22-transport.md) only as corrected by [W12](issues-21-22-transport-review.md): exact full small output or required compact summary floor; owner-lived exact-job/owner `tools/post-execute` adapter registered without prepend; when framing/UTF-8 exceeds Jobs cap, propose two substantive JSON/status blocks through supported multi-block policy contract. Preserve Host spill/redaction/block/value/cancellation decisions and existing failed/killed/notice caps. No admission/schema/migration/private registry change. Stock policy evaluates proposed shape before finalization; real model-facing job_output, policy ordering and canonical resume proofs required.
 ### Final integration — firm; reviewed @cc10183 (W2 report)
 Independent review each slice and whole union; coordinator runs project gates. Publish stack before first merge. After squash/rebase, verify final branch and merge second PR, fast-forward local master and complete accounting.
+### Patch release extension — firm; single-slice proportionality, independent diff review before tagging
+User explicitly requests master/version/CHANGELOG/tag push. Worker edits metadata only; separate reviewer verifies diff and release safety. Coordinator checks package/type/build/packed metadata locally and relies on the real tag workflow's full coverage/installed smoke as final release gates, observes the actual run and registry artifact, then records outcome. Existing immutable tags remain untouched. No third fix PR is required for this explicitly authorized release commit.
 
 ## Work items
 | Item | Kind | AC | Status | Evidence |
@@ -44,6 +47,11 @@ Independent review each slice and whole union; coordinator runs project gates. P
 | W11 resolve #22 supported bounded transport integration | design | 2 | done | [Transport design](issues-21-22-transport.md), adopted only with independent W12 non-prepend correction D8 |
 | W12 independently review #22 transport mechanism | review | 2 | done | [W12](issues-21-22-transport-review.md): accept viable supported mechanism with required non-prepend ordering correction; adopted D8, regression required in W5/W6 |
 | W13 fix #21 watchdog regression seam R1 | fix | 1,3 | done | Exact handle clear respected; fixed lifecycle4 targeted passed2.94s; unchanged consumer against isolated75ecd4b failed expected2.38s; project/helper typecheck pass. [Evidence](/root/dsh-r1-proof-3CgaV9/results.json) |
+| W14 prepare package version and release notes | impl | 6 | active | Delegate metadata-only bump0.0.6→0.0.7 and Unreleased→v0.0.7, no source/dependency change |
+| W15 independent release diff review | review | 6 | todo | Different worker from W14 |
+| W16 validate release metadata/build/packed artifact | review | 6 | todo | Narrow local gates; tag workflow supplies full coverage/installed smoke after tag |
+| W17 commit/push master and matching immutable tag | impl | 6 | todo | User-authorized master release; exact EveGoodEvening identity |
+| W18 observe publish workflow and verify npm artifact | review | 6 | todo | Actual Actions success plus fresh registry version/tag/download integrity |
 
 ## Decision log
 - D1: New ledger selected because existing docs/plan/PLAN.md and CHECKLIST.md explicitly cover closed historical implementation; diagnostic issue bodies #21/#22 are references, not live checklists. Keep historical artifacts unchanged.
@@ -56,6 +64,7 @@ Independent review each slice and whole union; coordinator runs project gates. P
 - D8: Adopt W12 minimal correction to W11: register adapter without prepend so enclosing stock spill policy prices actual two-block shape, not earlier one-block content. User's floor does not override independent Host policy. Clarify AC2 lossless transport applies under compatible accepting policies; denial/spill/redaction must win. Preserve all ordinary stock success proof and add spill-threshold regression. No implementation exists to remove; W5/W6 cover corrected reviewed recipe. T1 design resolved, policy-order finding remains implementation acceptance.
 - D9: [Final independent review](issues-21-22-final-review.md#post-merge-accounting-decision) approves append-only post-merge accounting: after actual PR24 merge/issue closure/master proof, fast-forward local master, then append final ledger-only commit on retained fix/22-background-summary history and push only that branch using exact expected remote OID. No future event marked done early, no third PR, no direct master push or unnecessary post-merge rebase. Remote master retains pre-merge ledger plus both fixes; retained dedicated branch is authoritative final-accounting location. No code/test changes or gate waiver.
 - D10: GitHub `delete_branch_on_merge=true` auto-deleted the fix22 remote after PR24's squash, despite no explicit delete request. The expected-old-OID final-accounting push correctly failed stale-info. Read-only ls-remote plus authenticated ref API confirmed absence (404), not a competing update. Recreated only the same owned dedicated ref using an expected-absence lease, preserving its append-only history and final ledger commit4a347ff. No new PR, settings change, direct master push or source change. This is D9's safe response to externally changed ref state.
+- D11 (explicit user release extension): User now requests version bump/CHANGELOG/tag push on master to trigger publication. Supersedes prior no-version/no-publish restriction only for the new AC6 release slice; original AC1–5/W1–W13 remain verified done. Registry latest is0.0.6 and fetched tags end atv0.0.6, so choose next patch0.0.7. Reuse this ledger, integrate completed fix accounting by ledger-only cherry-picks e42e488/bd08c33, delegate metadata edits and independent review. Preserve source/dependency bytes and immutable tags. One bounded slice invokes proportionality: no separate design phase/PLAN-REVIEW, independent diff review is release whole-change review. Local narrow metadata/build/pack proof plus actual tag CI full gates and registry verification required; no speculative publication claim.
 
 ## Findings and open questions
 - F1: Resolved: `COREPACK_DEFAULT_TO_LATEST=0 corepack pnpm` selects 11.7.0 without global changes. Coordinator baseline typecheck passed (7.03 s) and build passed. Status: closed.
@@ -94,7 +103,7 @@ Independent review each slice and whole union; coordinator runs project gates. P
 - I26: Expected-head squash merged PR24 as8dece8150293b12e6334451c837f64535a91fd13 at14:23:48Z after final green gates/review. Actual issue21closed13:57:41Z and issue22closed14:23:49Z verified via authenticated GH API. Fetched remote master, proved complete tree equals merge-head52d13af9307828df4a8097d62f97a1f401df35a2 and first squash is ancestor, fast-forwarded local master, returned to retained fix22 for truthful append-only final ledger. No implementation changes or third PR/direct master push.
 
 - I27: Final ledger committed4a347ff; its first publication was safely rejected because GitHub auto-deleted the merged branch. Verified configured auto-delete and actual ref absence, then recreated the same owned fix22 branch with expected-absence guard. Final accounting remains append-only on that dedicated branch; both merged PRs/master unchanged. Record this observed publication outcome and commit the ledger-only note.
-## Final acceptance gate
+## Fix-scope final acceptance gate (AC1–5; completed before release extension)
 
 | AC | Verified completion evidence |
 | --- | --- |
@@ -106,7 +115,10 @@ Independent review each slice and whole union; coordinator runs project gates. P
 
 - No open decisions; no open Fix/Replan/Ask findings; all firm sections reviewed; no unknown-until section remains.
 - No dropped or deferred work. D5 explicitly records the only user-approved AC contract adjustment; D7/D8 record resolved design replans with covering work items.
-- Work items not done: **none**. All W1–W13 are done; no blocker or deferral claimed.
+- Work items not done at fix-scope closure: **none** (W1–W13). D11 subsequently adds active release work W14–W18 under AC6; do not treat this historical closure as release completion.
 - Final independent whole-change REVIEW-LOOP converged: [final report](issues-21-22-final-review.md).
 - Final source verification: `pnpm peers check` → `pnpm run typecheck` → `pnpm run build` → `pnpm exec vitest run --coverage --maxWorkers=1 --no-file-parallelism` with inherited `VITEST_MAX_WORKERS=1` → sequential `pnpm run release:smoke`; all passed under heavy-gate. Existing10 skips unchanged, no deadlines/coverage weakened.
 - Final accounting location: this file on retained `fix/22-background-summary` (D9). Remote master contains both code fixes and the truthful pre-merge ledger snapshot; the post-merge ledger-only commit is deliberately not represented as a third merged PR.
+
+## Release extension iterations
+- R1: User explicitly authorizes master release/tag publication; verified clean checkout, fetched master/tags, registry latest0.0.6, authenticated EveGoodEvening. Switched master and integrated prior final-accounting ledger commits without source changes. Choose0.0.7 metadata-only slice with implementer/reviewer separation and actual Actions/registry proof; no tag rewriting or dependency refresh.
