@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.0.9
+
+- No code changes from v0.0.8.
+
 ## v0.0.8
 
 ### Fixed
