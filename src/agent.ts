@@ -250,6 +250,16 @@ function boundedHistoryEntry(entry: ProposalHistoryEntry): unknown {
   return { ordinal: entry.ordinal, experimentId: entry.experimentId, state: entry.state, ...(entry.candidateCommit === undefined ? {} : { candidateCommit: entry.candidateCommit }), ...(entry.metric === undefined ? {} : { metric: entry.metric }), ...(entry.decision === undefined ? {} : { decision: entry.decision }), ...(entry.failureCode === undefined ? {} : { failureCode: entry.failureCode }), untrustedClaims, hostFacts, artifacts: entry.artifacts }
 }
 
+/**
+ * DSH 0.2.2-rc.1/rc.2 record runtime child ownership through
+ * `CreateAgentOptions.parentAgent` (consumed by the registry's `isOwnedBy()`/`roots()`).
+ * DSH 0.2.2-rc.3 removed that option and the ownership relation; its factory ignores
+ * the extra key. Typed as `object` so the spread compiles against both API shapes.
+ */
+function legacyRuntimeOwner(parent: Agent): object {
+  return { parentAgent: parent }
+}
+
 function resolvedRoute(request: ProposalAgentRequest, childDepth: number): AgentOptions {
   const requested: AgentOptions = {
     ...(request.config.provider === undefined ? {} : { provider: request.config.provider }),
@@ -328,7 +338,7 @@ export async function requestProposal(ctx: Context, request: ProposalAgentReques
   try {
     handle = await ctx.agents.create({
       sessionId,
-      parentAgent: request.parent,
+      ...legacyRuntimeOwner(request.parent),
       meta,
       agentOptions,
       signal: request.signal,
