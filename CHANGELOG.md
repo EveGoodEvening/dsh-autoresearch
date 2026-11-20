@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.0.8
+
+### Fixed
+
+- Compile against the newer DSH 0.2.2 agent API while preserving runtime child
+  ownership on DSH 0.2.2-rc.1 and rc.2. The declared support range is unchanged.
+
 ## v0.0.7
 
 ### Fixed
